@@ -1,5 +1,5 @@
 """
-Все 7 торговых стратегий.
+Все 9 торговых стратегий.
 Каждая имеет систему фильтров (math edge) + breakeven + trailing stop.
 Индикаторы — pandas_ta (или ручной расчёт где нужно).
 """
@@ -8,6 +8,7 @@ import numpy as np
 import pandas_ta as ta
 from typing import Optional
 from .base import BaseStrategy, TradingSignal
+from .trend_fib import TrendMomentumStrategy, TrendFibonacciStrategy
 
 
 # ============================================================
@@ -508,4 +509,6 @@ ALL_STRATEGIES = {
     "S5": ScalperGridStrategy,
     "S6": TrendFollowerStrategy,
     "S7": MultiConfirmStrategy,
+    "S8": TrendMomentumStrategy,       # тренд роста/падения (HH/HL + EMA-стек + ADX)
+    "S9": TrendFibonacciStrategy,      # тренд + уровни Фибоначчи (38.2/50/61.8%)
 }

@@ -44,6 +44,7 @@ class MLTrainer:
         feature_columns: List[str],
         target_column: str = "label",
         n_splits: int = 5,
+        sample_weight: Optional[np.ndarray] = None,
     ) -> Dict:
         """
         Обучение модели с walk-forward валидацией.
@@ -102,8 +103,9 @@ class MLTrainer:
             if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
                 continue
 
+            sw_fold = sample_weight[train_idx] if sample_weight is not None else None
             model = xgb.XGBClassifier(**hyperparams)
-            model.fit(X_train, y_train, verbose=False)
+            model.fit(X_train, y_train, sample_weight=sw_fold, verbose=False)
 
             preds = model.predict(X_test)
             proba = model.predict_proba(X_test)[:, 1]
@@ -119,7 +121,7 @@ class MLTrainer:
 
         # Финальная модель на всех данных + калибровка
         final_model = xgb.XGBClassifier(**hyperparams)
-        final_model.fit(X, y, verbose=False)
+        final_model.fit(X, y, sample_weight=sample_weight, verbose=False)
 
         # Калибровка вероятностей (важно для разумных threshold'ов)
         try:

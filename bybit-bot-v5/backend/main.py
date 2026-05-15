@@ -132,7 +132,7 @@ state = BotState()
 # Инициализация стратегий
 # ============================================================
 def init_strategies():
-    """Создание всех 7 стратегий с дефолтными символами."""
+    """Создание всех 9 стратегий с дефолтными символами."""
     symbol_map = {
         "S1": "BTCUSDT",
         "S2": "ETHUSDT",
@@ -141,9 +141,11 @@ def init_strategies():
         "S5": "DOGEUSDT",
         "S6": "XRPUSDT",
         "S7": "BTCUSDT",
+        "S8": "ETHUSDT",    # Trend Momentum
+        "S9": "BTCUSDT",    # Trend + Fibonacci
     }
     for sid, cls in ALL_STRATEGIES.items():
-        state.strategies[sid] = cls(symbol=symbol_map[sid])
+        state.strategies[sid] = cls(symbol=symbol_map.get(sid, "BTCUSDT"))
     logger.info(f"Инициализированы стратегии: {list(state.strategies.keys())}")
 
     # Загрузка активных ML моделей (если есть)

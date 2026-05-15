@@ -135,6 +135,7 @@ class EnsembleTrainer:
         strategy_id: str,
         feature_columns: List[str],
         target_column: str = "label",
+        sample_weight: Optional[np.ndarray] = None,
     ) -> Dict:
         if not SKLEARN_AVAILABLE:
             return {"success": False, "error": "sklearn недоступен"}
@@ -194,7 +195,8 @@ class EnsembleTrainer:
                 ensemble = VotingClassifier(estimators=[
                     (n, m.__class__(**m.get_params())) for n, m in estimators
                 ], voting="soft")
-                ensemble.fit(X_train, y_train)
+                sw_fold = sample_weight[train_idx] if sample_weight is not None else None
+                ensemble.fit(X_train, y_train, sample_weight=sw_fold)
                 preds = ensemble.predict(X_test)
                 proba = ensemble.predict_proba(X_test)[:, 1]
                 cv["accuracy"].append(accuracy_score(y_test, preds))
@@ -208,7 +210,7 @@ class EnsembleTrainer:
 
         # Финальная модель
         final = VotingClassifier(estimators=estimators, voting="soft")
-        final.fit(X, y)
+        final.fit(X, y, sample_weight=sample_weight)
         # Калибровка
         try:
             calibrated = CalibratedClassifierCV(final, cv=3, method="isotonic")
