@@ -35,7 +35,7 @@ class MLTrainer:
     def __init__(self, models_dir: str = "data/models"):
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.min_samples_for_training = 100  # минимум для обучения
+        self.min_samples_for_training = 300  # минимум для обучения
 
     def train(
         self,
@@ -77,8 +77,8 @@ class MLTrainer:
         if wr < 0.1 or wr > 0.9:
             logger.warning(f"⚠️ Сильный дисбаланс классов (WR={wr:.2f})")
 
-        # Walk-forward CV
-        tscv = TimeSeriesSplit(n_splits=min(n_splits, max(2, len(X) // 50)))
+        # Walk-forward CV — минимум 3 фолда, 1 фолд на каждые 100 примеров
+        tscv = TimeSeriesSplit(n_splits=min(n_splits, max(3, len(X) // 100)))
 
         cv_scores = {"accuracy": [], "precision": [], "recall": [], "f1": [], "roc_auc": []}
 

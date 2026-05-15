@@ -40,6 +40,9 @@ class BaseStrategy(ABC):
     ID: str = ""
     NAME: str = ""
     DESCRIPTION: str = ""
+    # Список предпочтительных рыночных режимов (пустой = все режимы).
+    # Значения: "flat", "uptrend", "downtrend", "volatile"
+    REGIME_PREFERENCE: list = []
 
     def __init__(
         self,

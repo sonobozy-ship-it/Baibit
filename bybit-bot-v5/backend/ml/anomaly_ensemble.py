@@ -146,8 +146,8 @@ class EnsembleTrainer:
         except ImportError:
             return {"success": False, "error": "sklearn metrics недоступны"}
 
-        if len(training_data) < 100:
-            return {"success": False, "error": f"Мало данных: {len(training_data)}"}
+        if len(training_data) < 300:
+            return {"success": False, "error": f"Мало данных: {len(training_data)} (нужно ≥300)"}
 
         if "timestamp" in training_data.columns:
             training_data = training_data.sort_values("timestamp").reset_index(drop=True)

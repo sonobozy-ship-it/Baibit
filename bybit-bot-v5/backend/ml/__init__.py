@@ -9,6 +9,7 @@ from .regime_classifier import RegimeClassifier
 from .auto_optimizer import AutoOptimizer, OPTUNA_AVAILABLE
 from .drift_monitor import DriftMonitor, ThresholdOptimizer
 from .anomaly_ensemble import AnomalyDetector, EnsembleTrainer
+from .continuous_trainer import ContinuousTrainer
 
 __all__ = [
     "FeatureExtractor",
@@ -21,6 +22,7 @@ __all__ = [
     "ThresholdOptimizer",
     "AnomalyDetector",
     "EnsembleTrainer",
+    "ContinuousTrainer",
     "ML_AVAILABLE",
     "OPTUNA_AVAILABLE",
 ]

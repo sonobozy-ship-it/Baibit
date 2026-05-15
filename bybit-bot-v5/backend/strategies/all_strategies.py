@@ -17,6 +17,7 @@ class EMACrossoverStrategy(BaseStrategy):
     ID = "S1"
     NAME = "EMA CROSSOVER"
     DESCRIPTION = "EMA 9/21 cross + RSI зона + объём × 1.5 + свеча подтверждения"
+    REGIME_PREFERENCE = ["uptrend", "downtrend"]  # работает в трендовых режимах
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -84,6 +85,7 @@ class BollingerBandsStrategy(BaseStrategy):
     ID = "S2"
     NAME = "BOLLINGER BANDS"
     DESCRIPTION = "BB squeeze + RSI экстремум + объём + наклон 50EMA"
+    REGIME_PREFERENCE = ["volatile", "flat"]  # mean-reversion в боковике и при высокой волатильности
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -152,6 +154,7 @@ class RSIDivergenceStrategy(BaseStrategy):
     ID = "S3"
     NAME = "RSI DIVERGENCE"
     DESCRIPTION = "Дивергенция RSI H4 + MACD cross + структура рынка"
+    REGIME_PREFERENCE = []  # работает во всех режимах
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -222,6 +225,7 @@ class BreakoutHunterStrategy(BaseStrategy):
     ID = "S4"
     NAME = "BREAKOUT HUNTER"
     DESCRIPTION = "Пробой + ретест уровня + объём × 2 + ATR фильтр"
+    REGIME_PREFERENCE = ["uptrend", "downtrend", "volatile"]  # нужно движение
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -281,6 +285,7 @@ class ScalperGridStrategy(BaseStrategy):
     ID = "S5"
     NAME = "SCALPER GRID"
     DESCRIPTION = "Сетка в боковике + ATR < порога + низкая волатильность"
+    REGIME_PREFERENCE = ["flat"]  # только в боковике
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -305,7 +310,7 @@ class ScalperGridStrategy(BaseStrategy):
 
         # Боковик: ATR низкий, EMA20 и EMA50 близко
         atr_pct = last["atr"] / last["close"] * 100
-        low_atr = atr_pct < 1.5
+        low_atr = atr_pct < 2.0  # расширен с 1.5% до 2.0% для больше сигналов
         flat_ema = abs(last["ema_20"] - last["ema_50"]) / last["close"] * 100 < 0.5
         bbw = (last["BBU_20_2.0"] - last["BBL_20_2.0"]) / last["close"]
         narrow_bb = bbw < 0.05
@@ -344,6 +349,7 @@ class TrendFollowerStrategy(BaseStrategy):
     ID = "S6"
     NAME = "TREND FOLLOWER"
     DESCRIPTION = "ADX > 25 + Supertrend + EMA200 выше + HTF согласован"
+    REGIME_PREFERENCE = ["uptrend", "downtrend"]  # только тренд
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -401,7 +407,8 @@ class TrendFollowerStrategy(BaseStrategy):
 class MultiConfirmStrategy(BaseStrategy):
     ID = "S7"
     NAME = "MULTI-CONFIRM"
-    DESCRIPTION = "6 независимых индикаторов согласованы → максимальный WR"
+    DESCRIPTION = "≥5 из 6 независимых индикаторов согласованы → высокий WR"
+    REGIME_PREFERENCE = []  # работает во всех режимах (6 фильтров сами фильтруют)
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -457,11 +464,19 @@ class MultiConfirmStrategy(BaseStrategy):
             "htf_trend": htf_bear,
         }
 
-        long_setup = all(long_filters.values())
-        short_setup = all(short_filters.values())
+        # Требуем минимум 5 из 6 фильтров (вместо всех 6) — больше сигналов
+        REQUIRED_SCORE = 5
+        long_score = sum(long_filters.values())
+        short_score = sum(short_filters.values())
+        long_setup = long_score >= REQUIRED_SCORE
+        short_setup = short_score >= REQUIRED_SCORE
 
         if not (long_setup or short_setup):
             return None
+
+        # Если оба набирают нужный счёт — выбираем тот у которого выше
+        if long_setup and short_setup:
+            long_setup = long_score >= short_score
 
         side = "BUY" if long_setup else "SELL"
         entry = float(last["close"])
@@ -472,10 +487,12 @@ class MultiConfirmStrategy(BaseStrategy):
             sl = entry * (1 + self.stop_loss_pct / 100)
             tp = entry * (1 - self.take_profit_pct / 100)
 
+        score = long_score if long_setup else short_score
+        confidence = 0.80 + 0.03 * (score - REQUIRED_SCORE)  # 0.80 при 5/6, 0.83 при 6/6
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.85,
+            action=side, symbol=self.symbol, confidence=round(confidence, 2),
             entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"MULTI-CONFIRM {side} — все 6 фильтров согласованы",
+            reason=f"MULTI-CONFIRM {side} — {score}/6 фильтров согласованы",
             filters_passed=long_filters if long_setup else short_filters,
         )
 

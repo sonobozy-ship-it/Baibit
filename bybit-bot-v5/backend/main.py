@@ -34,6 +34,7 @@ from ml import (
     FeatureExtractor, MLDataStore, MLTrainer, MLPredictor,
     RegimeClassifier, AutoOptimizer, ML_AVAILABLE, OPTUNA_AVAILABLE,
     DriftMonitor, ThresholdOptimizer, AnomalyDetector, EnsembleTrainer,
+    ContinuousTrainer,
 )
 # News & Sentiment
 from news import NewsManager, background_news_loop
@@ -112,6 +113,10 @@ class BotState:
         self.trading_loop_lock = asyncio.Lock()
         self.trading_loop_task: Optional[asyncio.Task] = None
         self.news_loop_task: Optional[asyncio.Task] = None
+        self.auto_train_task: Optional[asyncio.Task] = None
+
+        # Continuous trainer — инициализируется после init_strategies
+        self.continuous_trainer: Optional[ContinuousTrainer] = None
 
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
@@ -150,6 +155,49 @@ def init_strategies():
         else:
             logger.info("🤖 ML модели не найдены — будет собирать данные для будущего обучения")
 
+    # Инициализация continuous trainer
+    state.continuous_trainer = ContinuousTrainer(
+        ml_store=state.ml_store,
+        ml_trainer=state.ml_trainer,
+        ml_ensemble_trainer=state.ml_ensemble_trainer,
+        ml_predictor=state.ml_predictor,
+        feature_extractor=state.feature_extractor,
+        drift_monitor=state.drift_monitor,
+        db_pool=state.db_pool,
+    )
+    logger.info("🔄 ContinuousTrainer инициализирован (порог: 300 сделок)")
+
+
+# ============================================================
+# Авто-обучение (фоновая задача)
+# ============================================================
+async def auto_train_loop():
+    """Проверяет и запускает переобучение каждые 30 минут."""
+    logger.info("🔄 Auto-train loop запущен (интервал: 30 мин, порог: 300 сделок)")
+    while True:
+        await asyncio.sleep(30 * 60)
+        if not state.ml_enabled or not ML_AVAILABLE or not state.continuous_trainer:
+            continue
+        try:
+            results = await state.continuous_trainer.maybe_retrain(list(state.strategies.keys()))
+            for sid, r in results.items():
+                if isinstance(r, dict) and r.get("success"):
+                    m = r.get("metrics", {})
+                    await broadcast_log(
+                        f"🔄 AutoTrain {sid}: {r.get('samples', 0)} примеров, "
+                        f"F1={m.get('f1', 0):.3f}, AUC={m.get('roc_auc', 0):.3f}",
+                        "info",
+                    )
+                    asyncio.create_task(state.telegram.send(
+                        f"🔄 <b>AutoTrain</b> {sid}\n"
+                        f"Примеров: {r.get('samples', 0)}\n"
+                        f"F1: {m.get('f1', 0):.3f} | AUC: {m.get('roc_auc', 0):.3f}"
+                    ))
+                elif isinstance(r, dict) and not r.get("success"):
+                    logger.info(f"[AutoTrain] {sid}: {r.get('error', 'unknown')}")
+        except Exception as e:
+            logger.error(f"auto_train_loop error: {e}")
+
 
 # ============================================================
 # Главный торговый цикл
@@ -174,8 +222,21 @@ async def trading_loop():
                 balance = state.bybit.get_balance("USDT") if not state.paper_mode else state.paper.balance
                 state.risk_manager.check_daily_reset(balance)
 
-                # Получаем актуальный sentiment (cached, не блокирует)
-                sentiment_features = state.news_manager.get_sentiment_features() if state.news_enabled else {}
+                # Получаем актуальный sentiment с проверкой свежести (не старше 30 мин)
+                sentiment_features = {}
+                if state.news_enabled:
+                    try:
+                        last_upd = getattr(state.news_manager, "last_sentiment_update", None)
+                        if last_upd is None:
+                            sentiment_features = state.news_manager.get_sentiment_features()
+                        else:
+                            age_min = (datetime.utcnow() - last_upd).total_seconds() / 60
+                            if age_min <= 30:
+                                sentiment_features = state.news_manager.get_sentiment_features()
+                            else:
+                                logger.debug(f"Sentiment устарел ({age_min:.0f} мин > 30), пропускаем")
+                    except Exception:
+                        sentiment_features = state.news_manager.get_sentiment_features()
 
                 klines_data = {}
 
@@ -187,6 +248,27 @@ async def trading_loop():
                     if df.empty:
                         continue
                     klines_data[strat.symbol] = df
+
+                    # Определяем рыночный режим один раз per strategy (используется ниже для фильтрации и ML)
+                    current_regime_id = None
+                    current_regime_name = None
+                    if state.ml_enabled and state.regime_classifier.model:
+                        try:
+                            _rr = state.regime_classifier.predict(df)
+                            if _rr:
+                                current_regime_id = _rr.get("regime_id")
+                                current_regime_name = _rr.get("regime_name", "")
+                        except Exception:
+                            pass
+
+                    # Soft-фильтр по режиму: пропускаем стратегию если режим не подходит
+                    if (current_regime_name and strat.REGIME_PREFERENCE
+                            and current_regime_name not in strat.REGIME_PREFERENCE):
+                        logger.debug(
+                            f"{sid}: режим '{current_regime_name}' не подходит "
+                            f"(предпочтение: {strat.REGIME_PREFERENCE})"
+                        )
+                        continue
 
                     # Если позиция уже открыта — проверка breakeven/trailing
                     if strat.current_position:
@@ -230,6 +312,13 @@ async def trading_loop():
                         logger.info(f"{sid}: ❌ {check['reason']}")
                         continue
 
+                    # Проверка плеча и notional экспозиции
+                    lev_check = state.risk_manager.check_leverage(sid, strat.leverage, balance)
+                    if not lev_check["allowed"]:
+                        logger.info(f"{sid}: ❌ {lev_check['reason']}")
+                        continue
+                    effective_leverage = lev_check["effective_leverage"]
+
                     # Корреляция
                     open_positions = [
                         {"symbol": s.symbol, "side": s.current_position["side"]}
@@ -269,12 +358,8 @@ async def trading_loop():
                         orderbook = state.bybit.get_orderbook(strat.symbol, limit=25)
                         # Market meta (funding, OI)
                         market_meta = state.bybit.get_market_meta(strat.symbol)
-                        # Текущий рыночный режим
-                        regime_id = None
-                        if state.regime_classifier.model:
-                            regime_result = state.regime_classifier.predict(df)
-                            if regime_result:
-                                regime_id = regime_result["regime_id"]
+                        # Рыночный режим уже вычислен выше (current_regime_id)
+                        regime_id = current_regime_id
 
                         # Извлечение всех 60+ фич
                         features = state.feature_extractor.extract(
@@ -376,7 +461,7 @@ async def trading_loop():
                             qty=qty,
                             stop_loss=signal.stop_loss,
                             take_profit=signal.take_profit,
-                            leverage=strat.leverage,
+                            leverage=effective_leverage,
                         )
                         if result["success"]:
                             strat.register_position(
@@ -384,7 +469,8 @@ async def trading_loop():
                                 signal.entry_price, signal.stop_loss, signal.take_profit,
                             )
                             strat.current_position["qty"] = qty
-                            state.risk_manager.register_position_open()
+                            notional = qty * signal.entry_price
+                            state.risk_manager.register_position_open(sid, notional)
 
                             trade_id = state.journal.log_trade({
                                 "strategy_id": sid,
@@ -448,7 +534,7 @@ async def trading_loop():
                                 r_multiple = close_result["r_multiple"]
 
                                 state.risk_manager.register_trade_result(sid, pnl_usd)
-                                state.risk_manager.register_position_close()
+                                state.risk_manager.register_position_close(sid)
 
                                 exit_reason = "TP" if pnl_usd > 0 else "SL"
 
@@ -489,6 +575,11 @@ async def trading_loop():
                                 asyncio.create_task(state.telegram.notify_trade_close(
                                     sid, strat.symbol, pnl_usd, exit_reason
                                 ))
+                                # Проверяем нужно ли переобучение ML
+                                if state.ml_enabled and ML_AVAILABLE and state.continuous_trainer:
+                                    asyncio.create_task(
+                                        state.continuous_trainer.maybe_retrain(list(state.strategies.keys()))
+                                    )
                                 await broadcast_log(
                                     f"{'✅' if pnl_usd > 0 else '❌'} {sid} CLOSED {strat.symbol} → {pnl_usd:+.2f} USDT",
                                     "ok" if pnl_usd > 0 else "warn",
@@ -586,6 +677,11 @@ async def lifespan(app: FastAPI):
         )
         logger.info("📡 News loop запущен")
 
+    # Auto-train loop
+    if state.ml_enabled and ML_AVAILABLE:
+        state.auto_train_task = asyncio.create_task(auto_train_loop())
+        logger.info("🔄 Auto-train loop запущен")
+
     logger.info("✅ Бэкенд готов")
     yield
     state.bot_running = False
@@ -593,6 +689,8 @@ async def lifespan(app: FastAPI):
         state.trading_loop_task.cancel()
     if state.news_loop_task:
         state.news_loop_task.cancel()
+    if state.auto_train_task:
+        state.auto_train_task.cancel()
     await state.news_manager.close()
     logger.info("🛑 Завершение работы")
 
@@ -810,6 +908,63 @@ async def correlations():
 @app.get("/api/paper/stats")
 async def paper_stats():
     return state.paper.get_stats()
+
+
+@app.post("/api/bot/emergency_close")
+async def emergency_close():
+    """Принудительное закрытие ВСЕХ позиций + стоп бота."""
+    if not state.bybit and not state.paper_mode:
+        raise HTTPException(400, "Нет подключения к Bybit")
+
+    closed = []
+    errors = []
+
+    if state.paper_mode:
+        for sid, strat in state.strategies.items():
+            if strat.current_position:
+                try:
+                    ticker = state.paper.positions.get(sid, {})
+                    exit_price = ticker.get("entry", 0) if ticker else 0
+                    strat.current_position = None
+                    closed.append(sid)
+                except Exception as e:
+                    errors.append(f"{sid}: {e}")
+    else:
+        positions = state.bybit.get_positions() if state.bybit else []
+        for pos in positions:
+            symbol = pos.get("symbol", "")
+            side = "Sell" if pos.get("side") == "Buy" else "Buy"
+            qty = pos.get("size", "0")
+            try:
+                result = state.bybit.session.place_order(
+                    category="linear",
+                    symbol=symbol,
+                    side=side,
+                    orderType="Market",
+                    qty=qty,
+                    reduceOnly=True,
+                )
+                if result.get("retCode") == 0:
+                    closed.append(symbol)
+                else:
+                    errors.append(f"{symbol}: {result.get('retMsg')}")
+            except Exception as e:
+                errors.append(f"{symbol}: {e}")
+
+        # Сбрасываем внутреннее состояние стратегий
+        for strat in state.strategies.values():
+            strat.current_position = None
+
+    state.bot_running = False
+    state.risk_manager.open_positions_count = 0
+    state.risk_manager._open_notional.clear()
+
+    await broadcast_log(f"🚨 EMERGENCY CLOSE: закрыто {len(closed)} позиций", "warn")
+    asyncio.create_task(state.telegram.send(
+        f"🚨 <b>EMERGENCY CLOSE</b>\nЗакрыто: {len(closed)}\nОшибки: {len(errors)}"
+    ))
+
+    return {"closed": closed, "errors": errors, "bot_stopped": True}
 
 
 # ============================================================
@@ -1151,6 +1306,23 @@ async def ml_train_ensemble(req: EnsembleTrainRequest):
         )
         state.ml_predictor.load_model(req.strategy_id, result["file_path"])
     return result
+
+
+@app.get("/api/ml/auto-train/status")
+async def ml_auto_train_status():
+    """Статус системы авто-переобучения."""
+    if not state.continuous_trainer:
+        return {"available": False}
+    return {"available": True, **state.continuous_trainer.get_status()}
+
+
+@app.post("/api/ml/auto-train/trigger")
+async def ml_auto_train_trigger():
+    """Принудительный запуск авто-переобучения (не дожидаясь таймера)."""
+    if not state.continuous_trainer or not ML_AVAILABLE:
+        raise HTTPException(400, "ContinuousTrainer недоступен")
+    results = await state.continuous_trainer.maybe_retrain(list(state.strategies.keys()))
+    return {"triggered": True, "results": results}
 
 
 @app.post("/api/ml/anomaly/fit")
