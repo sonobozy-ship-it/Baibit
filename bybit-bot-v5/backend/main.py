@@ -28,6 +28,7 @@ from correlation_filter import CorrelationFilter
 from ai_analyzer import AIAnalyzer
 from paper_trader import PaperTrader
 from strategies import ALL_STRATEGIES
+from strategies.fusion import StrategyFusion, SignalBuffer, FusedSignal
 
 # ML модули
 from ml import (
@@ -118,6 +119,10 @@ class BotState:
         # Continuous trainer — инициализируется после init_strategies
         self.continuous_trainer: Optional[ContinuousTrainer] = None
 
+        # Strategy Fusion Engine
+        self.signal_buffer  = SignalBuffer()
+        self.strategy_fusion = StrategyFusion()
+
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
         self.bot_running = False
@@ -202,6 +207,183 @@ async def auto_train_loop():
 
 
 # ============================================================
+# Fusion — исполнение объединённого сигнала
+# ============================================================
+async def _execute_fusion_signal(
+    fused: FusedSignal,
+    balance: float,
+    sentiment_features: dict,
+):
+    """
+    Исполняет FusedSignal: проверки риска, ML-снапшот, открытие позиции.
+    Использует size_multiplier для увеличения размера позиции.
+    """
+    sym = fused.symbol
+    sid = "FUSION"
+
+    # Проверяем, нет ли уже открытой позиции на этом символе через любую стратегию
+    for strat in state.strategies.values():
+        if strat.symbol == sym and strat.current_position:
+            logger.debug(f"[Fusion] {sym}: уже открыта позиция через {strat.ID}, пропускаем fusion")
+            return
+
+    # Риск-менеджер
+    check = state.risk_manager.can_open_trade(sid, balance)
+    if not check["allowed"]:
+        logger.info(f"[Fusion] ❌ {check['reason']}")
+        return
+
+    # Корреляция
+    open_pos = [
+        {"symbol": s.symbol, "side": s.current_position["side"]}
+        for s in state.strategies.values() if s.current_position
+    ]
+    corr = state.correlation.can_open(sym, fused.action, open_pos)
+    if not corr["allowed"]:
+        logger.info(f"[Fusion] ❌ {corr['reason']}")
+        return
+
+    # ML snapshot + prediction
+    ml_prediction = None
+    fusion_snapshot_id = None
+    if state.ml_enabled:
+        try:
+            df = state.bybit.get_klines(sym, "60", limit=250) if state.bybit else None
+            if df is not None and not df.empty:
+                orderbook   = state.bybit.get_orderbook(sym, limit=25)
+                market_meta = state.bybit.get_market_meta(sym)
+                features = state.feature_extractor.extract(
+                    df=df,
+                    signal_data={
+                        "action":      fused.action,
+                        "confidence":  fused.confidence,
+                        "entry_price": fused.entry_price,
+                        "stop_loss":   fused.stop_loss,
+                        "take_profit": fused.take_profit,
+                    },
+                    strategy_stats={"rolling_wr_20": 0.5, "rolling_pnl_20": 0,
+                                    "consecutive_losses": 0, "trades": 0},
+                    sentiment_data=sentiment_features,
+                    orderbook_data=orderbook,
+                    market_meta=market_meta,
+                    regime_id=None,
+                )
+                # Добавляем fusion-специфичные фичи
+                features = state.strategy_fusion.get_fusion_features(fused, features)
+
+                ml_prediction = state.ml_predictor.predict(sid, features)
+                fusion_snapshot_id = state.ml_store.save_signal_snapshot({
+                    "timestamp":        datetime.utcnow().isoformat(),
+                    "strategy_id":      sid,
+                    "symbol":           sym,
+                    "timeframe":        "60",
+                    "action":           fused.action,
+                    "entry_price":      fused.entry_price,
+                    "stop_loss":        fused.stop_loss,
+                    "take_profit":      fused.take_profit,
+                    "features":         features,
+                    "ml_prediction":    ml_prediction.get("probability") if ml_prediction else None,
+                    "ml_confidence":    fused.fusion_score,
+                    "ml_model_version": ml_prediction.get("model_version") if ml_prediction else None,
+                    "trade_taken":      False,
+                })
+
+                # В strict режиме ML может отклонить
+                if (ml_prediction and ml_prediction.get("available")
+                        and state.ml_filter_mode == "strict"
+                        and not ml_prediction["should_take"]):
+                    logger.info(
+                        f"[Fusion] ML отверг (P={ml_prediction['probability']:.2f})"
+                    )
+                    return
+        except Exception as e:
+            logger.warning(f"[Fusion] ML pass error: {e}")
+
+    # Размер позиции с multiplier
+    base_qty = state.risk_manager.calculate_position_size(
+        balance=balance,
+        entry_price=fused.entry_price,
+        stop_loss_price=fused.stop_loss,
+        leverage=3,
+    )
+    qty = round(base_qty * fused.size_multiplier, 6)
+    if qty <= 0:
+        return
+
+    # Открытие позиции
+    log_msg = (
+        f"[Fusion] {fused.action} {sym} "
+        f"[{'+'.join(fused.source_strategies)}] "
+        f"score={fused.fusion_score:.3f} "
+        f"size×{fused.size_multiplier}"
+    )
+
+    if state.paper_mode:
+        from strategies.base import TradingSignal as _TS
+        state.paper.open_position(fused, sid, qty, 3)
+        await broadcast_log(f"📄 FUSION {fused.action} {sym} (paper) {log_msg}")
+    else:
+        if not state.bybit:
+            return
+        lev_check = state.risk_manager.check_leverage(sid, 3, balance)
+        result = state.bybit.place_order(
+            symbol=sym,
+            side="Buy" if fused.action == "BUY" else "Sell",
+            qty=qty,
+            stop_loss=fused.stop_loss,
+            take_profit=fused.take_profit,
+            leverage=lev_check["effective_leverage"],
+        )
+        if result["success"]:
+            notional = qty * fused.entry_price
+            state.risk_manager.register_position_open(sid, notional)
+
+            trade_id = state.journal.log_trade({
+                "strategy_id":   sid,
+                "strategy_name": fused.reason[:64],
+                "symbol":        sym,
+                "side":          fused.action,
+                "entry_price":   fused.entry_price,
+                "qty":           qty,
+                "leverage":      lev_check["effective_leverage"],
+                "stop_loss":     fused.stop_loss,
+                "take_profit":   fused.take_profit,
+                "filters_passed": {
+                    "fusion_score":     fused.fusion_score,
+                    "strategies":       fused.source_strategies,
+                    "diversity":        fused.diversity_score,
+                },
+                "opened_at": datetime.utcnow().isoformat(),
+            })
+
+            if fusion_snapshot_id:
+                state.snapshot_signal_id_map[sym + "_FUSION"] = fusion_snapshot_id
+                with state.db_pool.cursor() as c:
+                    c.execute(
+                        state.db_pool.adapt(
+                            "UPDATE signal_snapshots SET trade_taken=1, trade_id=? WHERE id=?"
+                        ),
+                        (trade_id, fusion_snapshot_id),
+                    )
+
+            # Инвалидируем сигналы использованных стратегий — не открываем дубли
+            for src_sid in fused.source_strategies:
+                state.signal_buffer.invalidate(src_sid)
+
+            asyncio.create_task(state.telegram.notify_trade_open(
+                sid, sym, fused.action,
+                fused.entry_price, fused.stop_loss, fused.take_profit,
+                fused.reason,
+            ))
+            await broadcast_log(
+                f"🔥 FUSION {fused.action} {sym} @ {fused.entry_price} "
+                f"[{'+'.join(fused.source_strategies)}] ×{fused.size_multiplier}"
+            )
+        else:
+            logger.error(f"[Fusion] Ошибка ордера: {result.get('error')}")
+
+
+# ============================================================
 # Главный торговый цикл
 # ============================================================
 async def trading_loop():
@@ -228,7 +410,7 @@ async def trading_loop():
                 sentiment_features = {}
                 if state.news_enabled:
                     try:
-                        last_upd = getattr(state.news_manager, "last_sentiment_update", None)
+                        last_upd = getattr(state.news_manager, "last_fetch", None)
                         if last_upd is None:
                             sentiment_features = state.news_manager.get_sentiment_features()
                         else:
@@ -241,6 +423,8 @@ async def trading_loop():
                         sentiment_features = state.news_manager.get_sentiment_features()
 
                 klines_data = {}
+                current_regime_name = None   # инициализируем до цикла (используется в fusion)
+                current_regime_id   = None
 
                 for sid, strat in state.strategies.items():
                     if not strat.enabled or strat.auto_disabled:
@@ -289,6 +473,9 @@ async def trading_loop():
                     signal = strat.analyze(df)
                     if not signal or signal.action not in ("BUY", "SELL"):
                         continue
+
+                    # Добавляем в буфер для fusion-анализа
+                    state.signal_buffer.update(sid, signal, strat.timeframe)
 
                     # Адаптивный SL/TP по ATR (опционально перезаписывает)
                     if state.use_adaptive_sl:
@@ -354,6 +541,7 @@ async def trading_loop():
 
                     # ============== ML ФИЛЬТР v2 (с sentiment + orderbook) ==============
                     ml_prediction = None
+                    snapshot_id   = None   # явная инициализация — убираем 'in locals()' антипаттерн
                     features = {}
                     if state.ml_enabled:
                         # Order book
@@ -489,11 +677,13 @@ async def trading_loop():
                                 "opened_at": datetime.utcnow().isoformat(),
                             })
 
-                            if state.ml_enabled and 'snapshot_id' in locals() and snapshot_id:
+                            if state.ml_enabled and snapshot_id:
                                 state.snapshot_signal_id_map[signal.symbol] = snapshot_id
                                 with state.db_pool.cursor() as c:
                                     c.execute(
-                                        "UPDATE signal_snapshots SET trade_taken=1, trade_id=? WHERE id=?",
+                                        state.db_pool.adapt(
+                                            "UPDATE signal_snapshots SET trade_taken=1, trade_id=? WHERE id=?"
+                                        ),
                                         (trade_id, snapshot_id),
                                     )
 
@@ -504,6 +694,19 @@ async def trading_loop():
                                 signal.reason,
                             ))
                             await broadcast_log(f"🟢 {sid} {signal.action} {signal.symbol} @ {signal.entry_price}")
+
+                # ============================================================
+                # FUSION PASS — объединение согласных стратегий
+                # ============================================================
+                try:
+                    fused = state.strategy_fusion.evaluate(
+                        state.signal_buffer,
+                        regime=current_regime_name,
+                    )
+                    if fused:
+                        await _execute_fusion_signal(fused, balance, sentiment_features)
+                except Exception as _fe:
+                    logger.error(f"Fusion pass error: {_fe}")
 
                 # Обновление корреляций
                 if klines_data and len(klines_data) >= 2:
@@ -1327,8 +1530,29 @@ async def ml_auto_train_trigger():
     """Принудительный запуск авто-переобучения (не дожидаясь таймера)."""
     if not state.continuous_trainer or not ML_AVAILABLE:
         raise HTTPException(400, "ContinuousTrainer недоступен")
-    results = await state.continuous_trainer.maybe_retrain(list(state.strategies.keys()))
+    all_ids = list(state.strategies.keys()) + ["FUSION"]
+    results = await state.continuous_trainer.maybe_retrain(all_ids)
     return {"triggered": True, "results": results}
+
+
+@app.get("/api/fusion/status")
+async def fusion_status():
+    """Статус Strategy Fusion Engine: буфер сигналов, последние fusion-сделки."""
+    fresh = state.signal_buffer.fresh()
+    return {
+        "buffer_size":   len(fresh),
+        "fresh_signals": {
+            sid: {
+                "action":     sig.action,
+                "symbol":     sig.symbol,
+                "confidence": sig.confidence,
+            }
+            for sid, sig in fresh.items()
+        },
+        "min_confluence":   StrategyFusion.MIN_CONFLUENCE,
+        "min_fusion_score": StrategyFusion.MIN_FUSION_SCORE,
+        "cooldown_minutes": StrategyFusion.COOLDOWN_MINUTES,
+    }
 
 
 @app.post("/api/ml/anomaly/fit")

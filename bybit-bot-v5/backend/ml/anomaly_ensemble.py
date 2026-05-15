@@ -192,9 +192,11 @@ class EnsembleTrainer:
             if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
                 continue
             try:
-                ensemble = VotingClassifier(estimators=[
-                    (n, m.__class__(**m.get_params())) for n, m in estimators
-                ], voting="soft")
+                from sklearn.base import clone as _clone
+                ensemble = VotingClassifier(
+                    estimators=[(n, _clone(m)) for n, m in estimators],
+                    voting="soft",
+                )
                 sw_fold = sample_weight[train_idx] if sample_weight is not None else None
                 ensemble.fit(X_train, y_train, sample_weight=sw_fold)
                 preds = ensemble.predict(X_test)

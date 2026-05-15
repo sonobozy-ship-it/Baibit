@@ -77,8 +77,7 @@ class TradeJournal:
 
     def log_trade(self, trade: Dict) -> int:
         """Записать сделку. Возвращает trade_id."""
-        p = self.pool.ph()
-        sql = self.pool.adapt(f"""
+        sql = self.pool.adapt("""
             INSERT INTO trades (
                 timestamp, strategy_id, strategy_name, symbol, side,
                 entry_price, exit_price, qty, leverage, stop_loss, take_profit,

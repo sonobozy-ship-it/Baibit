@@ -475,9 +475,12 @@ class MultiConfirmStrategy(BaseStrategy):
         if not (long_setup or short_setup):
             return None
 
-        # Если оба набирают нужный счёт — выбираем тот у которого выше
+        # Если оба набирают нужный счёт — выбираем направление с бо́льшим счётом
         if long_setup and short_setup:
-            long_setup = long_score >= short_score
+            if long_score >= short_score:
+                short_setup = False
+            else:
+                long_setup = False
 
         side = "BUY" if long_setup else "SELL"
         entry = float(last["close"])
