@@ -1,0 +1,274 @@
+"""
+News Manager — главный оркестратор сбора, анализа и хранения новостей.
+"""
+import asyncio
+import logging
+import json
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+from pathlib import Path
+import os
+
+from .news_aggregator import NewsAggregator
+from .twitter_collector import TwitterCollector
+from .sentiment_analyzer import SentimentAnalyzer
+
+logger = logging.getLogger(__name__)
+
+
+class NewsManager:
+    """Оркестратор сбора + анализ + хранение."""
+
+    def __init__(
+        self,
+        db_pool,
+        cryptopanic_key: Optional[str] = None,
+        anthropic_key: Optional[str] = None,
+        twitter_accounts: Optional[List[str]] = None,
+    ):
+        self.db = db_pool
+        self.news = NewsAggregator(cryptopanic_api_key=cryptopanic_key)
+        self.twitter = TwitterCollector(custom_accounts=twitter_accounts)
+        self.sentiment = SentimentAnalyzer(anthropic_api_key=anthropic_key)
+
+        self.last_fetch: Optional[datetime] = None
+        self.last_deep_analysis: Optional[datetime] = None
+        self.cached_sentiment: Dict = {"score": 0, "magnitude": 0}
+        self.cached_deep: Dict = {}
+        self._init_db()
+
+    def _init_db(self):
+        """Таблицы для новостей."""
+        with self.db.cursor() as c:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS news_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    title TEXT,
+                    text TEXT,
+                    url TEXT,
+                    published_at TEXT,
+                    fetched_at TEXT,
+                    sentiment_score REAL,
+                    sentiment_magnitude REAL,
+                    bull_hits INTEGER,
+                    bear_hits INTEGER,
+                    item_type TEXT,
+                    extra_json TEXT,
+                    UNIQUE(source, url)
+                )
+            """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_news_fetched ON news_items(fetched_at)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_news_source ON news_items(source)")
+
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS sentiment_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    source_type TEXT,
+                    score REAL,
+                    magnitude REAL,
+                    count INTEGER,
+                    distribution_json TEXT,
+                    deep_analysis_json TEXT
+                )
+            """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_sent_ts ON sentiment_history(timestamp)")
+
+    async def collect_all(self, currencies: List[str] = None) -> Dict:
+        """Сбор и анализ изо всех источников."""
+        logger.info("📡 Сбор новостей и твитов...")
+        currencies = currencies or ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"]
+
+        # Параллельный сбор
+        news_task = asyncio.create_task(self.news.fetch_all(currencies))
+        tweets_task = asyncio.create_task(self.twitter.fetch_all_tracked(max_per_account=5))
+
+        news_items = await news_task
+        tweets = await tweets_task
+
+        # Sentiment анализ (rule-based, быстро)
+        self.sentiment.analyze_batch(news_items, text_field="title")
+        self.sentiment.analyze_batch(tweets, text_field="text")
+
+        # Агрегация
+        news_sentiment = self.sentiment.aggregate(news_items, weight_field="votes")
+        twitter_sentiment = self.sentiment.aggregate(tweets)
+
+        # Общий sentiment с весами (news 60%, twitter 40%)
+        overall_score = news_sentiment["score"] * 0.6 + twitter_sentiment["score"] * 0.4
+        overall_magnitude = (news_sentiment["magnitude"] + twitter_sentiment["magnitude"]) / 2
+
+        result = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "news_count": len(news_items),
+            "tweet_count": len(tweets),
+            "overall_score": round(overall_score, 3),
+            "overall_magnitude": round(overall_magnitude, 3),
+            "news_sentiment": news_sentiment,
+            "twitter_sentiment": twitter_sentiment,
+        }
+
+        # Сохраняем в БД
+        self._save_items(news_items + tweets)
+        self._save_sentiment_snapshot(result)
+
+        self.last_fetch = datetime.utcnow()
+        self.cached_sentiment = result
+        logger.info(
+            f"📡 Sentiment: {overall_score:+.2f} "
+            f"(news {news_sentiment['score']:+.2f}, twitter {twitter_sentiment['score']:+.2f})"
+        )
+        return result
+
+    def _save_items(self, items: List[Dict]):
+        """Сохранение в БД с дедупликацией."""
+        if not items:
+            return
+        with self.db.cursor() as c:
+            for item in items:
+                try:
+                    sent = item.get("sentiment", {})
+                    text = item.get("text", item.get("summary", ""))
+                    extra = {k: v for k, v in item.items()
+                             if k not in ("source", "title", "text", "url",
+                                          "published", "fetched_at", "sentiment", "summary")}
+                    c.execute("""
+                        INSERT OR IGNORE INTO news_items (
+                            source, title, text, url, published_at, fetched_at,
+                            sentiment_score, sentiment_magnitude,
+                            bull_hits, bear_hits, item_type, extra_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        item.get("source", ""),
+                        item.get("title", "")[:500],
+                        text[:1000] if text else "",
+                        item.get("url", ""),
+                        item.get("published", ""),
+                        item.get("fetched_at", datetime.utcnow().isoformat()),
+                        sent.get("score", 0),
+                        sent.get("magnitude", 0),
+                        sent.get("bull_hits", 0),
+                        sent.get("bear_hits", 0),
+                        "tweet" if item.get("source") == "twitter" else "news",
+                        json.dumps(extra) if extra else None,
+                    ))
+                except Exception as e:
+                    logger.debug(f"Item save skip: {e}")
+
+    def _save_sentiment_snapshot(self, result: Dict):
+        with self.db.cursor() as c:
+            c.execute("""
+                INSERT INTO sentiment_history (
+                    timestamp, source_type, score, magnitude, count, distribution_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                result["timestamp"],
+                "combined",
+                result["overall_score"],
+                result["overall_magnitude"],
+                result["news_count"] + result["tweet_count"],
+                json.dumps({
+                    "news": result["news_sentiment"]["distribution"],
+                    "twitter": result["twitter_sentiment"]["distribution"],
+                }),
+            ))
+
+    async def deep_analysis(self, currencies: List[str] = None) -> Dict:
+        """Глубокий AI-анализ (раз в час)."""
+        with self.db.connection() as conn:
+            cursor = conn.execute("""
+                SELECT source, title, text, sentiment_score
+                FROM news_items
+                WHERE fetched_at >= datetime('now', '-6 hours')
+                ORDER BY fetched_at DESC LIMIT 30
+            """)
+            recent = [dict(r) for r in cursor.fetchall()]
+        if not recent:
+            return {"available": False, "reason": "Нет свежих данных"}
+
+        analysis = await self.sentiment.deep_analysis_with_claude(
+            recent,
+            context=f"Crypto market sentiment for: {', '.join(currencies or ['BTC', 'ETH'])}",
+        )
+        self.cached_deep = analysis
+        self.last_deep_analysis = datetime.utcnow()
+        if analysis.get("available"):
+            with self.db.cursor() as c:
+                c.execute("""
+                    INSERT INTO sentiment_history (
+                        timestamp, source_type, score, magnitude, count, deep_analysis_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    datetime.utcnow().isoformat(),
+                    "deep_claude",
+                    analysis.get("overall_score", 0),
+                    analysis.get("magnitude", 0),
+                    analysis.get("analyzed_count", 0),
+                    json.dumps(analysis),
+                ))
+        return analysis
+
+    def get_current_sentiment(self) -> Dict:
+        """Текущий sentiment (без блокирующего сбора). Использовать в торговом цикле."""
+        return self.cached_sentiment
+
+    def get_sentiment_features(self) -> Dict:
+        """Sentiment-фичи для ML (текущее состояние)."""
+        sent = self.cached_sentiment
+        deep = self.cached_deep
+        return {
+            "sentiment_score": float(sent.get("overall_score", 0)),
+            "sentiment_magnitude": float(sent.get("overall_magnitude", 0)),
+            "news_sentiment": float(sent.get("news_sentiment", {}).get("score", 0)),
+            "twitter_sentiment": float(sent.get("twitter_sentiment", {}).get("score", 0)),
+            "news_count_24h": int(sent.get("news_count", 0)),
+            "tweet_count_24h": int(sent.get("tweet_count", 0)),
+            "deep_sentiment_score": float(deep.get("overall_score", 0)) if deep.get("available") else 0,
+            "sentiment_data_freshness_min": (
+                (datetime.utcnow() - self.last_fetch).total_seconds() / 60
+                if self.last_fetch else 999
+            ),
+        }
+
+    def get_recent_news(self, limit: int = 50, source_filter: Optional[str] = None) -> List[Dict]:
+        with self.db.connection() as conn:
+            query = "SELECT * FROM news_items"
+            params = []
+            if source_filter:
+                query += " WHERE source = ?"
+                params.append(source_filter)
+            query += " ORDER BY fetched_at DESC LIMIT ?"
+            params.append(limit)
+            rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+        return rows
+
+    def get_sentiment_history(self, hours: int = 24) -> List[Dict]:
+        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        with self.db.connection() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM sentiment_history WHERE timestamp >= ? ORDER BY timestamp",
+                (cutoff,)
+            ).fetchall()]
+        return rows
+
+    async def close(self):
+        await self.news.close()
+        await self.twitter.close()
+
+
+# __init__ exports
+async def background_news_loop(news_manager: NewsManager, interval_min: int = 15):
+    """Фоновый таск: собирать новости каждые N минут."""
+    while True:
+        try:
+            await news_manager.collect_all()
+            # Раз в час — deep analysis через Claude
+            if (
+                news_manager.last_deep_analysis is None
+                or (datetime.utcnow() - news_manager.last_deep_analysis).total_seconds() > 3600
+            ):
+                await news_manager.deep_analysis()
+        except Exception as e:
+            logger.error(f"News loop ошибка: {e}")
+        await asyncio.sleep(interval_min * 60)
