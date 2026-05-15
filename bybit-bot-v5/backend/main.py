@@ -1594,7 +1594,8 @@ async def fusion_status():
 class BoostStartRequest(BaseModel):
     initial_balance: float
     target_balance: float
-    deadline_days: int = 7
+    deadline_days: int = 21
+    mode: str = "moderate"   # "safe" | "moderate" | "aggressive"
 
 
 @app.post("/api/boost/start")
@@ -1602,7 +1603,9 @@ async def boost_start(req: BoostStartRequest):
     """Запустить сессию разгона депозита."""
     if req.initial_balance <= 0 or req.target_balance <= req.initial_balance:
         raise HTTPException(400, "Некорректные параметры: target должен быть > initial")
-    result = state.boost.start(req.initial_balance, req.target_balance, req.deadline_days)
+    if req.mode not in ("safe", "moderate", "aggressive"):
+        raise HTTPException(400, "mode должен быть: safe | moderate | aggressive")
+    result = state.boost.start(req.initial_balance, req.target_balance, req.deadline_days, req.mode)
     if result.get("success"):
         asyncio.create_task(state.telegram.send(
             f"🚀 <b>Boost Mode запущен</b>\n"
@@ -1632,15 +1635,21 @@ async def boost_stop(reason: str = "Ручная остановка"):
 class BoostAnalyzeRequest(BaseModel):
     initial: float = 10.0
     target: float = 100.0
-    days: int = 7
+    days: int = 21
+    mode: str = "moderate"   # "safe" | "moderate" | "aggressive"
 
 
 @app.post("/api/boost/analyze")
 async def boost_analyze(req: BoostAnalyzeRequest):
-    """Математический анализ плана разгона с Monte Carlo симуляцией."""
+    """
+    Математический анализ плана разгона с Monte Carlo симуляцией.
+    Возвращает сценарии + prob_targets: максимальный баланс при 70%/75%/80% вероятности.
+    """
     if req.initial <= 0 or req.target <= req.initial or req.days <= 0:
         raise HTTPException(400, "Некорректные параметры")
-    return BoostCalculator.full_analysis(req.initial, req.target, req.days)
+    if req.mode not in ("safe", "moderate", "aggressive"):
+        raise HTTPException(400, "mode должен быть: safe | moderate | aggressive")
+    return BoostCalculator.full_analysis(req.initial, req.target, req.days, req.mode)
 
 
 @app.post("/api/ml/anomaly/fit")

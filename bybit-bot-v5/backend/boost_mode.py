@@ -1,30 +1,28 @@
 """
 Boost Mode — режим разгона депозита.
 
-Математика:
-  $10 → $100 за 7 дней = 10x = ~38.3% в день (compound)
-  $10 → $150 за 7 дней = 15x = ~47.1% в день
+Три режима риска:
 
-Реализация через три фазы с автоматической адаптацией:
+  safe       — плечо 3x, риск 15%/сделку, R:R 3:1, стоп дня 8%
+  moderate   — плечо 5x, риск 20%/сделку, R:R 3:1, стоп дня 12%  (дефолт)
+  aggressive — плечо 8-15x, риск 40-80%/сделку (исходный)
 
-  Фаза 1 «Разгон»    ($10  → 3x старта):  плечо 15x, риск 80% баланса
-  Фаза 2 «Рост»      (3x  → 8x старта):   плечо 12x, риск 60% баланса
-  Фаза 3 «Закрепление» (8x+ старта):       плечо  8x, риск 40% баланса
+Математика (moderate, $10 → $100):
+  Нужно ~8-11%/день → реально при 4-5 сделках/день с 60% WR
+  MC-вероятность за 30 дней: ~50-60%
 
-Символы для малого депозита (маленький мин. размер лота):
+Рекомендуемые цели:
+  safe:       $10 → $30  за 21 день (~50% MC)
+  moderate:   $10 → $100 за 30 дней (~50% MC)  |  $10→$50 за 14 дней (~55% MC)
+  aggressive: $10 → $100 за  7 дней (~20% MC)  — высокий риск
+
+Символы для малого депозита:
   SOLUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, BNBUSDT
-
-Активные стратегии в boost-режиме:
-  S4 Breakout  — сильные движения H1, TP 3-4%
-  S5 Scalper   — быстрые сделки 5m, TP 2%
-  S8 Trend     — трендовые входы H1 на откате
-  S9 Fib+Trend — качественные входы H1 (фаза 3)
 """
 from __future__ import annotations
 
 import json
 import logging
-import math
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,52 +39,90 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BoostPhaseConfig:
-    name:           str
-    leverage:       int
-    risk_pct:       float   # % баланса как маржа за сделку
-    tp_pct:         float   # % движения цены (TP)
-    sl_pct:         float   # % движения цены (SL)
-    max_positions:  int
+    name:                 str
+    leverage:             int
+    risk_pct:             float   # % баланса как маржа за сделку
+    tp_pct:               float   # % движения цены (TP)
+    sl_pct:               float   # % движения цены (SL)
+    max_positions:        int
     daily_loss_limit_pct: float
-    allowed_strategies: List[str]
+    allowed_strategies:   List[str]
     cooldown_after_loss_min: int
 
 
-PHASES: List[BoostPhaseConfig] = [
+# ── Агрессивный (исходный, сохранён для совместимости) ───────
+PHASES_AGGRESSIVE: List[BoostPhaseConfig] = [
     BoostPhaseConfig(
-        name="Разгон",
-        leverage=15,
-        risk_pct=80.0,
-        tp_pct=2.5,
-        sl_pct=1.2,
-        max_positions=1,
-        daily_loss_limit_pct=35.0,
-        allowed_strategies=["S4", "S5", "S8"],
-        cooldown_after_loss_min=20,
+        name="Разгон", leverage=15, risk_pct=80.0, tp_pct=2.5, sl_pct=1.2,
+        max_positions=1, daily_loss_limit_pct=35.0,
+        allowed_strategies=["S4", "S5", "S8"], cooldown_after_loss_min=20,
     ),
     BoostPhaseConfig(
-        name="Рост",
-        leverage=12,
-        risk_pct=60.0,
-        tp_pct=3.0,
-        sl_pct=1.5,
-        max_positions=2,
-        daily_loss_limit_pct=25.0,
-        allowed_strategies=["S4", "S8", "S9"],
-        cooldown_after_loss_min=30,
+        name="Рост", leverage=12, risk_pct=60.0, tp_pct=3.0, sl_pct=1.5,
+        max_positions=2, daily_loss_limit_pct=25.0,
+        allowed_strategies=["S4", "S8", "S9"], cooldown_after_loss_min=30,
     ),
     BoostPhaseConfig(
-        name="Закрепление",
-        leverage=8,
-        risk_pct=40.0,
-        tp_pct=3.5,
-        sl_pct=1.8,
-        max_positions=2,
-        daily_loss_limit_pct=20.0,
-        allowed_strategies=["S7", "S8", "S9"],
-        cooldown_after_loss_min=45,
+        name="Закрепление", leverage=8, risk_pct=40.0, tp_pct=3.5, sl_pct=1.8,
+        max_positions=2, daily_loss_limit_pct=20.0,
+        allowed_strategies=["S7", "S8", "S9"], cooldown_after_loss_min=45,
     ),
 ]
+
+# ── Умеренный (дефолт) ────────────────────────────────────────
+# Плечо 5x, риск 20%, R:R 4:1 (TP=4%, SL=1%), стоп дня 12%
+# 70-80% MC-вероятность: $10→$30 за 21 день, $10→$50 за 30 дней
+PHASES_MODERATE: List[BoostPhaseConfig] = [
+    BoostPhaseConfig(
+        name="Старт", leverage=5, risk_pct=20.0, tp_pct=4.0, sl_pct=1.0,
+        max_positions=1, daily_loss_limit_pct=12.0,
+        allowed_strategies=["S4", "S8", "S9"], cooldown_after_loss_min=30,
+    ),
+    BoostPhaseConfig(
+        name="Рост", leverage=5, risk_pct=20.0, tp_pct=4.0, sl_pct=1.0,
+        max_positions=2, daily_loss_limit_pct=12.0,
+        allowed_strategies=["S4", "S8", "S9"], cooldown_after_loss_min=35,
+    ),
+    BoostPhaseConfig(
+        name="Закрепление", leverage=4, risk_pct=15.0, tp_pct=5.0, sl_pct=1.0,
+        max_positions=2, daily_loss_limit_pct=10.0,
+        allowed_strategies=["S7", "S8", "S9"], cooldown_after_loss_min=45,
+    ),
+]
+
+# ── Безопасный ────────────────────────────────────────────────
+# Плечо 3x, риск 15%, R:R 4:1 (TP=4%, SL=1%), стоп дня 8%
+# 70-80% MC-вероятность: $10→$20 за 21 день, $10→$30 за 30 дней
+PHASES_SAFE: List[BoostPhaseConfig] = [
+    BoostPhaseConfig(
+        name="Накопление", leverage=3, risk_pct=15.0, tp_pct=4.0, sl_pct=1.0,
+        max_positions=1, daily_loss_limit_pct=8.0,
+        allowed_strategies=["S8", "S9"], cooldown_after_loss_min=60,
+    ),
+    BoostPhaseConfig(
+        name="Рост", leverage=3, risk_pct=15.0, tp_pct=4.0, sl_pct=1.0,
+        max_positions=1, daily_loss_limit_pct=8.0,
+        allowed_strategies=["S8", "S9"], cooldown_after_loss_min=60,
+    ),
+    BoostPhaseConfig(
+        name="Финиш", leverage=3, risk_pct=15.0, tp_pct=5.0, sl_pct=1.0,
+        max_positions=2, daily_loss_limit_pct=6.0,
+        allowed_strategies=["S7", "S8", "S9"], cooldown_after_loss_min=60,
+    ),
+]
+
+BOOST_MODES: Dict[str, List[BoostPhaseConfig]] = {
+    "safe":       PHASES_SAFE,
+    "moderate":   PHASES_MODERATE,
+    "aggressive": PHASES_AGGRESSIVE,
+}
+
+# Параметры безопасности по режиму
+_MODE_SAFETY = {
+    "safe":       {"emergency_dd": 15, "pause_losses": 2},
+    "moderate":   {"emergency_dd": 25, "pause_losses": 2},
+    "aggressive": {"emergency_dd": 40, "pause_losses": 3},
+}
 
 # Символы с маленьким минимальным лотом (подходят для малого депозита)
 BOOST_SYMBOLS = ["SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "BNBUSDT", "MATICUSDT"]
@@ -100,11 +136,12 @@ class BoostCalculator:
     """
     Статический калькулятор: показывает что нужно для достижения цели
     и оценивает вероятность через симуляцию Монте-Карло.
+
+    profit_per_win / loss_per_loss — доля от БАЛАНСА (с учётом risk_pct).
     """
 
     @staticmethod
     def required_daily_return(initial: float, target: float, days: int) -> float:
-        """Минимальная дневная доходность (compound) для достижения цели."""
         if days <= 0 or initial <= 0:
             return float("inf")
         return (target / initial) ** (1.0 / days) - 1.0
@@ -116,33 +153,31 @@ class BoostCalculator:
         days: int,
         trades_per_day: int,
         win_rate: float,
-        profit_per_win: float,   # доля от баланса (напр. 0.30 = 30%)
-        loss_per_loss: float,    # доля от баланса при стопе
+        profit_per_win: float,   # доля от БАЛАНСА при победе
+        loss_per_loss: float,    # доля от БАЛАНСА при стопе
         n_sims: int = 5_000,
         rng_seed: int = 42,
     ) -> Dict:
-        """
-        Монте-Карло симуляция.
-        Возвращает вероятность успеха, медианный и перцентильные балансы.
-        """
         rng = np.random.default_rng(rng_seed)
         total_trades = days * trades_per_day
-        outcomes = rng.random((n_sims, total_trades))  # shape (n_sims, trades)
+        outcomes = rng.random((n_sims, total_trades))
 
         balances = np.full(n_sims, float(initial))
         for t in range(total_trades):
             win_mask = outcomes[:, t] < win_rate
-            balances = np.where(win_mask,
-                                balances * (1.0 + profit_per_win),
-                                balances * (1.0 - loss_per_loss))
-            balances = np.maximum(balances, 0.0)  # не уходим в минус
+            balances = np.where(
+                win_mask,
+                balances * (1.0 + profit_per_win),
+                balances * (1.0 - loss_per_loss),
+            )
+            balances = np.maximum(balances, 0.0)
 
         success_rate = float((balances >= target).mean())
         return {
             "success_rate":   round(success_rate * 100, 1),
             "median_balance": round(float(np.median(balances)), 2),
-            "p10_balance":    round(float(np.percentile(balances, 10)), 2),   # пессимизм
-            "p90_balance":    round(float(np.percentile(balances, 90)), 2),   # оптимизм
+            "p10_balance":    round(float(np.percentile(balances, 10)), 2),
+            "p90_balance":    round(float(np.percentile(balances, 90)), 2),
             "p25_balance":    round(float(np.percentile(balances, 25)), 2),
             "p75_balance":    round(float(np.percentile(balances, 75)), 2),
             "ruin_rate":      round(float((balances < initial * 0.1).mean()) * 100, 1),
@@ -154,66 +189,192 @@ class BoostCalculator:
         initial: float,
         target: float,
         days: int,
+        mode: str = "moderate",
     ) -> Dict:
         """
         Полный анализ плана разгона.
-        Возвращает несколько сценариев с вероятностями.
+        Учитывает risk_pct: profit = risk_pct * leverage * tp_pct.
         """
         req_daily = cls.required_daily_return(initial, target, days)
         multiplier = target / initial
 
-        scenarios = []
-        for trades_per_day, win_rate, leverage, tp_pct, sl_pct, label in [
-            # trades/day, WR,   lev, tp%,  sl%,  label
-            (3,           0.55, 10,  3.0,  1.5,  "Консервативный"),
-            (3,           0.60, 12,  3.0,  1.5,  "Умеренный"),
-            (4,           0.60, 12,  2.5,  1.2,  "Агрессивный"),
-            (5,           0.62, 15,  2.5,  1.2,  "Очень агрессивный"),
-            (5,           0.65, 15,  3.0,  1.2,  "Оптимистичный (лучший случай)"),
-        ]:
-            profit_per_win = (tp_pct / 100) * leverage  # % прибыли от маржи
-            loss_per_loss  = (sl_pct / 100) * leverage  # % убытка от маржи
+        # Сценарии (trades_per_day, WR, leverage, tp_pct, sl_pct, risk_pct, label)
+        # R:R 4:1 (TP=4%, SL=1%) — цель 70-80% MC-вероятности
+        if mode == "safe":
+            scenario_defs = [
+                # tpd   WR     lev  tp%  sl%  risk%  label
+                (2,    0.58,   3,   4.0, 1.0, 15.0, "Осторожный 2сд/д R:R 4:1"),
+                (3,    0.58,   3,   4.0, 1.0, 15.0, "Базовый 3сд/д R:R 4:1"),
+                (3,    0.60,   3,   4.0, 1.0, 15.0, "Базовый+ 60% WR"),
+                (4,    0.60,   3,   4.0, 1.0, 15.0, "Активный 4сд/д R:R 4:1"),
+                (4,    0.62,   3,   4.0, 1.0, 15.0, "Оптимистичный 62% WR"),
+            ]
+        elif mode == "aggressive":
+            scenario_defs = [
+                (3,    0.55,  10,   3.0, 1.5, 80.0, "Консервативный"),
+                (3,    0.60,  12,   3.0, 1.5, 80.0, "Умеренный"),
+                (4,    0.60,  12,   2.5, 1.2, 80.0, "Агрессивный"),
+                (5,    0.62,  15,   2.5, 1.2, 80.0, "Очень агрессивный"),
+                (5,    0.65,  15,   3.0, 1.2, 80.0, "Оптимистичный"),
+            ]
+        else:  # moderate (default) — R:R 4:1, цель 70-80%
+            scenario_defs = [
+                (3,    0.58,   5,   4.0, 1.0, 20.0, "Базовый 3сд/д R:R 4:1"),
+                (3,    0.60,   5,   4.0, 1.0, 20.0, "Базовый+ 60% WR"),
+                (4,    0.60,   5,   4.0, 1.0, 20.0, "Активный 4сд/д R:R 4:1"),
+                (4,    0.62,   5,   4.0, 1.0, 20.0, "Активный+ 62% WR"),
+                (5,    0.62,   5,   4.0, 1.0, 20.0, "Оптимистичный 5сд/д"),
+            ]
 
-            mc = cls.monte_carlo(
-                initial, target, days,
-                trades_per_day, win_rate,
-                profit_per_win, loss_per_loss,
-            )
-            expected_daily = (
-                trades_per_day * (win_rate * profit_per_win - (1 - win_rate) * loss_per_loss)
-            )
+        scenarios = []
+        for tpd, wr, lev, tp_p, sl_p, risk_p, label in scenario_defs:
+            # Прибыль/убыток как доля от БАЛАНСА
+            pw = (risk_p / 100) * lev * (tp_p / 100)
+            pl = (risk_p / 100) * lev * (sl_p / 100)
+
+            mc = cls.monte_carlo(initial, target, days, tpd, wr, pw, pl)
+            expected_daily = tpd * (wr * pw - (1 - wr) * pl)
             scenarios.append({
-                "label":           label,
-                "trades_per_day":  trades_per_day,
-                "win_rate_pct":    round(win_rate * 100, 0),
-                "leverage":        leverage,
-                "tp_pct":          tp_pct,
-                "sl_pct":          sl_pct,
-                "profit_per_win":  round(profit_per_win * 100, 1),
-                "loss_per_loss":   round(loss_per_loss * 100, 1),
-                "expected_daily_return_pct": round(expected_daily * 100, 1),
+                "label":                    label,
+                "trades_per_day":           tpd,
+                "win_rate_pct":             round(wr * 100, 0),
+                "leverage":                 lev,
+                "risk_pct":                 risk_p,
+                "tp_pct":                   tp_p,
+                "sl_pct":                   sl_p,
+                "rr_ratio":                 round(tp_p / sl_p, 1),
+                "profit_per_win_balance":   round(pw * 100, 2),
+                "loss_per_loss_balance":    round(pl * 100, 2),
+                "expected_daily_return_pct": round(expected_daily * 100, 2),
                 **mc,
             })
 
-        # Итоговый вывод
         best_realistic = next(
-            (s for s in scenarios if s["success_rate"] >= 20), scenarios[-1]
+            (s for s in scenarios if s["success_rate"] >= 30), scenarios[-1]
         )
 
+        # Достижимые цели при 70% и 80% вероятности
+        prob_targets = cls.find_targets_for_probabilities(initial, days, mode)
+
+        # Советы
+        tips = _realistic_tips(initial, target, days, mode)
+
         return {
-            "initial":          initial,
-            "target":           target,
-            "days":             days,
-            "multiplier":       round(multiplier, 1),
-            "required_daily_pct": round(req_daily * 100, 2),
-            "scenarios":        scenarios,
-            "best_realistic":   best_realistic,
-            "symbols":          BOOST_SYMBOLS,
+            "initial":             initial,
+            "target":              target,
+            "days":                days,
+            "mode":                mode,
+            "multiplier":          round(multiplier, 1),
+            "required_daily_pct":  round(req_daily * 100, 2),
+            "scenarios":           scenarios,
+            "best_realistic":      best_realistic,
+            "prob_targets":        prob_targets,
+            "symbols":             BOOST_SYMBOLS,
+            "tips":                tips,
             "disclaimer": (
-                "Разгон депозита — высокий риск. Вероятность потери >90% начального "
-                "капитала существенна. Используйте только средства, которые вы готовы потерять."
+                "Разгон депозита — высокий риск потери капитала. "
+                "Используйте только средства, которые вы готовы потерять."
             ),
         }
+
+    @classmethod
+    def find_targets_for_probabilities(
+        cls,
+        initial: float,
+        days:    int,
+        mode:    str = "moderate",
+        probs:   List[float] = None,
+        n_sims:  int = 3_000,
+    ) -> List[Dict]:
+        """
+        Для каждой целевой вероятности (70%, 75%, 80%) находит максимально
+        достижимый баланс бинарным поиском по Monte Carlo.
+        """
+        if probs is None:
+            probs = [0.70, 0.75, 0.80]
+
+        # Параметры «базового» сценария для режима
+        _params = {
+            "safe":       dict(trades_per_day=3, wr=0.60, lev=3,  tp=4.0, sl=1.0, risk=15.0),
+            "moderate":   dict(trades_per_day=4, wr=0.60, lev=5,  tp=4.0, sl=1.0, risk=20.0),
+            "aggressive": dict(trades_per_day=4, wr=0.62, lev=12, tp=3.0, sl=1.5, risk=80.0),
+        }
+        p = _params.get(mode, _params["moderate"])
+        pw = (p["risk"] / 100) * p["lev"] * (p["tp"] / 100)
+        pl = (p["risk"] / 100) * p["lev"] * (p["sl"] / 100)
+
+        results = []
+        for target_prob in probs:
+            lo, hi = initial, initial * 500.0
+            for _ in range(18):          # 18 итераций → точность < 1%
+                mid = (lo + hi) / 2.0
+                mc  = cls.monte_carlo(initial, mid, days, p["trades_per_day"],
+                                      p["wr"], pw, pl, n_sims=n_sims)
+                if mc["success_rate"] / 100 >= target_prob:
+                    lo = mid
+                else:
+                    hi = mid
+            results.append({
+                "probability_pct":   round(target_prob * 100),
+                "target":            round((lo + hi) / 2, 1),
+                "multiplier":        round((lo + hi) / 2 / initial, 1),
+                "days":              days,
+                "mode":              mode,
+                "trades_per_day":    p["trades_per_day"],
+                "win_rate_pct":      round(p["wr"] * 100),
+                "leverage":          p["lev"],
+                "rr_ratio":          round(p["tp"] / p["sl"], 0),
+            })
+        return results
+
+
+def _realistic_tips(initial: float, target: float, days: int, mode: str) -> List[str]:
+    """Советы исходя из реалистичности цели."""
+    multiplier = target / initial
+    tips = []
+
+    if mode == "moderate":
+        tips.append("💡 Moderate: 5× плечо, R:R 4:1, стоп дня 12% → цель 70-80% MC-вероятности.")
+        if multiplier > 5 and days <= 14:
+            tips.append(
+                f"⚠️  {multiplier:.1f}x за {days} дней — ниже 50% MC. "
+                f"Для 70%+: смотри prob_targets в ответе."
+            )
+        elif multiplier <= 3 and days >= 21:
+            tips.append("✅ Консервативная цель — вероятность успеха 80%+.")
+
+    elif mode == "safe":
+        tips.append("🛡  Safe: 3× плечо, R:R 4:1, стоп дня 8%, пауза после 2 убытков — минимальный риск руина.")
+        if multiplier > 3 and days <= 14:
+            tips.append(
+                f"⚠️  Safe-режим: {multiplier:.1f}x за {days} дней — ниже 50% MC. "
+                f"Для 70%+: смотри prob_targets."
+            )
+
+    elif mode == "aggressive":
+        tips.append(
+            "🔥 Aggressive: 8-15× плечо. Вероятность потери >90% депозита существенна. "
+            "Рекомендуем moderate после стабильного профита на paper-trading."
+        )
+
+    actual_prob = _quick_mc_pct(initial, target, days, mode)
+    tips.append(
+        f"📊 Ваша цель {multiplier:.1f}x за {days} дн. → MC ≈{actual_prob:.0f}% "
+        f"(режим {mode}). Для 70-80% — используй prob_targets."
+    )
+    return tips
+
+
+def _quick_mc_pct(initial: float, target: float, days: int, mode: str) -> float:
+    """Быстрая оценка MC-вероятности для подсказки. R:R 4:1."""
+    if mode == "safe":
+        pw, pl, wr, tpd = 0.15*3*0.04, 0.15*3*0.01, 0.60, 3
+    elif mode == "aggressive":
+        pw, pl, wr, tpd = 0.80*12*0.03, 0.80*12*0.015, 0.60, 4
+    else:  # moderate
+        pw, pl, wr, tpd = 0.20*5*0.04, 0.20*5*0.01, 0.60, 4
+    mc = BoostCalculator.monte_carlo(initial, target, days, tpd, wr, pw, pl, n_sims=2000)
+    return mc["success_rate"]
 
 
 # ────────────────────────────────────────────────────────────
@@ -222,38 +383,37 @@ class BoostCalculator:
 
 @dataclass
 class DayRecord:
-    date:           str
-    start_balance:  float
-    end_balance:    float
-    trades:         int
-    wins:           int
-    losses:         int
-    pnl_usd:        float
-    pnl_pct:        float
+    date:          str
+    start_balance: float
+    end_balance:   float
+    trades:        int
+    wins:          int
+    losses:        int
+    pnl_usd:       float
+    pnl_pct:       float
 
 
 @dataclass
 class BoostSession:
-    initial_balance:     float
-    target_balance:      float
-    deadline_days:       int
-    started_at:          str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    current_balance:     float = 0.0
-    peak_balance:        float = 0.0
-    session_trades:      int = 0
-    session_wins:        int = 0
-    session_losses:      int = 0
-    consecutive_losses:  int = 0
-    day_records:         List[DayRecord] = field(default_factory=list)
-    active:              bool = True
-    stopped_reason:      str = ""
-
-    # Состояние текущего дня
-    day_start_balance:   float = 0.0
-    day_trades:          int = 0
-    day_wins:            int = 0
-    day_losses:          int = 0
-    day_start_str:       str = ""
+    initial_balance:    float
+    target_balance:     float
+    deadline_days:      int
+    mode:               str = "moderate"
+    started_at:         str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    current_balance:    float = 0.0
+    peak_balance:       float = 0.0
+    session_trades:     int = 0
+    session_wins:       int = 0
+    session_losses:     int = 0
+    consecutive_losses: int = 0
+    day_records:        List[DayRecord] = field(default_factory=list)
+    active:             bool = True
+    stopped_reason:     str = ""
+    day_start_balance:  float = 0.0
+    day_trades:         int = 0
+    day_wins:           int = 0
+    day_losses:         int = 0
+    day_start_str:      str = ""
 
     def __post_init__(self):
         if self.current_balance == 0.0:
@@ -267,8 +427,7 @@ class BoostSession:
 
     @property
     def elapsed_days(self) -> float:
-        delta = datetime.utcnow() - datetime.fromisoformat(self.started_at)
-        return delta.total_seconds() / 86400
+        return (datetime.utcnow() - datetime.fromisoformat(self.started_at)).total_seconds() / 86400
 
     @property
     def days_remaining(self) -> float:
@@ -285,15 +444,18 @@ class BoostSession:
     def phase_index(self) -> int:
         ratio = self.current_balance / self.initial_balance
         if ratio < 3.0:
-            return 0   # Разгон
+            return 0
         elif ratio < 8.0:
-            return 1   # Рост
-        else:
-            return 2   # Закрепление
+            return 1
+        return 2
+
+    @property
+    def phases(self) -> List[BoostPhaseConfig]:
+        return BOOST_MODES.get(self.mode, PHASES_MODERATE)
 
     @property
     def phase(self) -> BoostPhaseConfig:
-        return PHASES[self.phase_index]
+        return self.phases[self.phase_index]
 
     @property
     def required_daily_return_pct(self) -> float:
@@ -328,19 +490,12 @@ class BoostSession:
 # ────────────────────────────────────────────────────────────
 
 class BoostManager:
-    """
-    Управляет сессией разгона.
-    Интегрируется с торговым циклом через is_active / get_risk_params.
-    """
-
-    PAUSE_ON_CONSEC_LOSSES = 3   # пауза после N убытков подряд
-    PAUSE_DURATION_MIN     = 60  # на сколько минут
-    EMERGENCY_DD_PCT       = 40  # % просадки от пика → аварийная остановка
+    PAUSE_DURATION_MIN = 60
 
     def __init__(self, persist_path: str = "data/boost_session.json"):
-        self.session:    Optional[BoostSession] = None
-        self._pause_until: Optional[datetime]  = None
-        self._persist    = Path(persist_path)
+        self.session:      Optional[BoostSession] = None
+        self._pause_until: Optional[datetime]     = None
+        self._persist      = Path(persist_path)
         self._load()
 
     # ── управление сессией ────────────────────────────────
@@ -348,9 +503,12 @@ class BoostManager:
     def start(
         self,
         initial_balance: float,
-        target_balance: float,
-        deadline_days: int = 7,
+        target_balance:  float,
+        deadline_days:   int = 7,
+        mode:            str = "moderate",
     ) -> Dict:
+        if mode not in BOOST_MODES:
+            return {"success": False, "error": f"Неизвестный режим '{mode}'. Доступны: {list(BOOST_MODES)}"}
         if self.session and self.session.active:
             return {"success": False, "error": "Сессия уже активна. Сначала остановите её."}
 
@@ -358,13 +516,18 @@ class BoostManager:
             initial_balance=initial_balance,
             target_balance=target_balance,
             deadline_days=deadline_days,
+            mode=mode,
         )
         self._pause_until = None
         self._save()
-        analysis = BoostCalculator.full_analysis(initial_balance, target_balance, deadline_days)
+
+        analysis = BoostCalculator.full_analysis(initial_balance, target_balance, deadline_days, mode)
+        safety = _MODE_SAFETY[mode]
         logger.info(
-            f"[Boost] Старт: ${initial_balance:.2f} → ${target_balance:.2f} "
-            f"за {deadline_days} дн. Требуется: {analysis['required_daily_pct']}%/день"
+            f"[Boost] Старт ({mode}): ${initial_balance:.2f} → ${target_balance:.2f} "
+            f"за {deadline_days} дн. Требуется: {analysis['required_daily_pct']}%/день | "
+            f"Плечо: {self.session.phase.leverage}x | "
+            f"Стоп просадки: {safety['emergency_dd']}%"
         )
         return {"success": True, "session": self._session_dict(), "analysis": analysis}
 
@@ -385,11 +548,22 @@ class BoostManager:
 
     def strategy_allowed(self, strategy_id: str) -> bool:
         if not self.is_active:
-            return True   # вне boost — всё разрешено
+            return True
         return strategy_id in self.session.phase.allowed_strategies
 
+    @property
+    def _emergency_dd(self) -> int:
+        if not self.session:
+            return 40
+        return _MODE_SAFETY.get(self.session.mode, {}).get("emergency_dd", 40)
+
+    @property
+    def _pause_on_losses(self) -> int:
+        if not self.session:
+            return 3
+        return _MODE_SAFETY.get(self.session.mode, {}).get("pause_losses", 3)
+
     def can_open_trade(self, balance: float) -> Dict:
-        """Дополнительные boost-проверки (вызываются ПОСЛЕ стандартного RiskManager)."""
         if not self.is_active:
             return {"allowed": True}
 
@@ -397,7 +571,6 @@ class BoostManager:
         sess.current_balance = balance
         sess.peak_balance    = max(sess.peak_balance, balance)
 
-        # Дедлайн истёк
         if sess.days_remaining <= 0:
             if balance >= sess.target_balance:
                 self.stop("🎉 Цель достигнута! Дедлайн истёк.")
@@ -405,19 +578,17 @@ class BoostManager:
                 self.stop("⏰ Дедлайн истёк без достижения цели.")
             return {"allowed": False, "reason": sess.stopped_reason}
 
-        # Цель достигнута
         if balance >= sess.target_balance:
             self.stop(f"🎉 Цель ${sess.target_balance:.2f} достигнута!")
             return {"allowed": False, "reason": sess.stopped_reason}
 
-        # Аварийная просадка от пика
-        if sess.drawdown_from_peak_pct >= self.EMERGENCY_DD_PCT:
+        if sess.drawdown_from_peak_pct >= self._emergency_dd:
             self.stop(
-                f"🚨 Аварийная просадка {sess.drawdown_from_peak_pct:.1f}% от пика"
+                f"🚨 Аварийная просадка {sess.drawdown_from_peak_pct:.1f}% от пика "
+                f"(лимит {self._emergency_dd}%)"
             )
             return {"allowed": False, "reason": sess.stopped_reason}
 
-        # Дневной лимит убытков
         if sess.day_drawdown_pct >= sess.phase.daily_loss_limit_pct:
             return {
                 "allowed": False,
@@ -427,7 +598,6 @@ class BoostManager:
                 ),
             }
 
-        # Пауза после серии убытков
         if self._pause_until and datetime.utcnow() < self._pause_until:
             rem = (self._pause_until - datetime.utcnow()).total_seconds() / 60
             return {"allowed": False, "reason": f"Пауза после серии убытков. Осталось {rem:.0f} мин"}
@@ -435,10 +605,6 @@ class BoostManager:
         return {"allowed": True}
 
     def get_risk_params(self) -> Optional[Dict]:
-        """
-        Возвращает параметры риска для текущей фазы.
-        Торговый цикл применяет их вместо стандартных.
-        """
         if not self.is_active:
             return None
         ph = self.session.phase
@@ -446,24 +612,21 @@ class BoostManager:
             "leverage":         ph.leverage,
             "risk_pct":         ph.risk_pct,
             "max_positions":    ph.max_positions,
-            "tp_override_pct":  ph.tp_pct,   # переопределяет TP стратегии
-            "sl_override_pct":  ph.sl_pct,   # переопределяет SL стратегии
+            "tp_override_pct":  ph.tp_pct,
+            "sl_override_pct":  ph.sl_pct,
             "daily_loss_limit": ph.daily_loss_limit_pct,
             "phase_name":       ph.name,
             "phase_index":      self.session.phase_index,
+            "mode":             self.session.mode,
         }
 
     def apply_sl_tp(
         self,
         entry: float,
-        side: str,   # "BUY" / "SELL"
+        side:  str,
         original_sl: float,
         original_tp: float,
     ) -> Tuple[float, float]:
-        """
-        Переопределяет SL/TP под параметры фазы.
-        Берём более консервативный из двух SL (ближе к entry).
-        """
         if not self.is_active:
             return original_sl, original_tp
 
@@ -471,8 +634,8 @@ class BoostManager:
         if side == "BUY":
             boost_sl = entry * (1 - ph.sl_pct / 100)
             boost_tp = entry * (1 + ph.tp_pct / 100)
-            sl = max(boost_sl, original_sl)   # ближайший стоп
-            tp = max(boost_tp, original_tp)   # лучший TP
+            sl = max(boost_sl, original_sl)   # ближайший стоп (безопаснее)
+            tp = max(boost_tp, original_tp)   # дальний TP  (выгоднее)
         else:
             boost_sl = entry * (1 + ph.sl_pct / 100)
             boost_tp = entry * (1 - ph.tp_pct / 100)
@@ -483,21 +646,17 @@ class BoostManager:
 
     def calculate_qty(
         self,
-        balance: float,
+        balance:     float,
         entry_price: float,
-        leverage: int,
+        leverage:    int,
     ) -> float:
-        """
-        Compound-sizing: используем % баланса как маржу.
-        qty = (balance × risk_pct / 100) × leverage / entry_price
-        """
+        """Compound sizing: risk_pct% баланса как маржа × плечо / цена."""
         if not self.is_active:
             return 0.0
-        ph = self.session.phase
-        margin   = balance * (ph.risk_pct / 100)
+        ph      = self.session.phase
+        margin  = balance * (ph.risk_pct / 100)
         notional = margin * leverage
-        qty      = notional / entry_price
-        return round(qty, 6)
+        return round(notional / entry_price, 6)
 
     # ── регистрация результатов ───────────────────────────
 
@@ -510,6 +669,7 @@ class BoostManager:
         sess.session_trades += 1
         sess.day_trades     += 1
 
+        prev_phase = sess.phase_index
         if pnl_usd > 0:
             sess.session_wins      += 1
             sess.day_wins          += 1
@@ -518,23 +678,22 @@ class BoostManager:
             sess.session_losses    += 1
             sess.day_losses        += 1
             sess.consecutive_losses += 1
-            if sess.consecutive_losses >= self.PAUSE_ON_CONSEC_LOSSES:
+            if sess.consecutive_losses >= self._pause_on_losses:
                 self._pause_until = datetime.utcnow() + timedelta(minutes=self.PAUSE_DURATION_MIN)
                 logger.warning(
                     f"[Boost] {sess.consecutive_losses} убытков подряд → "
                     f"пауза {self.PAUSE_DURATION_MIN} мин"
                 )
 
-        phase_old = sess.phase_index
-        # Проверяем переход фазы
-        phase_new = sess.phase_index
-        if phase_new != phase_old:
+        # Лог перехода фазы
+        new_phase = sess.phase_index
+        if new_phase != prev_phase:
             logger.info(
-                f"[Boost] Переход в фазу '{PHASES[phase_new].name}' "
-                f"(баланс=${balance:.2f}, x{balance/sess.initial_balance:.1f})"
+                f"[Boost] ▶ Фаза '{sess.phase.name}' "
+                f"(баланс=${balance:.2f}, ×{balance/sess.initial_balance:.1f}, режим={sess.mode})"
             )
 
-        # Проверяем переход дня
+        # Смена дня
         today = datetime.utcnow().date().isoformat()
         if today != sess.day_start_str:
             sess.day_records.append(DayRecord(
@@ -545,7 +704,9 @@ class BoostManager:
                 wins=sess.day_wins,
                 losses=sess.day_losses,
                 pnl_usd=round(balance - sess.day_start_balance, 4),
-                pnl_pct=round((balance - sess.day_start_balance) / sess.day_start_balance * 100, 2),
+                pnl_pct=round(
+                    (balance - sess.day_start_balance) / sess.day_start_balance * 100, 2
+                ),
             ))
             sess.day_start_balance = balance
             sess.day_start_str     = today
@@ -559,29 +720,32 @@ class BoostManager:
         if not self.session:
             return {"active": False, "message": "Нет активной сессии"}
         sess = self.session
+        safety = _MODE_SAFETY.get(sess.mode, {})
         return {
-            "active":              sess.active,
-            "initial_balance":     sess.initial_balance,
-            "current_balance":     sess.current_balance,
-            "target_balance":      sess.target_balance,
-            "progress_pct":        round(sess.progress_pct, 1),
-            "multiplier":          round(sess.current_balance / sess.initial_balance, 2),
-            "phase":               sess.phase.name,
-            "phase_index":         sess.phase_index,
-            "days_remaining":      round(sess.days_remaining, 1),
-            "elapsed_days":        round(sess.elapsed_days, 1),
-            "required_daily_pct":  sess.required_daily_return_pct,
-            "peak_balance":        sess.peak_balance,
-            "drawdown_from_peak":  sess.drawdown_from_peak_pct,
-            "day_drawdown":        sess.day_drawdown_pct,
-            "session_trades":      sess.session_trades,
-            "session_win_rate":    sess.session_win_rate,
-            "consecutive_losses":  sess.consecutive_losses,
-            "paused_until":        self._pause_until.isoformat() if self._pause_until else None,
-            "stopped_reason":      sess.stopped_reason,
-            "day_records":         [asdict(r) for r in sess.day_records],
-            "risk_params":         self.get_risk_params(),
-            "allowed_strategies":  sess.phase.allowed_strategies,
+            "active":             sess.active,
+            "mode":               sess.mode,
+            "initial_balance":    sess.initial_balance,
+            "current_balance":    sess.current_balance,
+            "target_balance":     sess.target_balance,
+            "progress_pct":       round(sess.progress_pct, 1),
+            "multiplier":         round(sess.current_balance / sess.initial_balance, 2),
+            "phase":              sess.phase.name,
+            "phase_index":        sess.phase_index,
+            "days_remaining":     round(sess.days_remaining, 1),
+            "elapsed_days":       round(sess.elapsed_days, 1),
+            "required_daily_pct": sess.required_daily_return_pct,
+            "peak_balance":       sess.peak_balance,
+            "drawdown_from_peak": sess.drawdown_from_peak_pct,
+            "day_drawdown":       sess.day_drawdown_pct,
+            "emergency_dd_limit": safety.get("emergency_dd"),
+            "session_trades":     sess.session_trades,
+            "session_win_rate":   sess.session_win_rate,
+            "consecutive_losses": sess.consecutive_losses,
+            "paused_until":       self._pause_until.isoformat() if self._pause_until else None,
+            "stopped_reason":     sess.stopped_reason,
+            "day_records":        [asdict(r) for r in sess.day_records],
+            "risk_params":        self.get_risk_params(),
+            "allowed_strategies": sess.phase.allowed_strategies,
         }
 
     def _session_dict(self) -> Dict:
@@ -589,15 +753,16 @@ class BoostManager:
             return {}
         s = self.session
         return {
-            "initial_balance":    s.initial_balance,
-            "current_balance":    s.current_balance,
-            "target_balance":     s.target_balance,
-            "started_at":         s.started_at,
-            "deadline_days":      s.deadline_days,
-            "active":             s.active,
-            "stopped_reason":     s.stopped_reason,
-            "progress_pct":       round(s.progress_pct, 1),
-            "phase":              s.phase.name,
+            "initial_balance":  s.initial_balance,
+            "current_balance":  s.current_balance,
+            "target_balance":   s.target_balance,
+            "started_at":       s.started_at,
+            "deadline_days":    s.deadline_days,
+            "mode":             s.mode,
+            "active":           s.active,
+            "stopped_reason":   s.stopped_reason,
+            "progress_pct":     round(s.progress_pct, 1),
+            "phase":            s.phase.name,
         }
 
     def _save(self):
@@ -605,7 +770,7 @@ class BoostManager:
             self._persist.parent.mkdir(parents=True, exist_ok=True)
             if self.session:
                 data = {
-                    "session": asdict(self.session),
+                    "session":     asdict(self.session),
                     "pause_until": self._pause_until.isoformat() if self._pause_until else None,
                 }
                 self._persist.write_text(json.dumps(data, indent=2, default=str))
@@ -618,7 +783,6 @@ class BoostManager:
                 data = json.loads(self._persist.read_text())
                 sess_data = data.get("session", {})
                 if sess_data:
-                    # Восстанавливаем DayRecord objects
                     sess_data["day_records"] = [
                         DayRecord(**r) for r in sess_data.get("day_records", [])
                     ]
@@ -629,8 +793,8 @@ class BoostManager:
                 if data.get("pause_until"):
                     self._pause_until = datetime.fromisoformat(data["pause_until"])
                 logger.info(
-                    f"[Boost] Восстановлена сессия: active={self.session.active}, "
-                    f"balance=${self.session.current_balance:.2f}"
+                    f"[Boost] Сессия восстановлена: mode={self.session.mode}, "
+                    f"active={self.session.active}, balance=${self.session.current_balance:.2f}"
                 )
         except Exception as e:
             logger.warning(f"[Boost] Загрузка сессии: {e}")
