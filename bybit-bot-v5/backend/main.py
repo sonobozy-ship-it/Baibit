@@ -45,6 +45,7 @@ from position_calc import (
     fixed_risk_position_size, kelly_position_size, adaptive_sl_tp,
 )
 from db_pool import DBPool
+from boost_mode import BoostManager, BoostCalculator
 
 # ============================================================
 # Загрузка конфига
@@ -122,6 +123,9 @@ class BotState:
         # Strategy Fusion Engine
         self.signal_buffer  = SignalBuffer()
         self.strategy_fusion = StrategyFusion()
+
+        # Boost Mode — разгон депозита
+        self.boost = BoostManager()
 
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
@@ -430,6 +434,10 @@ async def trading_loop():
                     if not strat.enabled or strat.auto_disabled:
                         continue
 
+                    # Boost-режим: пропускаем стратегии вне разрешённого списка
+                    if not state.boost.strategy_allowed(sid):
+                        continue
+
                     df = state.bybit.get_klines(strat.symbol, strat.timeframe, limit=250)
                     if df.empty:
                         continue
@@ -500,6 +508,13 @@ async def trading_loop():
                     if not check["allowed"]:
                         logger.info(f"{sid}: ❌ {check['reason']}")
                         continue
+
+                    # Boost-режим: дополнительные проверки фазы
+                    if state.boost.is_active:
+                        boost_check = state.boost.can_open_trade(balance)
+                        if not boost_check["allowed"]:
+                            logger.info(f"{sid}: 🚫 Boost: {boost_check['reason']}")
+                            continue
 
                     # Проверка плеча и notional экспозиции
                     lev_check = state.risk_manager.check_leverage(sid, strat.leverage, balance)
@@ -616,8 +631,21 @@ async def trading_loop():
                                 "info",
                             )
 
+                    # Boost-режим: переопределить SL/TP и leverage
+                    boost_params = state.boost.get_risk_params()
+                    if boost_params:
+                        signal.stop_loss, signal.take_profit = state.boost.apply_sl_tp(
+                            entry=signal.entry_price,
+                            side=signal.action,
+                            original_sl=signal.stop_loss,
+                            original_tp=signal.take_profit,
+                        )
+                        strat.leverage = boost_params["leverage"]
+
                     # ============== Position Sizing ==============
-                    if state.use_kelly and ml_prediction and ml_prediction.get("available"):
+                    if state.boost.is_active:
+                        qty = state.boost.calculate_qty(balance, signal.entry_price, strat.leverage)
+                    elif state.use_kelly and ml_prediction and ml_prediction.get("available"):
                         kelly_res = kelly_position_size(
                             balance=balance,
                             entry=signal.entry_price,
@@ -780,6 +808,10 @@ async def trading_loop():
                                 asyncio.create_task(state.telegram.notify_trade_close(
                                     sid, strat.symbol, pnl_usd, exit_reason
                                 ))
+                                # Boost: регистрируем результат, обновляем фазу
+                                new_balance = state.bybit.get_balance("USDT")
+                                state.boost.register_trade(pnl_usd, new_balance)
+
                                 # Проверяем нужно ли переобучение ML
                                 if state.ml_enabled and ML_AVAILABLE and state.continuous_trainer:
                                     asyncio.create_task(
@@ -835,6 +867,7 @@ async def broadcast_state():
         },
         "sentiment": state.news_manager.get_current_sentiment() if state.news_enabled else None,
         "drift_status": state.drift_monitor.get_all_metrics(),
+        "boost_status": state.boost.get_status() if state.boost.is_active else {"active": False},
         "timestamp": datetime.utcnow().isoformat(),
     }
     disconnected = []
@@ -1553,6 +1586,61 @@ async def fusion_status():
         "min_fusion_score": StrategyFusion.MIN_FUSION_SCORE,
         "cooldown_minutes": StrategyFusion.COOLDOWN_MINUTES,
     }
+
+
+# ============================================================
+# BOOST MODE ENDPOINTS
+# ============================================================
+class BoostStartRequest(BaseModel):
+    initial_balance: float
+    target_balance: float
+    deadline_days: int = 7
+
+
+@app.post("/api/boost/start")
+async def boost_start(req: BoostStartRequest):
+    """Запустить сессию разгона депозита."""
+    if req.initial_balance <= 0 or req.target_balance <= req.initial_balance:
+        raise HTTPException(400, "Некорректные параметры: target должен быть > initial")
+    result = state.boost.start(req.initial_balance, req.target_balance, req.deadline_days)
+    if result.get("success"):
+        asyncio.create_task(state.telegram.send(
+            f"🚀 <b>Boost Mode запущен</b>\n"
+            f"${req.initial_balance:.2f} → ${req.target_balance:.2f} за {req.deadline_days} дн.\n"
+            f"Требуется: {result['analysis']['required_daily_pct']}%/день"
+        ))
+    return result
+
+
+@app.get("/api/boost/status")
+async def boost_status():
+    """Текущее состояние boost-сессии."""
+    return state.boost.get_status()
+
+
+@app.post("/api/boost/stop")
+async def boost_stop(reason: str = "Ручная остановка"):
+    """Остановить boost-сессию."""
+    result = state.boost.stop(reason)
+    if result.get("success"):
+        asyncio.create_task(state.telegram.send(
+            f"🛑 <b>Boost Mode остановлен</b>\n{reason}"
+        ))
+    return result
+
+
+class BoostAnalyzeRequest(BaseModel):
+    initial: float = 10.0
+    target: float = 100.0
+    days: int = 7
+
+
+@app.post("/api/boost/analyze")
+async def boost_analyze(req: BoostAnalyzeRequest):
+    """Математический анализ плана разгона с Monte Carlo симуляцией."""
+    if req.initial <= 0 or req.target <= req.initial or req.days <= 0:
+        raise HTTPException(400, "Некорректные параметры")
+    return BoostCalculator.full_analysis(req.initial, req.target, req.days)
 
 
 @app.post("/api/ml/anomaly/fit")
