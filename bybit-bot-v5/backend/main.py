@@ -1175,24 +1175,28 @@ async def ml_regime_current(symbol: str):
 @app.get("/api/ml/signals/recent")
 async def ml_recent_signals(strategy_id: Optional[str] = None, limit: int = 50):
     """Последние сигналы со снимками фич."""
-    import sqlite3, json
-    conn = sqlite3.connect(state.ml_store.db_path)
-    conn.row_factory = sqlite3.Row
     query = """
         SELECT id, timestamp, strategy_id, symbol, action,
                entry_price, ml_prediction, ml_confidence,
                trade_taken, outcome, pnl_r, exit_reason
         FROM signal_snapshots
     """
-    params = []
+    params: list = []
     if strategy_id:
         query += " WHERE strategy_id = ?"
         params.append(strategy_id)
     query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
-    rows = [dict(r) for r in conn.execute(query, params).fetchall()]
-    conn.close()
-    return rows
+    pool = state.ml_store.pool
+    with pool.connection() as conn:
+        if pool.is_mysql:
+            with conn.cursor() as c:
+                c.execute(pool.adapt(query), params)
+                return list(c.fetchall())
+        else:
+            import sqlite3
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute(pool.adapt(query), params).fetchall()]
 
 
 # ============================================================

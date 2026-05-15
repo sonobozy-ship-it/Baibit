@@ -93,20 +93,18 @@ class AutoOptimizer:
 
         # Сохранение в БД
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.data_store.db_path)
-            conn.execute("""
+            sql = self.data_store.pool.adapt("""
                 INSERT INTO optimization_runs (
                     run_id, strategy_id, symbol, started_at, completed_at,
                     best_params_json, best_score, method, trials
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                run_id, strategy_class.ID, symbol,
-                datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
-                str(best_params), best_score, "optuna_bayesian", n_trials,
-            ))
-            conn.commit()
-            conn.close()
+                ) VALUES (?,?,?,?,?, ?,?,?,?)
+            """)
+            with self.data_store.pool.cursor() as c:
+                c.execute(sql, (
+                    run_id, strategy_class.ID, symbol,
+                    datetime.utcnow().isoformat(), datetime.utcnow().isoformat(),
+                    str(best_params), best_score, "optuna_bayesian", n_trials,
+                ))
         except Exception as e:
             logger.error(f"Сохранение оптимизации: {e}")
 

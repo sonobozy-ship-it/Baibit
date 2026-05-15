@@ -1,15 +1,20 @@
 """
-Гибридное хранилище:
-- SQLite: метаданные сделок, фичи, ML-предсказания
+Гибридное хранилище ML-данных:
+- MySQL или SQLite (через DBPool): метаданные сигналов, модели, предсказания
 - Parquet: исторические свечи (быстро для ML)
 """
-import sqlite3
 import json
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
 import logging
+import sys
+import os
+
+# Добавляем родительскую директорию в путь чтобы найти db_pool
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from db_pool import DBPool
 
 logger = logging.getLogger(__name__)
 
@@ -27,100 +32,102 @@ class MLDataStore:
     def __init__(self, db_path: str = "data/ml_data.db",
                  candles_dir: str = "data/candles",
                  features_dir: str = "data/features"):
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         Path(candles_dir).mkdir(parents=True, exist_ok=True)
         Path(features_dir).mkdir(parents=True, exist_ok=True)
 
         self.db_path = db_path
         self.candles_dir = Path(candles_dir)
         self.features_dir = Path(features_dir)
+        self.pool = DBPool(db_path)
         self._init_db()
 
     def _init_db(self):
-        """Инициализация таблиц SQLite."""
-        conn = sqlite3.connect(self.db_path)
+        """Инициализация таблиц (MySQL или SQLite)."""
+        ai = DBPool.ai_pk()
+        real = DBPool.real_type()
+        tjson = DBPool.text_json()
+        now = DBPool.now_default()
 
-        # Снимки сигналов перед открытием
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS signal_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                strategy_id TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                timeframe TEXT,
-                action TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                stop_loss REAL,
-                take_profit REAL,
-                features_json TEXT NOT NULL,
-                ml_prediction REAL,
-                ml_confidence REAL,
-                ml_model_version TEXT,
-                trade_taken INTEGER DEFAULT 0,
-                trade_id INTEGER,
-                outcome TEXT,
-                pnl_r REAL,
-                exit_reason TEXT,
-                duration_min INTEGER,
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_snap_strategy ON signal_snapshots(strategy_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_snap_outcome ON signal_snapshots(outcome)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_snap_timestamp ON signal_snapshots(timestamp)")
-
-        # Версии моделей
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ml_models (
-                version TEXT PRIMARY KEY,
-                strategy_id TEXT,
-                model_type TEXT,
-                trained_at TEXT,
-                samples_count INTEGER,
-                accuracy REAL,
-                precision_val REAL,
-                recall_val REAL,
-                f1_score REAL,
-                roc_auc REAL,
-                feature_importance_json TEXT,
-                hyperparams_json TEXT,
-                file_path TEXT,
-                active INTEGER DEFAULT 0
-            )
-        """)
-
-        # Рыночные режимы (кластеры)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS market_regimes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                regime_id INTEGER NOT NULL,
-                regime_name TEXT,
+        tables = [
+            f"""CREATE TABLE IF NOT EXISTS signal_snapshots (
+                id               {ai},
+                timestamp        VARCHAR(32) NOT NULL,
+                strategy_id      VARCHAR(16) NOT NULL,
+                symbol           VARCHAR(20) NOT NULL,
+                timeframe        VARCHAR(8),
+                action           VARCHAR(8)  NOT NULL,
+                entry_price      {real}      NOT NULL,
+                stop_loss        {real},
+                take_profit      {real},
+                features_json    {tjson}     NOT NULL,
+                ml_prediction    {real},
+                ml_confidence    {real},
+                ml_model_version VARCHAR(64),
+                trade_taken      TINYINT     DEFAULT 0,
+                trade_id         INT,
+                outcome          VARCHAR(8),
+                pnl_r            {real},
+                exit_reason      VARCHAR(16),
+                duration_min     INT,
+                created_at       VARCHAR(32) {now}
+            )""",
+            f"""CREATE TABLE IF NOT EXISTS ml_models (
+                version          VARCHAR(64) PRIMARY KEY,
+                strategy_id      VARCHAR(16),
+                model_type       VARCHAR(32),
+                trained_at       VARCHAR(32),
+                samples_count    INT,
+                accuracy         {real},
+                precision_val    {real},
+                recall_val       {real},
+                f1_score         {real},
+                roc_auc          {real},
+                feature_importance_json {tjson},
+                hyperparams_json {tjson},
+                file_path        TEXT,
+                active           TINYINT DEFAULT 0
+            )""",
+            f"""CREATE TABLE IF NOT EXISTS market_regimes (
+                id           {ai},
+                timestamp    VARCHAR(32) NOT NULL,
+                symbol       VARCHAR(20) NOT NULL,
+                regime_id    INT         NOT NULL,
+                regime_name  VARCHAR(32),
                 features_summary TEXT,
-                created_at TEXT DEFAULT (datetime('now'))
-            )
-        """)
-
-        # История оптимизаций
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS optimization_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT UNIQUE,
-                strategy_id TEXT,
-                symbol TEXT,
-                started_at TEXT,
-                completed_at TEXT,
+                created_at   VARCHAR(32) {now}
+            )""",
+            f"""CREATE TABLE IF NOT EXISTS optimization_runs (
+                id           {ai},
+                run_id       VARCHAR(16) UNIQUE,
+                strategy_id  VARCHAR(16),
+                symbol       VARCHAR(20),
+                started_at   VARCHAR(32),
+                completed_at VARCHAR(32),
                 best_params_json TEXT,
-                best_score REAL,
-                method TEXT,
-                trials INTEGER
-            )
-        """)
+                best_score   {real},
+                method       VARCHAR(32),
+                trials       INT
+            )""",
+        ]
+        indexes = [
+            ("idx_snap_strategy", "signal_snapshots", "strategy_id"),
+            ("idx_snap_outcome",  "signal_snapshots", "outcome"),
+            ("idx_snap_timestamp","signal_snapshots", "timestamp"),
+        ]
 
-        conn.commit()
-        conn.close()
-        logger.info(f"ML Data Store initialized: {self.db_path}")
+        with self.pool.cursor() as c:
+            for ddl in tables:
+                c.execute(ddl)
+            for idx_name, tbl, col in indexes:
+                if self.pool.is_mysql:
+                    try:
+                        c.execute(f"CREATE INDEX {idx_name} ON {tbl}({col})")
+                    except Exception:
+                        pass
+                else:
+                    c.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl}({col})")
+
+        logger.info(f"ML Data Store готов ({'MySQL' if self.pool.is_mysql else self.db_path})")
 
     # ========== СВЕЧИ (PARQUET) ==========
     def save_candles(self, symbol: str, timeframe: str, df: pd.DataFrame):
@@ -152,19 +159,14 @@ class MLDataStore:
 
     # ========== СИГНАЛЫ И ФИЧИ ==========
     def save_signal_snapshot(self, snapshot: Dict) -> int:
-        """
-        Сохранить снимок сигнала перед открытием сделки.
-        Возвращает snapshot_id для последующего обновления outcome.
-        """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
+        sql = self.pool.adapt("""
             INSERT INTO signal_snapshots (
                 timestamp, strategy_id, symbol, timeframe, action,
                 entry_price, stop_loss, take_profit, features_json,
                 ml_prediction, ml_confidence, ml_model_version, trade_taken
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
+            ) VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?)
+        """)
+        values = (
             snapshot.get("timestamp", datetime.utcnow().isoformat()),
             snapshot["strategy_id"],
             snapshot["symbol"],
@@ -178,166 +180,177 @@ class MLDataStore:
             snapshot.get("ml_confidence"),
             snapshot.get("ml_model_version"),
             1 if snapshot.get("trade_taken") else 0,
-        ))
-        snapshot_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        return snapshot_id
+        )
+        with self.pool.cursor() as c:
+            c.execute(sql, values)
+            return c.lastrowid
 
     def update_signal_outcome(self, snapshot_id: int, outcome: str,
                               pnl_r: float, exit_reason: str,
                               duration_min: int, trade_id: Optional[int] = None):
-        """Обновить outcome для снимка после закрытия сделки."""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("""
+        sql = self.pool.adapt("""
             UPDATE signal_snapshots
-            SET outcome = ?, pnl_r = ?, exit_reason = ?,
-                duration_min = ?, trade_id = ?
-            WHERE id = ?
-        """, (outcome, pnl_r, exit_reason, duration_min, trade_id, snapshot_id))
-        conn.commit()
-        conn.close()
+            SET outcome=?, pnl_r=?, exit_reason=?, duration_min=?, trade_id=?
+            WHERE id=?
+        """)
+        with self.pool.cursor() as c:
+            c.execute(sql, (outcome, pnl_r, exit_reason, duration_min, trade_id, snapshot_id))
 
     def get_training_data(self, strategy_id: Optional[str] = None,
                           min_samples: int = 50,
                           only_taken_trades: bool = False) -> pd.DataFrame:
-        """
-        Получить размеченные данные для обучения.
-        Возвращает DataFrame с фичами + label (1=win, 0=loss).
-        """
-        conn = sqlite3.connect(self.db_path)
-        query = """
-            SELECT * FROM signal_snapshots
-            WHERE outcome IS NOT NULL AND outcome != ''
-        """
-        params = []
+        query = "SELECT * FROM signal_snapshots WHERE outcome IS NOT NULL AND outcome != ''"
+        params: list = []
         if strategy_id:
             query += " AND strategy_id = ?"
             params.append(strategy_id)
         if only_taken_trades:
             query += " AND trade_taken = 1"
 
-        df = pd.read_sql(query, conn, params=params)
-        conn.close()
+        with self.pool.connection() as conn:
+            df = pd.read_sql(self.pool.adapt(query), conn, params=params)
 
         if df.empty or len(df) < min_samples:
             return pd.DataFrame()
 
-        # Разворачиваем JSON фичи в колонки
         features_df = pd.json_normalize(df["features_json"].apply(json.loads))
-
-        # Метки: win=1, loss=0
-        features_df["label"] = (df["outcome"] == "win").astype(int)
-        features_df["pnl_r"] = df["pnl_r"]
-        features_df["strategy_id"] = df["strategy_id"]
-        features_df["symbol"] = df["symbol"]
-        features_df["timestamp"] = df["timestamp"]
-        features_df["snapshot_id"] = df["id"]
-
+        features_df["label"]       = (df["outcome"] == "win").astype(int)
+        features_df["pnl_r"]       = df["pnl_r"].values
+        features_df["strategy_id"] = df["strategy_id"].values
+        features_df["symbol"]      = df["symbol"].values
+        features_df["timestamp"]   = df["timestamp"].values
+        features_df["snapshot_id"] = df["id"].values
         return features_df
 
     # ========== ML МОДЕЛИ ==========
     def register_model(self, version: str, strategy_id: str, model_type: str,
                        metrics: Dict, hyperparams: Dict, feature_importance: Dict,
                        file_path: str, samples_count: int, set_active: bool = True):
-        """Регистрация новой обученной модели."""
-        conn = sqlite3.connect(self.db_path)
-        # Деактивируем старые модели этой стратегии
-        if set_active:
-            conn.execute("UPDATE ml_models SET active = 0 WHERE strategy_id = ?", (strategy_id,))
-        conn.execute("""
-            INSERT OR REPLACE INTO ml_models (
-                version, strategy_id, model_type, trained_at, samples_count,
-                accuracy, precision_val, recall_val, f1_score, roc_auc,
-                feature_importance_json, hyperparams_json, file_path, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            version, strategy_id, model_type, datetime.utcnow().isoformat(),
-            samples_count,
-            metrics.get("accuracy", 0),
-            metrics.get("precision", 0),
-            metrics.get("recall", 0),
-            metrics.get("f1", 0),
-            metrics.get("roc_auc", 0),
-            json.dumps(feature_importance),
-            json.dumps(hyperparams),
-            file_path,
-            1 if set_active else 0,
-        ))
-        conn.commit()
-        conn.close()
+        with self.pool.cursor() as c:
+            if set_active:
+                c.execute(self.pool.adapt("UPDATE ml_models SET active=0 WHERE strategy_id=?"),
+                          (strategy_id,))
+            upsert = self.pool.adapt("""
+                INSERT INTO ml_models (
+                    version, strategy_id, model_type, trained_at, samples_count,
+                    accuracy, precision_val, recall_val, f1_score, roc_auc,
+                    feature_importance_json, hyperparams_json, file_path, active
+                ) VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?)
+                ON DUPLICATE KEY UPDATE
+                    trained_at=VALUES(trained_at), samples_count=VALUES(samples_count),
+                    accuracy=VALUES(accuracy), f1_score=VALUES(f1_score),
+                    roc_auc=VALUES(roc_auc), file_path=VALUES(file_path),
+                    active=VALUES(active)
+            """) if self.pool.is_mysql else self.pool.adapt("""
+                INSERT OR REPLACE INTO ml_models (
+                    version, strategy_id, model_type, trained_at, samples_count,
+                    accuracy, precision_val, recall_val, f1_score, roc_auc,
+                    feature_importance_json, hyperparams_json, file_path, active
+                ) VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?)
+            """)
+            c.execute(upsert, (
+                version, strategy_id, model_type, datetime.utcnow().isoformat(),
+                samples_count,
+                metrics.get("accuracy", 0), metrics.get("precision", 0),
+                metrics.get("recall", 0), metrics.get("f1", 0), metrics.get("roc_auc", 0),
+                json.dumps(feature_importance), json.dumps(hyperparams),
+                file_path, 1 if set_active else 0,
+            ))
         logger.info(f"Модель {version} зарегистрирована для {strategy_id}")
 
     def get_active_model(self, strategy_id: str) -> Optional[Dict]:
-        """Получить активную модель для стратегии."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM ml_models WHERE strategy_id = ? AND active = 1 ORDER BY trained_at DESC LIMIT 1",
-            (strategy_id,)
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
+        sql = self.pool.adapt(
+            "SELECT * FROM ml_models WHERE strategy_id=? AND active=1 "
+            "ORDER BY trained_at DESC LIMIT 1"
+        )
+        with self.pool.connection() as conn:
+            if self.pool.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(sql, (strategy_id,))
+                    return c.fetchone()
+            else:
+                import sqlite3
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(sql, (strategy_id,)).fetchone()
+                return dict(row) if row else None
 
     def list_models(self, strategy_id: Optional[str] = None) -> List[Dict]:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
         query = "SELECT * FROM ml_models"
-        params = []
+        params: list = []
         if strategy_id:
-            query += " WHERE strategy_id = ?"
+            query += " WHERE strategy_id=?"
             params.append(strategy_id)
         query += " ORDER BY trained_at DESC"
-        rows = [dict(r) for r in conn.execute(query, params).fetchall()]
-        conn.close()
-        return rows
+        with self.pool.connection() as conn:
+            if self.pool.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(self.pool.adapt(query), params)
+                    return list(c.fetchall())
+            else:
+                import sqlite3
+                conn.row_factory = sqlite3.Row
+                return [dict(r) for r in conn.execute(self.pool.adapt(query), params).fetchall()]
 
     # ========== СТАТИСТИКА ==========
     def get_ml_stats(self) -> Dict:
-        """Общая статистика ML-системы."""
-        conn = sqlite3.connect(self.db_path)
-        total_signals = conn.execute("SELECT COUNT(*) FROM signal_snapshots").fetchone()[0]
-        labeled = conn.execute(
-            "SELECT COUNT(*) FROM signal_snapshots WHERE outcome IS NOT NULL"
-        ).fetchone()[0]
-        taken = conn.execute(
-            "SELECT COUNT(*) FROM signal_snapshots WHERE trade_taken = 1"
-        ).fetchone()[0]
-        wins = conn.execute(
-            "SELECT COUNT(*) FROM signal_snapshots WHERE outcome = 'win'"
-        ).fetchone()[0]
+        def scalar(conn, sql):
+            if self.pool.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(sql)
+                    r = c.fetchone()
+                    return list(r.values())[0] if r else 0
+            else:
+                return conn.execute(sql).fetchone()[0]
 
-        per_strategy = conn.execute("""
-            SELECT strategy_id,
-                   COUNT(*) as total,
-                   SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) as labeled,
-                   SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) as wins,
-                   AVG(CASE WHEN outcome IS NOT NULL THEN pnl_r ELSE NULL END) as avg_r
-            FROM signal_snapshots
-            GROUP BY strategy_id
-        """).fetchall()
+        with self.pool.connection() as conn:
+            total   = scalar(conn, "SELECT COUNT(*) FROM signal_snapshots")
+            labeled = scalar(conn, "SELECT COUNT(*) FROM signal_snapshots WHERE outcome IS NOT NULL")
+            taken   = scalar(conn, "SELECT COUNT(*) FROM signal_snapshots WHERE trade_taken=1")
+            wins    = scalar(conn, "SELECT COUNT(*) FROM signal_snapshots WHERE outcome='win'")
+            n_mod   = scalar(conn, "SELECT COUNT(*) FROM ml_models")
+            act_mod = scalar(conn, "SELECT COUNT(*) FROM ml_models WHERE active=1")
 
-        models_count = conn.execute("SELECT COUNT(*) FROM ml_models").fetchone()[0]
-        active_models = conn.execute("SELECT COUNT(*) FROM ml_models WHERE active = 1").fetchone()[0]
-
-        conn.close()
+            per_strat_sql = """
+                SELECT strategy_id,
+                       COUNT(*) as total,
+                       SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) as labeled,
+                       SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
+                       AVG(CASE WHEN outcome IS NOT NULL THEN pnl_r ELSE NULL END) as avg_r
+                FROM signal_snapshots
+                GROUP BY strategy_id
+            """
+            if self.pool.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(per_strat_sql)
+                    rows = c.fetchall()
+                per_strategy = [
+                    {
+                        "strategy_id": r["strategy_id"],
+                        "total": r["total"],
+                        "labeled": r["labeled"] or 0,
+                        "wins": r["wins"] or 0,
+                        "wr": round((r["wins"] or 0) / (r["labeled"] or 1) * 100, 2),
+                        "avg_r": round(r["avg_r"] or 0, 3),
+                    } for r in rows
+                ]
+            else:
+                rows = conn.execute(per_strat_sql).fetchall()
+                per_strategy = [
+                    {
+                        "strategy_id": r[0], "total": r[1],
+                        "labeled": r[2] or 0, "wins": r[3] or 0,
+                        "wr": round((r[3] or 0) / (r[2] or 1) * 100, 2),
+                        "avg_r": round(r[4] or 0, 3),
+                    } for r in rows
+                ]
 
         return {
-            "total_signals": total_signals,
+            "total_signals": total,
             "labeled_signals": labeled,
             "trades_taken": taken,
             "wins": wins,
             "overall_wr": round(wins / labeled * 100, 2) if labeled else 0,
-            "per_strategy": [
-                {
-                    "strategy_id": r[0],
-                    "total": r[1],
-                    "labeled": r[2],
-                    "wins": r[3],
-                    "wr": round(r[3] / r[2] * 100, 2) if r[2] else 0,
-                    "avg_r": round(r[4], 3) if r[4] is not None else 0,
-                } for r in per_strategy
-            ],
-            "models_total": models_count,
-            "active_models": active_models,
+            "per_strategy": per_strategy,
+            "models_total": n_mod,
+            "active_models": act_mod,
         }

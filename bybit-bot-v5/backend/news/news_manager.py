@@ -39,41 +39,52 @@ class NewsManager:
 
     def _init_db(self):
         """Таблицы для новостей."""
+        ai = self.db.ai_pk()
+        real = self.db.real_type()
+        tables = [
+            f"""CREATE TABLE IF NOT EXISTS news_items (
+                id            {ai},
+                source        TEXT NOT NULL,
+                title         TEXT,
+                text          TEXT,
+                url           TEXT,
+                published_at  TEXT,
+                fetched_at    TEXT,
+                sentiment_score    {real},
+                sentiment_magnitude {real},
+                bull_hits     INT,
+                bear_hits     INT,
+                item_type     TEXT,
+                extra_json    TEXT,
+                UNIQUE(source, url)
+            )""",
+            f"""CREATE TABLE IF NOT EXISTS sentiment_history (
+                id                   {ai},
+                timestamp            TEXT NOT NULL,
+                source_type          TEXT,
+                score                {real},
+                magnitude            {real},
+                count                INT,
+                distribution_json    TEXT,
+                deep_analysis_json   TEXT
+            )""",
+        ]
+        indexes = [
+            ("idx_news_fetched", "news_items",       "fetched_at"),
+            ("idx_news_source",  "news_items",       "source"),
+            ("idx_sent_ts",      "sentiment_history", "timestamp"),
+        ]
         with self.db.cursor() as c:
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS news_items (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source TEXT NOT NULL,
-                    title TEXT,
-                    text TEXT,
-                    url TEXT,
-                    published_at TEXT,
-                    fetched_at TEXT,
-                    sentiment_score REAL,
-                    sentiment_magnitude REAL,
-                    bull_hits INTEGER,
-                    bear_hits INTEGER,
-                    item_type TEXT,
-                    extra_json TEXT,
-                    UNIQUE(source, url)
-                )
-            """)
-            c.execute("CREATE INDEX IF NOT EXISTS idx_news_fetched ON news_items(fetched_at)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_news_source ON news_items(source)")
-
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS sentiment_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    source_type TEXT,
-                    score REAL,
-                    magnitude REAL,
-                    count INTEGER,
-                    distribution_json TEXT,
-                    deep_analysis_json TEXT
-                )
-            """)
-            c.execute("CREATE INDEX IF NOT EXISTS idx_sent_ts ON sentiment_history(timestamp)")
+            for ddl in tables:
+                c.execute(ddl)
+            for idx_name, tbl, col in indexes:
+                if self.db.is_mysql:
+                    try:
+                        c.execute(f"CREATE INDEX {idx_name} ON {tbl}({col})")
+                    except Exception:
+                        pass
+                else:
+                    c.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl}({col})")
 
     async def collect_all(self, currencies: List[str] = None) -> Dict:
         """Сбор и анализ изо всех источников."""
@@ -125,6 +136,17 @@ class NewsManager:
         """Сохранение в БД с дедупликацией."""
         if not items:
             return
+        insert_sql = self.db.adapt(
+            "INSERT IGNORE INTO news_items "
+            "(source, title, text, url, published_at, fetched_at, "
+            "sentiment_score, sentiment_magnitude, bull_hits, bear_hits, item_type, extra_json) "
+            "VALUES (?,?,?,?,?,?, ?,?,?,?,?,?)"
+        ) if self.db.is_mysql else self.db.adapt(
+            "INSERT OR IGNORE INTO news_items "
+            "(source, title, text, url, published_at, fetched_at, "
+            "sentiment_score, sentiment_magnitude, bull_hits, bear_hits, item_type, extra_json) "
+            "VALUES (?,?,?,?,?,?, ?,?,?,?,?,?)"
+        )
         with self.db.cursor() as c:
             for item in items:
                 try:
@@ -133,13 +155,7 @@ class NewsManager:
                     extra = {k: v for k, v in item.items()
                              if k not in ("source", "title", "text", "url",
                                           "published", "fetched_at", "sentiment", "summary")}
-                    c.execute("""
-                        INSERT OR IGNORE INTO news_items (
-                            source, title, text, url, published_at, fetched_at,
-                            sentiment_score, sentiment_magnitude,
-                            bull_hits, bear_hits, item_type, extra_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
+                    c.execute(insert_sql, (
                         item.get("source", ""),
                         item.get("title", "")[:500],
                         text[:1000] if text else "",
@@ -157,12 +173,13 @@ class NewsManager:
                     logger.debug(f"Item save skip: {e}")
 
     def _save_sentiment_snapshot(self, result: Dict):
+        sql = self.db.adapt("""
+            INSERT INTO sentiment_history (
+                timestamp, source_type, score, magnitude, count, distribution_json
+            ) VALUES (?,?,?,?,?,?)
+        """)
         with self.db.cursor() as c:
-            c.execute("""
-                INSERT INTO sentiment_history (
-                    timestamp, source_type, score, magnitude, count, distribution_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (
+            c.execute(sql, (
                 result["timestamp"],
                 "combined",
                 result["overall_score"],
@@ -176,14 +193,22 @@ class NewsManager:
 
     async def deep_analysis(self, currencies: List[str] = None) -> Dict:
         """Глубокий AI-анализ (раз в час)."""
+        cutoff = (datetime.utcnow() - timedelta(hours=6)).isoformat()
+        query = self.db.adapt("""
+            SELECT source, title, text, sentiment_score
+            FROM news_items
+            WHERE fetched_at >= ?
+            ORDER BY fetched_at DESC LIMIT 30
+        """)
         with self.db.connection() as conn:
-            cursor = conn.execute("""
-                SELECT source, title, text, sentiment_score
-                FROM news_items
-                WHERE fetched_at >= datetime('now', '-6 hours')
-                ORDER BY fetched_at DESC LIMIT 30
-            """)
-            recent = [dict(r) for r in cursor.fetchall()]
+            if self.db.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(query, (cutoff,))
+                    recent = list(c.fetchall())
+            else:
+                import sqlite3
+                conn.row_factory = sqlite3.Row
+                recent = [dict(r) for r in conn.execute(query, (cutoff,)).fetchall()]
         if not recent:
             return {"available": False, "reason": "Нет свежих данных"}
 
@@ -194,12 +219,13 @@ class NewsManager:
         self.cached_deep = analysis
         self.last_deep_analysis = datetime.utcnow()
         if analysis.get("available"):
+            sql = self.db.adapt("""
+                INSERT INTO sentiment_history (
+                    timestamp, source_type, score, magnitude, count, deep_analysis_json
+                ) VALUES (?,?,?,?,?,?)
+            """)
             with self.db.cursor() as c:
-                c.execute("""
-                    INSERT INTO sentiment_history (
-                        timestamp, source_type, score, magnitude, count, deep_analysis_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                """, (
+                c.execute(sql, (
                     datetime.utcnow().isoformat(),
                     "deep_claude",
                     analysis.get("overall_score", 0),
@@ -232,25 +258,35 @@ class NewsManager:
         }
 
     def get_recent_news(self, limit: int = 50, source_filter: Optional[str] = None) -> List[Dict]:
+        query = "SELECT * FROM news_items"
+        params: list = []
+        if source_filter:
+            query += " WHERE source = ?"
+            params.append(source_filter)
+        query += " ORDER BY fetched_at DESC LIMIT ?"
+        params.append(limit)
         with self.db.connection() as conn:
-            query = "SELECT * FROM news_items"
-            params = []
-            if source_filter:
-                query += " WHERE source = ?"
-                params.append(source_filter)
-            query += " ORDER BY fetched_at DESC LIMIT ?"
-            params.append(limit)
-            rows = [dict(r) for r in conn.execute(query, params).fetchall()]
-        return rows
+            if self.db.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(self.db.adapt(query), params)
+                    return list(c.fetchall())
+            else:
+                import sqlite3
+                conn.row_factory = sqlite3.Row
+                return [dict(r) for r in conn.execute(self.db.adapt(query), params).fetchall()]
 
     def get_sentiment_history(self, hours: int = 24) -> List[Dict]:
         cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        query = self.db.adapt("SELECT * FROM sentiment_history WHERE timestamp >= ? ORDER BY timestamp")
         with self.db.connection() as conn:
-            rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM sentiment_history WHERE timestamp >= ? ORDER BY timestamp",
-                (cutoff,)
-            ).fetchall()]
-        return rows
+            if self.db.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(query, (cutoff,))
+                    return list(c.fetchall())
+            else:
+                import sqlite3
+                conn.row_factory = sqlite3.Row
+                return [dict(r) for r in conn.execute(query, (cutoff,)).fetchall()]
 
     async def close(self):
         await self.news.close()
