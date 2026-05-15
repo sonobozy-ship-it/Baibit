@@ -29,7 +29,7 @@ from ai_analyzer import AIAnalyzer
 from paper_trader import PaperTrader
 from strategies import ALL_STRATEGIES
 from strategies.fusion import StrategyFusion, SignalBuffer, FusedSignal
-from strategies.scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
+from strategies.scalper_pro import ScalperProStrategy, ScalperTrendContext, SCALP_SYMBOLS
 
 # ML модули
 from ml import (
@@ -131,6 +131,11 @@ class BotState:
         # Флаг скальпинг-режима (управляется через /api/boost/scalp/activate)
         self.scalp_active: bool = False
 
+        # Кэш старших таймфреймов для MTF-фильтра ScalperPro
+        # {symbol: (DataFrame, updated_at)}
+        self.h1_cache:  Dict[str, tuple] = {}
+        self.m15_cache: Dict[str, tuple] = {}
+
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
         self.bot_running = False
@@ -213,6 +218,40 @@ def deactivate_scalp_mode():
     state.scalp_active = False
     logger.info(f"⚡ Scalp Mode отключён: {deactivated}")
     return deactivated
+
+
+def _get_h1_cached(symbol: str) -> Optional[object]:
+    """H1 свечи с TTL-кэшем 60 минут (не дёргаем API каждые 5 сек)."""
+    if not state.bybit:
+        return None
+    cached = state.h1_cache.get(symbol)
+    if cached and (datetime.utcnow() - cached[1]).total_seconds() < 3600:
+        return cached[0]
+    try:
+        df = state.bybit.get_klines(symbol, "60", limit=100)
+        if df is not None and not df.empty:
+            state.h1_cache[symbol] = (df, datetime.utcnow())
+            return df
+    except Exception as e:
+        logger.debug(f"H1 cache {symbol}: {e}")
+    return None
+
+
+def _get_m15_cached(symbol: str) -> Optional[object]:
+    """15m свечи с TTL-кэшем 15 минут."""
+    if not state.bybit:
+        return None
+    cached = state.m15_cache.get(symbol)
+    if cached and (datetime.utcnow() - cached[1]).total_seconds() < 900:
+        return cached[0]
+    try:
+        df = state.bybit.get_klines(symbol, "15", limit=100)
+        if df is not None and not df.empty:
+            state.m15_cache[symbol] = (df, datetime.utcnow())
+            return df
+    except Exception as e:
+        logger.debug(f"15m cache {symbol}: {e}")
+    return None
 
 
 # ============================================================
@@ -514,7 +553,15 @@ async def trading_loop():
                         continue
 
                     # Поиск сигнала
-                    signal = strat.analyze(df)
+                    # SC_* (ScalperPro) получают H1 + 15m для MTF-фильтра
+                    if sid.startswith("SC_"):
+                        signal = strat.analyze(
+                            df,
+                            df_h1  = _get_h1_cached(strat.symbol),
+                            df_m15 = _get_m15_cached(strat.symbol) if state.scalp_active else None,
+                        )
+                    else:
+                        signal = strat.analyze(df)
                     if not signal or signal.action not in ("BUY", "SELL"):
                         continue
 
@@ -1707,14 +1754,22 @@ async def boost_scalp_status():
     }
     total_trades   = sum(s["trades"] for s in scalpers.values())
     total_wins     = sum(s["wins"]   for s in scalpers.values())
+    # Текущий H1 тренд для каждого символа
+    h1_trends = {}
+    for sym in SCALP_SYMBOLS:
+        df_h1 = state.h1_cache.get(sym, (None,))[0]
+        h1_trends[sym] = ScalperTrendContext.compute(df_h1, "H1")
+
     return {
-        "scalp_active":    state.scalp_active,
-        "scalpers":        scalpers,
-        "total_scalpers":  len(scalpers),
-        "total_trades":    total_trades,
-        "total_wins":      total_wins,
+        "scalp_active":     state.scalp_active,
+        "scalpers":         scalpers,
+        "total_scalpers":   len(scalpers),
+        "total_trades":     total_trades,
+        "total_wins":       total_wins,
         "overall_win_rate": round(total_wins / total_trades * 100, 1) if total_trades else 0,
         "loop_interval_sec": 5 if state.scalp_active else 10,
+        "h1_trends":        h1_trends,
+        "mtf_mode":         "H1+15m" if state.scalp_active else "H1-only",
     }
 
 
