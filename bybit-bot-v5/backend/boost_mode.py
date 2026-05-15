@@ -111,10 +111,35 @@ PHASES_SAFE: List[BoostPhaseConfig] = [
     ),
 ]
 
+# ── Скальпинг ────────────────────────────────────────────────
+# 3m таймфрейм, 10 символов одновременно, до 50 прибыльных сделок/день
+# Плечо 5x, риск 8%/сделку (маленький риск, много сделок), R:R 2.5:1
+PHASES_SCALP: List[BoostPhaseConfig] = [
+    BoostPhaseConfig(
+        name="Разгон-Скальп", leverage=5, risk_pct=8.0, tp_pct=0.30, sl_pct=0.12,
+        max_positions=5, daily_loss_limit_pct=8.0,
+        allowed_strategies=["S10"],   # только ScalperPro
+        cooldown_after_loss_min=5,
+    ),
+    BoostPhaseConfig(
+        name="Рост-Скальп", leverage=5, risk_pct=8.0, tp_pct=0.30, sl_pct=0.12,
+        max_positions=6, daily_loss_limit_pct=8.0,
+        allowed_strategies=["S10"],
+        cooldown_after_loss_min=5,
+    ),
+    BoostPhaseConfig(
+        name="Закреп-Скальп", leverage=4, risk_pct=6.0, tp_pct=0.35, sl_pct=0.12,
+        max_positions=6, daily_loss_limit_pct=6.0,
+        allowed_strategies=["S10", "S8", "S9"],  # в фазе 3 добавляем качественные
+        cooldown_after_loss_min=10,
+    ),
+]
+
 BOOST_MODES: Dict[str, List[BoostPhaseConfig]] = {
     "safe":       PHASES_SAFE,
     "moderate":   PHASES_MODERATE,
     "aggressive": PHASES_AGGRESSIVE,
+    "scalp":      PHASES_SCALP,
 }
 
 # Параметры безопасности по режиму
@@ -122,6 +147,7 @@ _MODE_SAFETY = {
     "safe":       {"emergency_dd": 15, "pause_losses": 2},
     "moderate":   {"emergency_dd": 25, "pause_losses": 2},
     "aggressive": {"emergency_dd": 40, "pause_losses": 3},
+    "scalp":      {"emergency_dd": 20, "pause_losses": 5},  # частые убытки нормальны
 }
 
 # Символы с маленьким минимальным лотом (подходят для малого депозита)
@@ -200,7 +226,18 @@ class BoostCalculator:
 
         # Сценарии (trades_per_day, WR, leverage, tp_pct, sl_pct, risk_pct, label)
         # R:R 4:1 (TP=4%, SL=1%) — цель 70-80% MC-вероятности
-        if mode == "safe":
+        if mode == "scalp":
+            # 3m скальпинг: маленький R:R 2.5:1, но МНОГО сделок в день
+            # profit/loss как % от баланса: 8% риск × 5x × 0.3% TP = 1.2%
+            scenario_defs = [
+                # tpd  WR    lev   tp%    sl%   risk%   label
+                (30,  0.58,  5,   0.30,  0.12,  8.0, "30 сд/д (5 сим × 6) 58% WR"),
+                (40,  0.60,  5,   0.30,  0.12,  8.0, "40 сд/д (10 сим × 4) 60% WR"),
+                (50,  0.60,  5,   0.30,  0.12,  8.0, "50 сд/д (10 сим × 5) 60% WR"),
+                (50,  0.62,  5,   0.30,  0.12,  8.0, "50 сд/д 62% WR"),
+                (60,  0.62,  5,   0.30,  0.12,  8.0, "60 сд/д (10 сим × 6) оптимист."),
+            ]
+        elif mode == "safe":
             scenario_defs = [
                 # tpd   WR     lev  tp%  sl%  risk%  label
                 (2,    0.58,   3,   4.0, 1.0, 15.0, "Осторожный 2сд/д R:R 4:1"),
@@ -295,9 +332,10 @@ class BoostCalculator:
 
         # Параметры «базового» сценария для режима
         _params = {
-            "safe":       dict(trades_per_day=3, wr=0.60, lev=3,  tp=4.0, sl=1.0, risk=15.0),
-            "moderate":   dict(trades_per_day=4, wr=0.60, lev=5,  tp=4.0, sl=1.0, risk=20.0),
-            "aggressive": dict(trades_per_day=4, wr=0.62, lev=12, tp=3.0, sl=1.5, risk=80.0),
+            "safe":       dict(trades_per_day=3,  wr=0.60, lev=3,  tp=4.0,  sl=1.0,  risk=15.0),
+            "moderate":   dict(trades_per_day=4,  wr=0.60, lev=5,  tp=4.0,  sl=1.0,  risk=20.0),
+            "aggressive": dict(trades_per_day=4,  wr=0.62, lev=12, tp=3.0,  sl=1.5,  risk=80.0),
+            "scalp":      dict(trades_per_day=40, wr=0.60, lev=5,  tp=0.30, sl=0.12, risk=8.0),
         }
         p = _params.get(mode, _params["moderate"])
         pw = (p["risk"] / 100) * p["lev"] * (p["tp"] / 100)
@@ -366,11 +404,13 @@ def _realistic_tips(initial: float, target: float, days: int, mode: str) -> List
 
 
 def _quick_mc_pct(initial: float, target: float, days: int, mode: str) -> float:
-    """Быстрая оценка MC-вероятности для подсказки. R:R 4:1."""
+    """Быстрая оценка MC-вероятности для подсказки."""
     if mode == "safe":
         pw, pl, wr, tpd = 0.15*3*0.04, 0.15*3*0.01, 0.60, 3
     elif mode == "aggressive":
         pw, pl, wr, tpd = 0.80*12*0.03, 0.80*12*0.015, 0.60, 4
+    elif mode == "scalp":
+        pw, pl, wr, tpd = 0.08*5*0.003, 0.08*5*0.0012, 0.60, 40
     else:  # moderate
         pw, pl, wr, tpd = 0.20*5*0.04, 0.20*5*0.01, 0.60, 4
     mc = BoostCalculator.monte_carlo(initial, target, days, tpd, wr, pw, pl, n_sims=2000)

@@ -29,6 +29,7 @@ from ai_analyzer import AIAnalyzer
 from paper_trader import PaperTrader
 from strategies import ALL_STRATEGIES
 from strategies.fusion import StrategyFusion, SignalBuffer, FusedSignal
+from strategies.scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
 
 # ML модули
 from ml import (
@@ -127,6 +128,9 @@ class BotState:
         # Boost Mode — разгон депозита
         self.boost = BoostManager()
 
+        # Флаг скальпинг-режима (управляется через /api/boost/scalp/activate)
+        self.scalp_active: bool = False
+
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
         self.bot_running = False
@@ -177,6 +181,38 @@ def init_strategies():
         db_pool=state.db_pool,
     )
     logger.info("🔄 ContinuousTrainer инициализирован (порог: 300 сделок)")
+
+
+def activate_scalp_mode():
+    """
+    Создаёт экземпляры ScalperPro для каждого символа из SCALP_SYMBOLS
+    и регистрирует их в state.strategies как SC_XXX.
+    Вызывается при старте boost-режима с mode='scalp' или вручную.
+    """
+    added = []
+    for sym in SCALP_SYMBOLS:
+        sid = f"SC_{sym[:3]}"
+        if sid not in state.strategies:
+            strat = ScalperProStrategy(symbol=sym)
+            state.strategies[sid] = strat
+            added.append(sid)
+        else:
+            state.strategies[sid].enabled = True
+    state.scalp_active = True
+    logger.info(f"⚡ Scalp Mode: добавлено {len(added)} скальперов → {added}")
+    return added
+
+
+def deactivate_scalp_mode():
+    """Отключает все SC_* стратегии (не удаляет — можно переключить)."""
+    deactivated = []
+    for sid, strat in state.strategies.items():
+        if sid.startswith("SC_"):
+            strat.enabled = False
+            deactivated.append(sid)
+    state.scalp_active = False
+    logger.info(f"⚡ Scalp Mode отключён: {deactivated}")
+    return deactivated
 
 
 # ============================================================
@@ -836,7 +872,8 @@ async def trading_loop():
                         await broadcast_log(f"⚠️ {sid} АВТО-ОТКЛЮЧЕНА")
 
                 await broadcast_state()
-                await asyncio.sleep(10)
+                # Скальпинг: цикл каждые 5 сек; обычный режим: 10 сек
+                await asyncio.sleep(5 if state.scalp_active else 10)
 
             except Exception as e:
                 logger.exception(f"Ошибка в торговом цикле: {e}")
@@ -1607,10 +1644,14 @@ async def boost_start(req: BoostStartRequest):
         raise HTTPException(400, "mode должен быть: safe | moderate | aggressive")
     result = state.boost.start(req.initial_balance, req.target_balance, req.deadline_days, req.mode)
     if result.get("success"):
+        scalp_info = ""
+        if req.mode == "scalp":
+            added = activate_scalp_mode()
+            scalp_info = f"\n⚡ Скальп-стратегии: {len(added)} символов"
         asyncio.create_task(state.telegram.send(
-            f"🚀 <b>Boost Mode запущен</b>\n"
+            f"🚀 <b>Boost Mode запущен</b> ({req.mode})\n"
             f"${req.initial_balance:.2f} → ${req.target_balance:.2f} за {req.deadline_days} дн.\n"
-            f"Требуется: {result['analysis']['required_daily_pct']}%/день"
+            f"Требуется: {result['analysis']['required_daily_pct']}%/день{scalp_info}"
         ))
     return result
 
@@ -1621,11 +1662,69 @@ async def boost_status():
     return state.boost.get_status()
 
 
+@app.post("/api/boost/scalp/activate")
+async def boost_scalp_activate():
+    """
+    Активирует скальпинг-режим: создаёт ScalperPro для 10 символов.
+    Цель: 30-50 прибыльных сделок в день.
+    """
+    added = activate_scalp_mode()
+    return {
+        "success": True,
+        "scalp_active": True,
+        "strategies_added": added,
+        "total_scalpers": len(added),
+        "symbols": SCALP_SYMBOLS,
+        "timeframe": "3m",
+        "expected_signals_per_day": f"{len(added) * 5}–{len(added) * 8}",
+        "expected_profitable_at_60wr": f"{int(len(added) * 5 * 0.60)}–{int(len(added) * 8 * 0.60)}",
+    }
+
+
+@app.post("/api/boost/scalp/deactivate")
+async def boost_scalp_deactivate():
+    """Деактивирует все скальп-стратегии."""
+    deactivated = deactivate_scalp_mode()
+    return {"success": True, "scalp_active": False, "deactivated": deactivated}
+
+
+@app.get("/api/boost/scalp/status")
+async def boost_scalp_status():
+    """Статус скальп-стратегий: сколько сигналов, сколько сделок."""
+    scalpers = {
+        sid: {
+            "symbol":    strat.symbol,
+            "enabled":   strat.enabled,
+            "trades":    strat.trades,
+            "wins":      strat.wins,
+            "losses":    strat.losses,
+            "win_rate":  round(strat.wins / strat.trades * 100, 1) if strat.trades else 0,
+            "pnl":       round(strat.pnl, 4),
+            "position":  bool(strat.current_position),
+        }
+        for sid, strat in state.strategies.items()
+        if sid.startswith("SC_")
+    }
+    total_trades   = sum(s["trades"] for s in scalpers.values())
+    total_wins     = sum(s["wins"]   for s in scalpers.values())
+    return {
+        "scalp_active":    state.scalp_active,
+        "scalpers":        scalpers,
+        "total_scalpers":  len(scalpers),
+        "total_trades":    total_trades,
+        "total_wins":      total_wins,
+        "overall_win_rate": round(total_wins / total_trades * 100, 1) if total_trades else 0,
+        "loop_interval_sec": 5 if state.scalp_active else 10,
+    }
+
+
 @app.post("/api/boost/stop")
 async def boost_stop(reason: str = "Ручная остановка"):
     """Остановить boost-сессию."""
     result = state.boost.stop(reason)
     if result.get("success"):
+        if state.scalp_active:
+            deactivate_scalp_mode()
         asyncio.create_task(state.telegram.send(
             f"🛑 <b>Boost Mode остановлен</b>\n{reason}"
         ))

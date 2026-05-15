@@ -9,6 +9,7 @@ import pandas_ta as ta
 from typing import Optional
 from .base import BaseStrategy, TradingSignal
 from .trend_fib import TrendMomentumStrategy, TrendFibonacciStrategy
+from .scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
 
 
 # ============================================================
@@ -512,6 +513,7 @@ ALL_STRATEGIES = {
     "S5": ScalperGridStrategy,
     "S6": TrendFollowerStrategy,
     "S7": MultiConfirmStrategy,
-    "S8": TrendMomentumStrategy,       # тренд роста/падения (HH/HL + EMA-стек + ADX)
-    "S9": TrendFibonacciStrategy,      # тренд + уровни Фибоначчи (38.2/50/61.8%)
+    "S8": TrendMomentumStrategy,    # тренд роста/падения (HH/HL + EMA-стек + ADX)
+    "S9": TrendFibonacciStrategy,   # тренд + уровни Фибоначчи (38.2/50/61.8%)
+    "S10": ScalperProStrategy,      # 3m высокочастотный скальпер (до 8 сигналов/день/символ)
 }

@@ -136,15 +136,16 @@ class StrategyFusion:
 
     # Индикаторные группы: разные группы → выше diversity
     INDICATOR_GROUPS: Dict[str, List[str]] = {
-        "S1": ["trend_ema",      "momentum_rsi"],
-        "S2": ["volatility_bb",  "momentum_rsi"],
-        "S3": ["divergence",     "momentum_macd"],
-        "S4": ["breakout",       "volume"],
-        "S5": ["mean_reversion", "volatility_bb"],
-        "S6": ["trend_ema",      "strength_adx"],
-        "S7": ["multi_confirm"],
-        "S8": ["structure_swing","trend_ema",  "strength_adx"],
-        "S9": ["fibonacci",      "structure_swing", "trend_ema"],
+        "S1":  ["trend_ema",      "momentum_rsi"],
+        "S2":  ["volatility_bb",  "momentum_rsi"],
+        "S3":  ["divergence",     "momentum_macd"],
+        "S4":  ["breakout",       "volume"],
+        "S5":  ["mean_reversion", "volatility_bb"],
+        "S6":  ["trend_ema",      "strength_adx"],
+        "S7":  ["multi_confirm"],
+        "S8":  ["structure_swing","trend_ema",  "strength_adx"],
+        "S9":  ["fibonacci",      "structure_swing", "trend_ema"],
+        "S10": ["scalp_ema",      "scalp_rsi",  "volatility_bb"],
     }
 
     # Веса стратегий (выше = заслуживают больше доверия при fusion)
