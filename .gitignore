@@ -12,5 +12,6 @@ data/models/*.pkl
 data/candles/*.parquet
 data/features/*.parquet
 data/ml_data.db
+data/boost_session.json
 logs/
 .DS_Store
