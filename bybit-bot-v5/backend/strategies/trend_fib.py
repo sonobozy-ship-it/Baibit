@@ -435,7 +435,7 @@ class TrendFibonacciStrategy(BaseStrategy):
 
         # ── 4. Уровни Фибоначчи ──
         swing_low, swing_high = self._find_swing(df)
-        if swing_low is None or swing_low <= 0 or (swing_high - swing_low) / swing_low < 0.004:
+        if swing_low is None or swing_high is None or swing_low <= 0 or (swing_high - swing_low) / swing_low < 0.004:
             return None
 
         fib = FibonacciLevels(swing_low, swing_high, direction=direction)

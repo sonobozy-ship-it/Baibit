@@ -73,13 +73,13 @@ class PaperTrader:
         lev = pos["leverage"]
 
         if side == "Buy":
-            pnl_pct = (exit_price - entry) / entry * 100
+            pnl_usd = qty * (exit_price - entry)
         else:
-            pnl_pct = (entry - exit_price) / entry * 100
+            pnl_usd = qty * (entry - exit_price)
 
-        pnl_usd = qty * entry * (pnl_pct / 100) * lev / lev   # упрощённо
-        cost = qty * entry / lev
-        fee = cost * (self.fee_pct / 100)
+        pnl_pct = (exit_price - entry) / entry * 100 if side == "Buy" else (entry - exit_price) / entry * 100
+        # Комиссия на notional обеих сторон сделки (как на реальной бирже)
+        fee = qty * (entry + exit_price) * (self.fee_pct / 100)
         pnl_usd -= fee
 
         self.balance += pnl_usd

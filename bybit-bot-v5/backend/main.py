@@ -2038,7 +2038,7 @@ async def full_status():
     elif state.paper_mode:
         ps = state.paper.get_stats()
         balance_info = {
-            "usdt":       round(ps.get("current_balance", 0), 4),
+            "usdt":       round(ps.get("balance", 0), 4),
             "source":     "paper",
             "paper_pnl":  round(ps.get("total_pnl", 0), 4),
             "paper_trades": ps.get("total_trades", 0),
@@ -2150,7 +2150,7 @@ async def bot_command(body: dict):
 
     if cmd == "balance":
         if state.paper_mode:
-            return {"balance": state.paper.get_stats().get("current_balance"), "mode": "paper"}
+            return {"balance": state.paper.get_stats().get("balance"), "mode": "paper"}
         if state.bybit:
             return {"balance": state.bybit.get_balance("USDT"), "mode": "live"}
         return {"balance": None, "mode": "disconnected"}
@@ -2227,7 +2227,7 @@ async def bot_command(body: dict):
         # Компактный статус
         bal = None
         if state.paper_mode:
-            bal = state.paper.get_stats().get("current_balance")
+            bal = state.paper.get_stats().get("balance")
         elif state.bybit:
             try:
                 bal = state.bybit.get_balance("USDT")

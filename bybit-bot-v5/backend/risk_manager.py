@@ -32,7 +32,7 @@ class RiskManager:
         # Состояние
         self.daily_start_balance: Optional[float] = None
         self.daily_pnl = 0.0
-        self.daily_reset_at = datetime.utcnow().replace(hour=0, minute=0, second=0)
+        self.daily_reset_at = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         self.kill_switch = False                # глобальный стоп
         self.kill_switch_reason = ""
         self.strategy_cooldowns: Dict[str, datetime] = {}

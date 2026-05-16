@@ -235,7 +235,8 @@ class StrategyFusion:
         groups_used: set = set()
         for sid in best_signals:
             groups_used.update(self.INDICATOR_GROUPS.get(sid, []))
-        diversity_score = min(len(groups_used) / 7.0, 1.0) if groups_used else 0.0
+        all_groups = {g for gs in self.INDICATOR_GROUPS.values() for g in gs}
+        diversity_score = min(len(groups_used) / max(len(all_groups), 1), 1.0) if groups_used else 0.0
 
         # ── Confluence score (взвешенный) ──
         weights  = [self.STRATEGY_WEIGHTS.get(sid, self.DEFAULT_WEIGHT) for sid in best_signals]
