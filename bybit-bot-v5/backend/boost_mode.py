@@ -482,6 +482,8 @@ class BoostSession:
 
     @property
     def phase_index(self) -> int:
+        if self.initial_balance <= 0:
+            return 0
         ratio = self.current_balance / self.initial_balance
         if ratio < 3.0:
             return 0
@@ -549,6 +551,8 @@ class BoostManager:
     ) -> Dict:
         if mode not in BOOST_MODES:
             return {"success": False, "error": f"Неизвестный режим '{mode}'. Доступны: {list(BOOST_MODES)}"}
+        if initial_balance <= 0:
+            return {"success": False, "error": "Начальный баланс должен быть > 0"}
         if self.session and self.session.active:
             return {"success": False, "error": "Сессия уже активна. Сначала остановите её."}
 

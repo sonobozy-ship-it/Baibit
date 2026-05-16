@@ -113,7 +113,7 @@ class ContinuousTrainer:
                     "incremental": f"инкрементальное (всего={labeled}, окно={self.FAST_WINDOW})",
                 }[mode]
                 logger.info(f"[AutoTrain] {sid}: {reason}")
-                result = await asyncio.get_event_loop().run_in_executor(
+                result = await asyncio.get_running_loop().run_in_executor(
                     None, self._retrain_sync, sid, labeled, mode
                 )
                 results[sid] = result

@@ -119,12 +119,28 @@ class AIAnalyzer:
             return None
 
     def _ask_sync(self, prompt: str, model_hint: str = "analysis") -> Optional[str]:
-        """Синхронная обёртка для вызова из не-async контекста."""
+        """Синхронная обёртка для вызова из не-async контекста.
+
+        Работает корректно как из sync, так и из async (FastAPI-роут/trading loop) контекста:
+        - Если event loop уже запущен (async контекст) — выполняет через ThreadPoolExecutor,
+          чтобы не вызвать 'This event loop is already running'.
+        - Если нет запущенного loop (чистый sync) — использует asyncio.run().
+        """
         import asyncio
+        import concurrent.futures
+
         try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(self._ask(prompt, model_hint))
+            loop = asyncio.get_running_loop()
         except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # Вызов из async-контекста: запускаем _ask в отдельном потоке
+            # с собственным event loop, чтобы не блокировать текущий.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, self._ask(prompt, model_hint))
+                return future.result()
+        else:
             return asyncio.run(self._ask(prompt, model_hint))
 
     # ── 1. Анализ производительности стратегии ────────────────────────────────

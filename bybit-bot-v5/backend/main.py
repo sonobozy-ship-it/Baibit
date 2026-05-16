@@ -54,6 +54,7 @@ from claude_orchestrator import ClaudeOrchestrator
 # Загрузка конфига
 # ============================================================
 load_dotenv()
+Path("logs").mkdir(exist_ok=True)  # должно быть ДО FileHandler
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -63,7 +64,6 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
-Path("logs").mkdir(exist_ok=True)
 
 
 # ============================================================
@@ -527,6 +527,9 @@ async def _execute_fusion_signal(
         if not state.bybit:
             return
         lev_check = state.risk_manager.check_leverage(sid, 3, balance)
+        if not lev_check["allowed"]:
+            logger.info(f"[Fusion] ❌ {lev_check['reason']}")
+            return
         result = state.bybit.place_order(
             symbol=sym,
             side="Buy" if fused.action == "BUY" else "Sell",
@@ -558,7 +561,8 @@ async def _execute_fusion_signal(
             })
 
             if fusion_snapshot_id:
-                state.snapshot_signal_id_map[sym + "_FUSION"] = fusion_snapshot_id
+                # Храним под ключом символа (без _FUSION) для совместимости с closing-loop
+                state.snapshot_signal_id_map[sym] = fusion_snapshot_id
                 with state.db_pool.cursor() as c:
                     c.execute(
                         state.db_pool.adapt(
@@ -623,6 +627,10 @@ async def trading_loop():
                     except Exception:
                         sentiment_features = state.news_manager.get_sentiment_features()
 
+                klines_data = {}
+                current_regime_name = None
+                current_regime_id   = None
+
                 # AI-рекомендации (раз в 30 мин, advisory — не блокируют торговлю)
                 if state.news_enabled and (
                     not hasattr(state, "_last_ai_rec")
@@ -661,10 +669,6 @@ async def trading_loop():
                                 ))
                     except Exception as e:
                         logger.debug(f"AI рекомендации пропущены: {e}")
-
-                klines_data = {}
-                current_regime_name = None   # инициализируем до цикла (используется в fusion)
-                current_regime_id   = None
 
                 for sid, strat in state.strategies.items():
                     if not strat.enabled or strat.auto_disabled:
@@ -898,7 +902,7 @@ async def trading_loop():
                             entry=signal.entry_price,
                             stop_loss=signal.stop_loss,
                             take_profit=signal.take_profit,
-                            win_probability=ml_prediction["probability"],
+                            win_probability=ml_prediction.get("probability", 0.5) or 0.5,
                             side=signal.action,
                             kelly_fraction=0.25,
                             max_risk_pct=state.risk_manager.risk_per_trade_pct * 2,
@@ -919,6 +923,13 @@ async def trading_loop():
                     # ============== Открытие позиции ==============
                     if state.paper_mode:
                         state.paper.open_position(signal, sid, qty, strat.leverage)
+                        strat.register_position(
+                            "Buy" if signal.action == "BUY" else "Sell",
+                            signal.entry_price, signal.stop_loss, signal.take_profit,
+                        )
+                        strat.current_position["qty"] = qty
+                        notional = qty * signal.entry_price
+                        state.risk_manager.register_position_open(sid, notional)
                     else:
                         result = state.bybit.place_order(
                             symbol=signal.symbol,
@@ -988,6 +999,32 @@ async def trading_loop():
                     state.correlation.calculate_correlation(klines_data)
 
                 # ============== Детекция закрытия позиций ==============
+                if state.paper_mode and state.paper.positions:
+                    current_prices = {
+                        sym: df.iloc[-1]["close"]
+                        for sym, df in klines_data.items()
+                    }
+                    closed_paper = state.paper.check_positions(current_prices)
+                    for closed_pos in closed_paper:
+                        c_sym = closed_pos.get("symbol") or closed_pos.get("strategy_id", "?")
+                        pnl = closed_pos.get("pnl_usd", 0)
+                        reason = closed_pos.get("exit_reason", "?")
+                        # Находим стратегию по символу и снимаем позицию
+                        for _sid, _strat in state.strategies.items():
+                            if _strat.symbol == c_sym and _strat.current_position:
+                                close_res = _strat.close_position(
+                                    closed_pos.get("exit_price", 0),
+                                    qty=_strat.current_position.get("qty", 0),
+                                )
+                                state.risk_manager.register_trade_result(_sid, pnl)
+                                state.risk_manager.register_position_close(_sid)
+                                state.adaptive.record(_sid, close_res.get("r_multiple", 0))
+                                await broadcast_log(
+                                    f"{'✅' if pnl > 0 else '❌'} [PAPER] {_sid} {c_sym} {reason} → {pnl:+.2f} USDT",
+                                    "ok" if pnl > 0 else "warn",
+                                )
+                                break
+
                 if state.bybit and not state.paper_mode:
                     try:
                         real_positions = state.bybit.get_positions()
@@ -1431,8 +1468,8 @@ async def emergency_close():
         for sid, strat in state.strategies.items():
             if strat.current_position:
                 try:
-                    ticker = state.paper.positions.get(sid, {})
-                    exit_price = ticker.get("entry", 0) if ticker else 0
+                    ticker = state.paper.positions.get(strat.symbol, {})
+                    exit_price = ticker.get("entry_price", 0) if ticker else 0
                     strat.current_position = None
                     closed.append(sid)
                 except Exception as e:
@@ -2142,7 +2179,7 @@ async def full_status():
             "usdt":       round(ps.get("balance", 0), 4),
             "source":     "paper",
             "paper_pnl":  round(ps.get("total_pnl", 0), 4),
-            "paper_trades": ps.get("total_trades", 0),
+            "paper_trades": ps.get("trades", 0),
         }
     else:
         balance_info = {"usdt": None, "source": "not_connected"}

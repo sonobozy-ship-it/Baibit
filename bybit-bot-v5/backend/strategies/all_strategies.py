@@ -671,6 +671,12 @@ class DragonflyGoldStrategy(BaseStrategy):
             sl = bb_upper * 1.0005    # чуть выше верхней полосы
             tp = bb_lower
 
+        # Проверяем что SL по правильную сторону от входа
+        if direction == "BUY" and sl >= entry:
+            return None
+        if direction == "SELL" and sl <= entry:
+            return None
+
         risk_pct = abs(entry - sl) / entry * 100
         if not (self._MIN_RISK_PCT <= risk_pct <= self._MAX_RISK_PCT):
             return None

@@ -88,6 +88,9 @@ class TwitterCollector:
             session = await self._get_session()
             async with session.get(f"{instance}/{username}/rss") as resp:
                 if resp.status != 200:
+                    # Инстанс вернул ошибку — сбрасываем кэш, чтобы следующий
+                    # вызов _find_working_nitter перебрал остальные инстансы.
+                    self._working_instance = None
                     return []
                 content = await resp.text()
 

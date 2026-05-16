@@ -213,7 +213,12 @@ class MLDataStore:
         if df.empty or len(df) < min_samples:
             return pd.DataFrame()
 
-        features_df = pd.json_normalize(df["features_json"].apply(json.loads))
+        def _safe_loads(s):
+            try:
+                return json.loads(s)
+            except Exception:
+                return {}
+        features_df = pd.json_normalize(df["features_json"].apply(_safe_loads))
         features_df["label"]       = (df["outcome"] == "win").astype(int)
         features_df["pnl_r"]       = df["pnl_r"].values
         features_df["strategy_id"] = df["strategy_id"].values

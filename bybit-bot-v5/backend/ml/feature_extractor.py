@@ -145,8 +145,8 @@ class FeatureExtractor:
         # --- 3. Осцилляторы (6) ---
         features["rsi_14"] = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50
         features["rsi_change"] = float(rsi.iloc[-1] - rsi.iloc[-5]) if len(rsi) >= 5 else 0
-        features["stoch_k"] = float(stoch["STOCHk_14_3_3"].iloc[-1]) if not pd.isna(stoch["STOCHk_14_3_3"].iloc[-1]) else 50
-        features["stoch_d"] = float(stoch["STOCHd_14_3_3"].iloc[-1]) if not pd.isna(stoch["STOCHd_14_3_3"].iloc[-1]) else 50
+        features["stoch_k"] = float(stoch["STOCHk_14_3_3"].iloc[-1]) if stoch is not None and not pd.isna(stoch["STOCHk_14_3_3"].iloc[-1]) else 50
+        features["stoch_d"] = float(stoch["STOCHd_14_3_3"].iloc[-1]) if stoch is not None and not pd.isna(stoch["STOCHd_14_3_3"].iloc[-1]) else 50
         features["cci_20"] = float(cci.iloc[-1]) if not pd.isna(cci.iloc[-1]) else 0
         features["williams_r"] = float(wr.iloc[-1]) if not pd.isna(wr.iloc[-1]) else -50
 
@@ -161,7 +161,7 @@ class FeatureExtractor:
         # --- 5. Волатильность (5) ---
         features["atr_pct"] = float(atr.iloc[-1] / price * 100) if not pd.isna(atr.iloc[-1]) else 1.0
         features["atr_change"] = self._pct_change(atr.iloc[-1], atr.iloc[-10]) if len(atr) >= 10 else 0
-        if "BBU_20_2.0" in bb.columns:
+        if bb is not None and "BBU_20_2.0" in bb.columns:
             bb_upper = bb["BBU_20_2.0"].iloc[-1]
             bb_lower = bb["BBL_20_2.0"].iloc[-1]
             features["bb_width"] = float((bb_upper - bb_lower) / price * 100) if not pd.isna(bb_upper) else 0

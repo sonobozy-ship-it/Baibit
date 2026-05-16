@@ -91,7 +91,6 @@ class MLTrainer:
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "scale_pos_weight": (1 - wr) / wr if wr > 0 else 1,
-            "use_label_encoder": False,
             "eval_metric": "logloss",
             "random_state": 42,
         }

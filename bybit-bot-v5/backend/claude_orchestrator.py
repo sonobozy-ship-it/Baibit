@@ -512,11 +512,21 @@ class ClaudeOrchestrator:
     def _parse_response(self, raw: str) -> Optional[OrchestratorResult]:
         try:
             text = raw.strip()
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-                text = text.strip()
+            # Модель иногда добавляет пояснение ПЕРЕД блоком ```json — ищем блок явно.
+            if "```" in text:
+                parts = text.split("```")
+                # parts[1] — содержимое первого блока кода
+                if len(parts) >= 2:
+                    text = parts[1]
+                    if text.startswith("json"):
+                        text = text[4:]
+                    text = text.strip()
+            # Фолбэк: вытащить первый {...} из ответа
+            if not text.startswith("{"):
+                start = text.find("{")
+                end   = text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    text = text[start:end]
 
             data = json.loads(text)
             decisions = [

@@ -349,6 +349,8 @@ class StrategyFusion:
             "S7": [],
             "S8": ["uptrend", "downtrend"],
             "S9": ["uptrend", "downtrend"],
+            "S10": ["uptrend", "downtrend", "volatile"],  # ScalperPro: любой тренд
+            "S11": ["flat", "volatile"],                  # DragonflyGold: BB mean-reversion
         }
         return prefs.get(sid, [])
 

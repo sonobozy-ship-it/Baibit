@@ -107,7 +107,7 @@ class RiskManager:
             return {"allowed": False, "reason": f"🛑 KILL SWITCH: {self.kill_switch_reason}"}
 
         # 2. Дневной лимит убытков
-        if self.daily_start_balance:
+        if self.daily_start_balance is not None and self.daily_start_balance > 0:
             current_drawdown_pct = ((balance - self.daily_start_balance) / self.daily_start_balance) * 100
             if current_drawdown_pct <= -self.daily_max_loss_pct:
                 self.kill_switch = True
