@@ -503,6 +503,164 @@ class MultiConfirmStrategy(BaseStrategy):
 
 
 # ============================================================
+# S11: DRAGONFLY GOLD — свечные паттерны + ATR-адаптивный стоп
+# ============================================================
+class DragonflyGoldStrategy(BaseStrategy):
+    """
+    Распознаёт разворотные свечные паттерны:
+      • Dragonfly Doji / Hammer     → лонг (длинная нижняя тень)
+      • Gravestone Doji / Shooting Star → шорт (длинная верхняя тень)
+
+    Особенности:
+      • SL ставится ПОД/НАД тенью (wick-based), а не фиксированный %
+      • TP = 2.5 × риск (адаптивный RR)
+      • Подтверждение: RSI + объём + поддержка/сопротивление
+      • 15m таймфрейм, плечо 5×
+    """
+
+    ID = "S11"
+    NAME = "DRAGONFLY GOLD"
+    DESCRIPTION = "Dragonfly/Hammer + Gravestone/ShootingStar + ATR-стоп + RSI + объём"
+    REGIME_PREFERENCE = ["volatile", "flat", "uptrend", "downtrend"]
+
+    # Коэффициент безопасного буфера под/над тенью
+    _ATR_BUFFER = 0.10
+    # Минимальный и максимальный допустимый риск в %
+    _MIN_RISK_PCT = 0.25
+    _MAX_RISK_PCT = 3.0
+    # Соотношение TP / риск
+    _RR = 2.5
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            stop_loss_pct=1.5,      # fallback, перекрывается динамическим SL
+            take_profit_pct=3.75,   # fallback, перекрывается динамическим TP
+            edge_wr_target=0.65,
+            timeframe="15",
+            **kwargs,
+        )
+
+    # ── Детектор паттерна ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_pattern(o: float, h: float, l: float, c: float):
+        """
+        Возвращает ('BUY'|'SELL'|None, lower_wick, upper_wick, body).
+
+        Dragonfly Doji / Hammer (BUY):
+          lower_wick >= 60% total range  И  lower_wick >= 2× body
+          upper_wick <= 25% total range
+
+        Gravestone Doji / Shooting Star (SELL):
+          upper_wick >= 60% total range  И  upper_wick >= 2× body
+          lower_wick <= 25% total range
+        """
+        total_range = h - l
+        if total_range < 1e-9:
+            return None, 0, 0, 0
+
+        body        = abs(c - o)
+        lower_wick  = min(o, c) - l
+        upper_wick  = h - max(o, c)
+
+        lower_ratio = lower_wick / total_range
+        upper_ratio = upper_wick / total_range
+        body_safe   = max(body, total_range * 0.001)  # избегаем деления на ~0
+
+        if lower_ratio >= 0.60 and lower_wick >= 2 * body_safe and upper_ratio <= 0.25:
+            return "BUY", lower_wick, upper_wick, body
+
+        if upper_ratio >= 0.60 and upper_wick >= 2 * body_safe and lower_ratio <= 0.25:
+            return "SELL", lower_wick, upper_wick, body
+
+        return None, lower_wick, upper_wick, body
+
+    # ── Основной анализ ───────────────────────────────────────────────────────
+
+    def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
+        if len(df) < 40:
+            return None
+
+        df = df.copy()
+        df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["rsi"]    = ta.rsi(df["close"], length=14)
+        df["ema20"]  = ta.ema(df["close"], length=20)
+        df["vol_ma"] = df["volume"].rolling(20).mean()
+
+        last = df.iloc[-1]
+        o, h, l, c = last["open"], last["high"], last["low"], last["close"]
+        atr  = last["atr"]
+        rsi  = last["rsi"]
+        ema20 = last["ema20"]
+
+        direction, lower_wick, upper_wick, body = self._detect_pattern(o, h, l, c)
+        if direction is None:
+            return None
+
+        # ── Контекстные фильтры ───────────────────────────────────────────────
+
+        vol_ok   = last["volume"] > last["vol_ma"] * 1.3
+
+        # Поддержка/сопротивление: тень уходит в область последних экстремумов
+        recent_low  = df.iloc[-20:-1]["low"].min()
+        recent_high = df.iloc[-20:-1]["high"].max()
+
+        if direction == "BUY":
+            rsi_ok      = rsi < 42
+            level_ok    = l <= recent_low * 1.008  # тень ниже/у недавнего минимума
+            context_ok  = c <= ema20 * 1.015       # цена у/под EMA20 → разворот вверх
+        else:
+            rsi_ok      = rsi > 58
+            level_ok    = h >= recent_high * 0.992  # тень выше/у недавнего максимума
+            context_ok  = c >= ema20 * 0.985        # цена у/над EMA20 → разворот вниз
+
+        filters = {
+            "pattern":  True,
+            "rsi":      rsi_ok,
+            "volume":   vol_ok,
+            "level":    level_ok,
+            "context":  context_ok,
+        }
+
+        if not all(filters.values()):
+            return None
+
+        # ── Динамический SL/TP ────────────────────────────────────────────────
+
+        entry = float(c)
+
+        if direction == "BUY":
+            sl = l - self._ATR_BUFFER * atr          # под тенью
+            tp = entry + self._RR * (entry - sl)
+        else:
+            sl = h + self._ATR_BUFFER * atr           # над тенью
+            tp = entry - self._RR * (sl - entry)
+
+        risk_pct = abs(entry - sl) / entry * 100
+        if not (self._MIN_RISK_PCT <= risk_pct <= self._MAX_RISK_PCT):
+            return None
+
+        # Обновляем атрибуты для to_dict()
+        self.stop_loss_pct  = round(risk_pct, 3)
+        self.take_profit_pct = round(risk_pct * self._RR, 3)
+
+        confidence = 0.68
+        if vol_ok and rsi_ok:
+            confidence += 0.05
+        if level_ok and context_ok:
+            confidence += 0.05
+
+        wick_name = "Dragonfly/Hammer" if direction == "BUY" else "Gravestone/ShootingStar"
+        return TradingSignal(
+            action=direction, symbol=self.symbol,
+            confidence=round(confidence, 2),
+            entry_price=entry, stop_loss=sl, take_profit=tp,
+            reason=f"{wick_name} | RSI {rsi:.1f} | risk {risk_pct:.2f}%",
+            filters_passed=filters,
+        )
+
+
+# ============================================================
 # Реестр всех стратегий
 # ============================================================
 ALL_STRATEGIES = {
@@ -516,4 +674,5 @@ ALL_STRATEGIES = {
     "S8": TrendMomentumStrategy,    # тренд роста/падения (HH/HL + EMA-стек + ADX)
     "S9": TrendFibonacciStrategy,   # тренд + уровни Фибоначчи (38.2/50/61.8%)
     "S10": ScalperProStrategy,      # 3m высокочастотный скальпер (до 8 сигналов/день/символ)
+    "S11": DragonflyGoldStrategy,   # свечные паттерны (Doji/Hammer) + ATR-адаптивный стоп
 }

@@ -146,14 +146,16 @@ class StrategyFusion:
         "S8":  ["structure_swing","trend_ema",  "strength_adx"],
         "S9":  ["fibonacci",      "structure_swing", "trend_ema"],
         "S10": ["scalp_ema",      "scalp_rsi",  "volatility_bb"],
+        "S11": ["pattern_candle", "momentum_rsi", "volume"],   # Dragonfly Gold: свечи+RSI+объём
     }
 
     # Веса стратегий (выше = заслуживают больше доверия при fusion)
     STRATEGY_WEIGHTS: Dict[str, float] = {
-        "S7": 1.3,   # Multi-Confirm: сам уже объединяет много фильтров
-        "S9": 1.4,   # Trend+Fibonacci: самый комплексный сигнал
-        "S8": 1.2,   # Trend Momentum: структурный анализ
-        "S6": 1.1,   # Trend Follower: ADX + Supertrend
+        "S7":  1.3,   # Multi-Confirm: сам уже объединяет много фильтров
+        "S9":  1.4,   # Trend+Fibonacci: самый комплексный сигнал
+        "S8":  1.2,   # Trend Momentum: структурный анализ
+        "S11": 1.2,   # Dragonfly Gold: уникальный паттерн-детектор
+        "S6":  1.1,   # Trend Follower: ADX + Supertrend
     }
     DEFAULT_WEIGHT = 1.0
 
