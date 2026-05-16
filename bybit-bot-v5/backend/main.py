@@ -47,6 +47,7 @@ from position_calc import (
 )
 from db_pool import DBPool
 from boost_mode import BoostManager, BoostCalculator
+from claude_orchestrator import ClaudeOrchestrator
 
 # ============================================================
 # Загрузка конфига
@@ -135,6 +136,10 @@ class BotState:
         # {symbol: (DataFrame, updated_at)}
         self.h1_cache:  Dict[str, tuple] = {}
         self.m15_cache: Dict[str, tuple] = {}
+
+        # Claude AI Orchestrator — анализирует состояние и выдаёт команды
+        self.orchestrator: Optional[ClaudeOrchestrator] = None
+        self.orchestrator_task: Optional[asyncio.Task] = None
 
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
@@ -252,6 +257,113 @@ def _get_m15_cached(symbol: str) -> Optional[object]:
     except Exception as e:
         logger.debug(f"15m cache {symbol}: {e}")
     return None
+
+
+def _execute_bot_command(cmd_dict: Dict) -> Dict:
+    """Маппинг команд Claude-оркестратора → внутренние действия бота."""
+    cmd = cmd_dict.get("cmd", "")
+
+    if cmd == "start":
+        if not state.bot_running:
+            state.bot_running = True
+            state.trading_loop_task = asyncio.create_task(trading_loop())
+        return {"bot_running": state.bot_running}
+
+    if cmd == "stop":
+        state.bot_running = False
+        return {"bot_running": False, "reason": cmd_dict.get("reason", "")}
+
+    if cmd == "paper_on":
+        state.paper_mode = True
+        return {"paper_mode": True}
+
+    if cmd == "paper_off":
+        state.paper_mode = False
+        return {"paper_mode": False}
+
+    if cmd == "scalp_on":
+        added = activate_scalp_mode()
+        return {"scalp_active": True, "strategies": added}
+
+    if cmd == "scalp_off":
+        disabled = deactivate_scalp_mode()
+        return {"scalp_active": False, "disabled": disabled}
+
+    if cmd == "boost_start":
+        result = state.boost.start(
+            initial_balance=float(cmd_dict.get("initial", 10)),
+            target_balance=float(cmd_dict.get("target", 50)),
+            deadline_days=int(cmd_dict.get("days", 21)),
+            mode=cmd_dict.get("mode", "moderate"),
+        )
+        if result.get("success") and cmd_dict.get("mode") == "scalp":
+            activate_scalp_mode()
+        return result
+
+    if cmd == "boost_stop":
+        result = state.boost.stop(cmd_dict.get("reason", "Оркестратор"))
+        if result.get("success") and state.scalp_active:
+            deactivate_scalp_mode()
+        return result
+
+    if cmd == "set_leverage":
+        sid = cmd_dict.get("sid", "")
+        strat = state.strategies.get(sid)
+        if not strat:
+            return {"error": f"Стратегия {sid} не найдена"}
+        strat.leverage = int(cmd_dict.get("value", strat.leverage))
+        return {"sid": sid, "leverage": strat.leverage}
+
+    if cmd == "disable_strategy":
+        sid = cmd_dict.get("sid", "")
+        strat = state.strategies.get(sid)
+        if not strat:
+            return {"error": f"Стратегия {sid} не найдена"}
+        strat.enabled = False
+        return {"sid": sid, "enabled": False}
+
+    if cmd == "enable_strategy":
+        sid = cmd_dict.get("sid", "")
+        strat = state.strategies.get(sid)
+        if not strat:
+            return {"error": f"Стратегия {sid} не найдена"}
+        strat.enabled = True
+        strat.auto_disabled = False
+        return {"sid": sid, "enabled": True}
+
+    if cmd == "set_ml_mode":
+        mode = cmd_dict.get("mode", "advisory")
+        if mode in ("advisory", "strict", "off"):
+            state.ml_filter_mode = mode
+        return {"ml_filter_mode": state.ml_filter_mode}
+
+    return {"error": f"Неизвестная команда: {cmd}"}
+
+
+# ============================================================
+# Claude Orchestrator — фоновый цикл
+# ============================================================
+async def orchestrator_loop():
+    """Каждую минуту проверяет расписание; запускает цикл оркестратора когда пора."""
+    logger.info("[Orchestrator] Фоновый цикл запущен")
+    while True:
+        await asyncio.sleep(60)
+        if not state.orchestrator or not state.orchestrator.enabled:
+            continue
+        if not state.orchestrator.is_due:
+            continue
+        try:
+            full = await full_status()
+            result = await state.orchestrator.run_cycle(full)
+            if result:
+                level = "warn" if result.risk_level in ("high", "critical") else "info"
+                cmds  = [d.cmd for d in result.decisions if d.cmd != "wait"]
+                msg   = f"🤖 Orchestrator [{result.risk_level}]: {result.analysis[:80]}"
+                if cmds:
+                    msg += f" | cmds: {', '.join(cmds)}"
+                await broadcast_log(msg, level)
+        except Exception as e:
+            logger.error(f"[Orchestrator] Loop error: {e}")
 
 
 # ============================================================
@@ -1004,6 +1116,19 @@ async def lifespan(app: FastAPI):
         state.auto_train_task = asyncio.create_task(auto_train_loop())
         logger.info("🔄 Auto-train loop запущен")
 
+    # Claude Orchestrator
+    _anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if _anthropic_key:
+        state.orchestrator = ClaudeOrchestrator(
+            api_key=_anthropic_key,
+            execute_fn=_execute_bot_command,
+            notify_fn=lambda msg, level: asyncio.create_task(state.telegram.send(msg)),
+        )
+        state.orchestrator_task = asyncio.create_task(orchestrator_loop())
+        logger.info("🤖 Claude Orchestrator запущен")
+    else:
+        logger.info("🤖 ANTHROPIC_API_KEY не задан — оркестратор отключён")
+
     logger.info("✅ Бэкенд готов")
     yield
     state.bot_running = False
@@ -1013,6 +1138,8 @@ async def lifespan(app: FastAPI):
         state.news_loop_task.cancel()
     if state.auto_train_task:
         state.auto_train_task.cancel()
+    if state.orchestrator_task:
+        state.orchestrator_task.cancel()
     await state.news_manager.close()
     logger.info("🛑 Завершение работы")
 
@@ -1804,6 +1931,47 @@ async def boost_analyze(req: BoostAnalyzeRequest):
     if req.mode not in ("safe", "moderate", "aggressive"):
         raise HTTPException(400, "mode должен быть: safe | moderate | aggressive")
     return BoostCalculator.full_analysis(req.initial, req.target, req.days, req.mode)
+
+
+# ============================================================
+# ORCHESTRATOR ENDPOINTS
+# ============================================================
+@app.get("/api/orchestrator/status")
+async def orchestrator_status():
+    """Статус Claude-оркестратора: последний цикл, расписание, история."""
+    if not state.orchestrator:
+        return {"enabled": False, "reason": "ANTHROPIC_API_KEY не настроен"}
+    return state.orchestrator.get_status()
+
+
+@app.post("/api/orchestrator/trigger")
+async def orchestrator_trigger():
+    """Принудительный запуск цикла оркестратора (не дожидаясь таймера)."""
+    if not state.orchestrator or not state.orchestrator.enabled:
+        raise HTTPException(400, "Оркестратор недоступен (нет ключа или отключён)")
+    full = await full_status()
+    result = await state.orchestrator.run_cycle(full)
+    if result:
+        return result.to_dict()
+    return {"error": "Цикл не вернул результат"}
+
+
+@app.post("/api/orchestrator/enable")
+async def orchestrator_enable():
+    """Включить оркестратор."""
+    if not state.orchestrator:
+        raise HTTPException(400, "Оркестратор не инициализирован")
+    state.orchestrator.enabled = True
+    return {"enabled": True}
+
+
+@app.post("/api/orchestrator/disable")
+async def orchestrator_disable():
+    """Выключить оркестратор (приостановить без перезапуска)."""
+    if not state.orchestrator:
+        raise HTTPException(400, "Оркестратор не инициализирован")
+    state.orchestrator.enabled = False
+    return {"enabled": False}
 
 
 @app.post("/api/ml/anomaly/fit")
