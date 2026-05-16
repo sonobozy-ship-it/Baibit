@@ -47,6 +47,7 @@ from position_calc import (
 )
 from db_pool import DBPool
 from boost_mode import BoostManager, BoostCalculator
+from adaptive_params import AdaptiveParamManager
 from claude_orchestrator import ClaudeOrchestrator
 
 # ============================================================
@@ -132,6 +133,9 @@ class BotState:
         # Флаг скальпинг-режима (управляется через /api/boost/scalp/activate)
         self.scalp_active: bool = False
 
+        # Адаптивные параметры стратегий (самообучение по реальным сделкам)
+        self.adaptive = AdaptiveParamManager(window=int(os.getenv("ADAPTIVE_WINDOW", "30")))
+
         # Кэш старших таймфреймов для MTF-фильтра ScalperPro
         # {symbol: (DataFrame, updated_at)}
         self.h1_cache:  Dict[str, tuple] = {}
@@ -170,6 +174,13 @@ def init_strategies():
     for sid, cls in ALL_STRATEGIES.items():
         state.strategies[sid] = cls(symbol=symbol_map.get(sid, "BTCUSDT"))
     logger.info(f"Инициализированы стратегии: {list(state.strategies.keys())}")
+
+    # Регистрируем все стратегии в адаптивном менеджере
+    for sid, strat in state.strategies.items():
+        base_conf = getattr(strat, "edge_wr_target", 0.60)
+        state.adaptive.register(sid, base_confidence=base_conf)
+    state.adaptive.register("FUSION", base_confidence=0.65)
+    logger.info("🧠 AdaptiveParamManager инициализирован")
 
     # Загрузка активных ML моделей (если есть)
     if state.ml_enabled and ML_AVAILABLE:
@@ -679,18 +690,19 @@ async def trading_loop():
                     # Добавляем в буфер для fusion-анализа
                     state.signal_buffer.update(sid, signal, strat.timeframe)
 
-                    # Адаптивный SL/TP по ATR (опционально перезаписывает)
+                    # Адаптивный SL/TP по ATR (множители зависят от режима и статистики)
                     if state.use_adaptive_sl:
                         try:
                             import pandas_ta as ta
                             atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
                             atr = float(atr_series.iloc[-1])
                             if atr > 0:
+                                sl_mult, rr = state.adaptive.atr_params(sid, regime=current_regime_name)
                                 adaptive = adaptive_sl_tp(
                                     entry=signal.entry_price, atr=atr,
                                     side=signal.action,
-                                    atr_multiplier_sl=1.5,
-                                    rr_target=strat.take_profit_pct / strat.stop_loss_pct,
+                                    atr_multiplier_sl=sl_mult,
+                                    rr_target=rr,
                                 )
                                 signal.stop_loss = adaptive["stop_loss"]
                                 signal.take_profit = adaptive["take_profit"]
@@ -806,14 +818,16 @@ async def trading_loop():
                             "trade_taken": False,
                         })
 
-                        # Решение
+                        # Решение: адаптивный порог уверенности
+                        adaptive_threshold = state.adaptive.confidence_threshold(sid)
                         if ml_prediction["available"] and state.ml_filter_mode == "strict":
-                            if not ml_prediction["should_take"]:
+                            prob = ml_prediction.get("probability", 0)
+                            if prob < adaptive_threshold:
                                 logger.info(
-                                    f"{sid}: ❌ ML отверг (P={ml_prediction['probability']:.2f})"
+                                    f"{sid}: ❌ ML отверг (P={prob:.2f} < адапт.порог {adaptive_threshold:.2f})"
                                 )
                                 await broadcast_log(
-                                    f"🤖 {sid} ML отверг сигнал (P={ml_prediction['probability']:.2f})",
+                                    f"🤖 {sid} ML отверг сигнал (P={prob:.2f} < {adaptive_threshold:.2f})",
                                     "warn",
                                 )
                                 continue
@@ -962,6 +976,8 @@ async def trading_loop():
 
                                 state.risk_manager.register_trade_result(sid, pnl_usd)
                                 state.risk_manager.register_position_close(sid)
+                                # Адаптивное самообучение: записываем результат в R-multiple
+                                state.adaptive.record(sid, r_multiple)
 
                                 exit_reason = "TP" if pnl_usd > 0 else "SL"
 
@@ -1060,6 +1076,7 @@ async def broadcast_state():
             "models_loaded": list(state.ml_predictor.models.keys()),
             "data_stats": state.ml_store.get_ml_stats() if state.ml_enabled else None,
         },
+        "adaptive_params": state.adaptive.status(),
         "sentiment": state.news_manager.get_current_sentiment() if state.news_enabled else None,
         "drift_status": state.drift_monitor.get_all_metrics(),
         "boost_status": state.boost.get_status() if state.boost.is_active else {"active": False},
@@ -1689,6 +1706,26 @@ async def news_history(hours: int = 24):
 async def news_deep_analysis():
     """Запуск AI-анализа через Claude."""
     return await state.news_manager.deep_analysis()
+
+
+# ============================================================
+# ADAPTIVE PARAMS ENDPOINTS
+# ============================================================
+@app.get("/api/adaptive/status")
+async def adaptive_status():
+    """Текущие адаптивные параметры всех стратегий (порог, Kelly, размер позиции)."""
+    return {"status": state.adaptive.status(), "summary": state.adaptive.summary_line()}
+
+
+@app.post("/api/adaptive/reset/{strategy_id}")
+async def adaptive_reset(strategy_id: str):
+    """Сброс адаптивной статистики для одной стратегии (возврат к базовым параметрам)."""
+    if strategy_id not in state.adaptive._stats:
+        return {"ok": False, "error": "Стратегия не найдена"}
+    base = state.adaptive._base_conf.get(strategy_id, 0.60)
+    state.adaptive._stats[strategy_id]._pnls.clear()
+    state.adaptive._conf[strategy_id] = base
+    return {"ok": True, "strategy_id": strategy_id, "confidence_reset_to": base}
 
 
 # ============================================================
