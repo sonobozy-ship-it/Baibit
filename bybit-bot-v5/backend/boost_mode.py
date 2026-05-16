@@ -589,7 +589,13 @@ class BoostManager:
     def strategy_allowed(self, strategy_id: str) -> bool:
         if not self.is_active:
             return True
-        return strategy_id in self.session.phase.allowed_strategies
+        allowed = self.session.phase.allowed_strategies
+        if strategy_id in allowed:
+            return True
+        # SC_XXX — это экземпляры ScalperPro (S10), проверяем по паттерну
+        if strategy_id.startswith("SC_") and "S10" in allowed:
+            return True
+        return False
 
     @property
     def _emergency_dd(self) -> int:
