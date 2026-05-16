@@ -1835,14 +1835,246 @@ async def websocket_endpoint(ws: WebSocket):
     state.ws_clients.append(ws)
     logger.info(f"WS connected. Total: {len(state.ws_clients)}")
     try:
-        # Сразу шлём текущее состояние
         await broadcast_state()
         while True:
             data = await ws.receive_text()
-            # Можно обрабатывать команды от клиента
     except WebSocketDisconnect:
         state.ws_clients.remove(ws)
         logger.info(f"WS disconnected. Total: {len(state.ws_clients)}")
+
+
+# ============================================================
+# ПОЛНЫЙ СТАТУС — один эндпоинт, всё состояние бота
+# Удобен для мониторинга снаружи (Claude, скрипты, дашборд)
+# ============================================================
+@app.get("/api/status/full")
+async def full_status():
+    """
+    Единый дашборд: баланс, позиции, сделки за сегодня,
+    статус стратегий, boost, скальп, ML, риск.
+    """
+    now = datetime.utcnow()
+
+    # ── Баланс ────────────────────────────────────────────────
+    balance_info: Dict = {}
+    if state.bybit and not state.paper_mode:
+        try:
+            bal = state.bybit.get_balance("USDT")
+            balance_info = {"usdt": round(bal, 4), "source": "bybit"}
+        except Exception as e:
+            balance_info = {"error": str(e)}
+    elif state.paper_mode:
+        ps = state.paper.get_stats()
+        balance_info = {
+            "usdt":       round(ps.get("current_balance", 0), 4),
+            "source":     "paper",
+            "paper_pnl":  round(ps.get("total_pnl", 0), 4),
+            "paper_trades": ps.get("total_trades", 0),
+        }
+    else:
+        balance_info = {"usdt": None, "source": "not_connected"}
+
+    # ── Открытые позиции ──────────────────────────────────────
+    open_positions = []
+    for sid, strat in state.strategies.items():
+        if strat.current_position:
+            pos = strat.current_position
+            open_positions.append({
+                "strategy":  sid,
+                "symbol":    strat.symbol,
+                "side":      pos.get("side"),
+                "entry":     pos.get("entry"),
+                "sl":        pos.get("sl"),
+                "tp":        pos.get("tp"),
+                "qty":       pos.get("qty"),
+                "be_moved":  pos.get("be_moved", False),
+            })
+
+    # ── Сделки за сегодня ─────────────────────────────────────
+    today = now.date().isoformat()
+    today_trades = state.journal.get_trades(start_date=today, limit=200)
+    today_pnl    = round(sum(t.get("pnl_usd", 0) or 0 for t in today_trades), 4)
+    today_wins   = sum(1 for t in today_trades if (t.get("pnl_usd") or 0) > 0)
+    today_losses = sum(1 for t in today_trades if (t.get("pnl_usd") or 0) < 0)
+
+    # ── Стратегии ─────────────────────────────────────────────
+    strategies_summary = []
+    for sid, strat in state.strategies.items():
+        strategies_summary.append({
+            "id":        sid,
+            "name":      strat.NAME,
+            "symbol":    strat.symbol,
+            "timeframe": strat.timeframe,
+            "enabled":   strat.enabled and not strat.auto_disabled,
+            "trades":    strat.trades,
+            "wins":      strat.wins,
+            "wr_pct":    round(strat.wins / strat.trades * 100, 1) if strat.trades else 0,
+            "pnl":       round(strat.pnl, 4),
+            "position":  bool(strat.current_position),
+            "consec_losses": strat.consecutive_losses,
+        })
+
+    # ── Последние 5 сделок ────────────────────────────────────
+    recent_trades = state.journal.get_trades(limit=5)
+
+    # ── Boost ─────────────────────────────────────────────────
+    boost_info = state.boost.get_status()
+
+    # ── Скальп ────────────────────────────────────────────────
+    scalp_strats = {
+        sid: {
+            "symbol":   strat.symbol,
+            "enabled":  strat.enabled,
+            "trades":   strat.trades,
+            "wins":     strat.wins,
+            "wr_pct":   round(strat.wins / strat.trades * 100, 1) if strat.trades else 0,
+            "position": bool(strat.current_position),
+        }
+        for sid, strat in state.strategies.items()
+        if sid.startswith("SC_")
+    }
+
+    # ── ML ────────────────────────────────────────────────────
+    ml_info = {
+        "enabled":      state.ml_enabled,
+        "filter_mode":  state.ml_filter_mode,
+        "models_loaded": list(state.ml_predictor.models.keys()),
+    }
+
+    return {
+        "timestamp":      now.isoformat(),
+        "bot_running":    state.bot_running,
+        "paper_mode":     state.paper_mode,
+        "balance":        balance_info,
+        "open_positions": open_positions,
+        "open_count":     len(open_positions),
+        "today": {
+            "date":    today,
+            "trades":  len(today_trades),
+            "wins":    today_wins,
+            "losses":  today_losses,
+            "pnl_usd": today_pnl,
+            "wr_pct":  round(today_wins / len(today_trades) * 100, 1) if today_trades else 0,
+        },
+        "recent_trades":  recent_trades,
+        "strategies":     strategies_summary,
+        "scalp_active":   state.scalp_active,
+        "scalpers":       scalp_strats,
+        "boost":          boost_info,
+        "ml":             ml_info,
+        "risk":           state.risk_manager.get_status(),
+        "sentiment":      state.news_manager.get_current_sentiment() if state.news_enabled else None,
+    }
+
+
+@app.post("/api/command")
+async def bot_command(body: dict):
+    """
+    Универсальный командный эндпоинт.
+    Принимает JSON: {"cmd": "balance|positions|trades|boost_start|scalp_on|stop", ...}
+    Удобен для вызова из Claude или внешних скриптов.
+    """
+    cmd = body.get("cmd", "").lower()
+
+    if cmd == "balance":
+        if state.paper_mode:
+            return {"balance": state.paper.get_stats().get("current_balance"), "mode": "paper"}
+        if state.bybit:
+            return {"balance": state.bybit.get_balance("USDT"), "mode": "live"}
+        return {"balance": None, "mode": "disconnected"}
+
+    elif cmd == "positions":
+        positions = [
+            {"strategy": sid, "symbol": strat.symbol, **strat.current_position}
+            for sid, strat in state.strategies.items()
+            if strat.current_position
+        ]
+        return {"open_positions": positions, "count": len(positions)}
+
+    elif cmd == "trades":
+        limit = int(body.get("limit", 10))
+        trades = state.journal.get_trades(limit=limit)
+        total_pnl = round(sum(t.get("pnl_usd", 0) or 0 for t in trades), 4)
+        return {"trades": trades, "count": len(trades), "total_pnl": total_pnl}
+
+    elif cmd == "pnl_today":
+        today = datetime.utcnow().date().isoformat()
+        trades = state.journal.get_trades(start_date=today, limit=500)
+        wins   = [t for t in trades if (t.get("pnl_usd") or 0) > 0]
+        losses = [t for t in trades if (t.get("pnl_usd") or 0) < 0]
+        return {
+            "date":    today,
+            "trades":  len(trades),
+            "wins":    len(wins),
+            "losses":  len(losses),
+            "pnl_usd": round(sum(t.get("pnl_usd", 0) or 0 for t in trades), 4),
+            "wr_pct":  round(len(wins) / len(trades) * 100, 1) if trades else 0,
+        }
+
+    elif cmd == "scalp_on":
+        added = activate_scalp_mode()
+        return {"scalp_active": True, "strategies": added}
+
+    elif cmd == "scalp_off":
+        disabled = deactivate_scalp_mode()
+        return {"scalp_active": False, "disabled": disabled}
+
+    elif cmd == "start":
+        if not state.bot_running:
+            state.bot_running = True
+            state.trading_loop_task = asyncio.create_task(trading_loop())
+        return {"bot_running": state.bot_running}
+
+    elif cmd == "stop":
+        state.bot_running = False
+        return {"bot_running": False}
+
+    elif cmd == "paper_on":
+        state.paper_mode = True
+        return {"paper_mode": True}
+
+    elif cmd == "paper_off":
+        state.paper_mode = False
+        return {"paper_mode": False}
+
+    elif cmd == "boost_start":
+        result = state.boost.start(
+            initial_balance=float(body.get("initial", 10)),
+            target_balance=float(body.get("target", 50)),
+            deadline_days=int(body.get("days", 21)),
+            mode=body.get("mode", "moderate"),
+        )
+        if result.get("success") and body.get("mode") == "scalp":
+            activate_scalp_mode()
+        return result
+
+    elif cmd == "boost_stop":
+        return state.boost.stop(body.get("reason", "Команда остановки"))
+
+    elif cmd == "status":
+        # Компактный статус
+        bal = None
+        if state.paper_mode:
+            bal = state.paper.get_stats().get("current_balance")
+        elif state.bybit:
+            try:
+                bal = state.bybit.get_balance("USDT")
+            except Exception:
+                pass
+        return {
+            "bot_running":  state.bot_running,
+            "paper_mode":   state.paper_mode,
+            "balance_usdt": bal,
+            "open_positions": sum(1 for s in state.strategies.values() if s.current_position),
+            "scalp_active": state.scalp_active,
+            "boost_active": state.boost.is_active,
+        }
+
+    return {"error": f"Неизвестная команда: '{cmd}'", "available": [
+        "balance", "positions", "trades", "pnl_today",
+        "scalp_on", "scalp_off", "start", "stop",
+        "paper_on", "paper_off", "boost_start", "boost_stop", "status",
+    ]}
 
 
 if __name__ == "__main__":
