@@ -23,6 +23,7 @@ from bybit_client import BybitClient
 from risk_manager import RiskManager
 from backtester import Backtester
 from telegram_notifier import TelegramNotifier
+from telegram_commander import TelegramCommander
 from trade_journal import TradeJournal
 from correlation_filter import CorrelationFilter
 from ai_analyzer import AIAnalyzer
@@ -82,10 +83,14 @@ class BotState:
         self.correlation = CorrelationFilter()
         self.ai = AIAnalyzer()
         self.paper = PaperTrader()
+        _tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "") or os.getenv("TELEGRAM_TOKEN", "")
+        _tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         self.telegram = TelegramNotifier(
-            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            bot_token=_tg_token,
+            chat_id=_tg_chat_id,
         )
+        self.commander: Optional[TelegramCommander] = None
+        self.commander_task: Optional[asyncio.Task] = None
         self.backtester = Backtester()
 
         # ============== ML инфраструктура ==============
@@ -1185,6 +1190,21 @@ async def broadcast_log(message: str, level: str = "info"):
 
 # ============================================================
 # FastAPI приложение
+# ── Вспомогательные корутины для Telegram Commander ──────────────────────────
+async def _tg_start_bot():
+    """Запустить торговый цикл из Telegram команды."""
+    if not state.bot_running:
+        state.bot_running = True
+        if not state.trading_loop_task or state.trading_loop_task.done():
+            state.trading_loop_task = asyncio.create_task(trading_loop())
+
+async def _tg_stop_bot():
+    """Остановить торговый цикл из Telegram команды."""
+    state.bot_running = False
+    if state.trading_loop_task and not state.trading_loop_task.done():
+        state.trading_loop_task.cancel()
+
+
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1255,6 +1275,22 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("🤖 Оркестратор отключён — задайте ANTHROPIC_API_KEY / OPENAI_API_KEY / OLLAMA_BASE_URL")
 
+    # ── Telegram Commander (двустороннее управление) ──────────────────────────
+    _tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "") or os.getenv("TELEGRAM_TOKEN", "")
+    _tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if _tg_token and _tg_chat_id:
+        state.commander = TelegramCommander(
+            bot_token=_tg_token,
+            allowed_chat_id=_tg_chat_id,
+            state_getter=lambda: state,
+            start_fn=_tg_start_bot,
+            stop_fn=_tg_stop_bot,
+        )
+        state.commander_task = asyncio.create_task(state.commander.run())
+        logger.info("📱 Telegram Commander запущен (long-polling)")
+    else:
+        logger.info("📱 Telegram Commander отключён — задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID")
+
     logger.info("✅ Бэкенд готов")
     yield
     state.bot_running = False
@@ -1266,6 +1302,10 @@ async def lifespan(app: FastAPI):
         state.auto_train_task.cancel()
     if state.orchestrator_task:
         state.orchestrator_task.cancel()
+    if state.commander_task:
+        state.commander_task.cancel()
+    if state.commander:
+        await state.commander.close()
     await state.news_manager.close()
     logger.info("🛑 Завершение работы")
 
