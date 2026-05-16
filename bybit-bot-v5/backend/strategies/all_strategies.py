@@ -503,159 +503,199 @@ class MultiConfirmStrategy(BaseStrategy):
 
 
 # ============================================================
-# S11: DRAGONFLY GOLD — свечные паттерны + ATR-адаптивный стоп
+# S11: DRAGONFLY GOLD
+# Реализация по мотивам Dragonfly EA (MetaTrader):
+#   Ichimoku Kinko Hyo + Bollinger Bands + Parabolic SAR
+#   + Stochastic + OBV — динамический SL/TP на основе BB
 # ============================================================
 class DragonflyGoldStrategy(BaseStrategy):
     """
-    Распознаёт разворотные свечные паттерны:
-      • Dragonfly Doji / Hammer     → лонг (длинная нижняя тень)
-      • Gravestone Doji / Shooting Star → шорт (длинная верхняя тень)
+    5 независимых систем — нужно ≥ 4 из 5 согласованных сигналов.
 
-    Особенности:
-      • SL ставится ПОД/НАД тенью (wick-based), а не фиксированный %
-      • TP = 2.5 × риск (адаптивный RR)
-      • Подтверждение: RSI + объём + поддержка/сопротивление
-      • 15m таймфрейм, плечо 5×
+    Уникальные индикаторы (не используются в S1–S10):
+      • Ichimoku Kinko Hyo — тренд и зоны поддержки/сопротивления
+      • Parabolic SAR      — разворотные точки
+      • Stochastic         — перекупленность / перепроданность
+      • OBV                — объёмное подтверждение направления
+
+    SL/TP динамические на основе ширины Bollinger Bands:
+      Лонг:  SL = BB нижняя полоса, TP = BB верхняя полоса
+      Шорт:  SL = BB верхняя полоса, TP = BB нижняя полоса
     """
 
     ID = "S11"
     NAME = "DRAGONFLY GOLD"
-    DESCRIPTION = "Dragonfly/Hammer + Gravestone/ShootingStar + ATR-стоп + RSI + объём"
-    REGIME_PREFERENCE = ["volatile", "flat", "uptrend", "downtrend"]
+    DESCRIPTION = "Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP"
+    REGIME_PREFERENCE = ["uptrend", "downtrend", "volatile"]
 
-    # Коэффициент безопасного буфера под/над тенью
-    _ATR_BUFFER = 0.10
-    # Минимальный и максимальный допустимый риск в %
-    _MIN_RISK_PCT = 0.25
-    _MAX_RISK_PCT = 3.0
-    # Соотношение TP / риск
-    _RR = 2.5
+    _MIN_RISK_PCT  = 0.30   # меньше — шум
+    _MAX_RISK_PCT  = 4.0    # больше — нет смысла открывать
+    _MIN_FILTERS   = 4      # минимум из 5 систем должны совпасть
 
     def __init__(self, **kwargs):
         super().__init__(
-            stop_loss_pct=1.5,      # fallback, перекрывается динамическим SL
-            take_profit_pct=3.75,   # fallback, перекрывается динамическим TP
-            edge_wr_target=0.65,
-            timeframe="15",
+            stop_loss_pct=1.8,      # fallback (перекрывается BB SL)
+            take_profit_pct=3.6,    # fallback (перекрывается BB TP)
+            edge_wr_target=0.66,
+            timeframe="60",         # H1 — оптимально для Dragonfly EA
             **kwargs,
         )
-
-    # ── Детектор паттерна ─────────────────────────────────────────────────────
-
-    @staticmethod
-    def _detect_pattern(o: float, h: float, l: float, c: float):
-        """
-        Возвращает ('BUY'|'SELL'|None, lower_wick, upper_wick, body).
-
-        Dragonfly Doji / Hammer (BUY):
-          lower_wick >= 60% total range  И  lower_wick >= 2× body
-          upper_wick <= 25% total range
-
-        Gravestone Doji / Shooting Star (SELL):
-          upper_wick >= 60% total range  И  upper_wick >= 2× body
-          lower_wick <= 25% total range
-        """
-        total_range = h - l
-        if total_range < 1e-9:
-            return None, 0, 0, 0
-
-        body        = abs(c - o)
-        lower_wick  = min(o, c) - l
-        upper_wick  = h - max(o, c)
-
-        lower_ratio = lower_wick / total_range
-        upper_ratio = upper_wick / total_range
-        body_safe   = max(body, total_range * 0.001)  # избегаем деления на ~0
-
-        if lower_ratio >= 0.60 and lower_wick >= 2 * body_safe and upper_ratio <= 0.25:
-            return "BUY", lower_wick, upper_wick, body
-
-        if upper_ratio >= 0.60 and upper_wick >= 2 * body_safe and lower_ratio <= 0.25:
-            return "SELL", lower_wick, upper_wick, body
-
-        return None, lower_wick, upper_wick, body
 
     # ── Основной анализ ───────────────────────────────────────────────────────
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 40:
+        # Ichimoku требует 52 бара Senkou B + запас
+        if len(df) < 65:
             return None
 
         df = df.copy()
-        df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
-        df["rsi"]    = ta.rsi(df["close"], length=14)
-        df["ema20"]  = ta.ema(df["close"], length=20)
-        df["vol_ma"] = df["volume"].rolling(20).mean()
+
+        # ── Расчёт индикаторов ────────────────────────────────────────────────
+
+        # Ichimoku
+        ichi = ta.ichimoku(df["high"], df["low"], df["close"],
+                           tenkan=9, kijun=26, senkou=52)
+        df   = df.join(ichi)
+
+        # Bollinger Bands
+        bb   = ta.bbands(df["close"], length=20, std=2)
+        df   = df.join(bb)
+
+        # Parabolic SAR
+        psar = ta.psar(df["high"], df["low"], df["close"],
+                       af0=0.02, af_step=0.02, max_af=0.2)
+        df   = df.join(psar)
+
+        # Stochastic
+        stoch = ta.stoch(df["high"], df["low"], df["close"], k=14, d=3, smooth_k=3)
+        df    = df.join(stoch)
+
+        # OBV и его скользящая средняя
+        df["obv"]    = ta.obv(df["close"], df["volume"])
+        df["obv_ma"] = df["obv"].rolling(10).mean()
 
         last = df.iloc[-1]
-        o, h, l, c = last["open"], last["high"], last["low"], last["close"]
-        atr  = last["atr"]
-        rsi  = last["rsi"]
-        ema20 = last["ema20"]
+        prev = df.iloc[-2]
 
-        direction, lower_wick, upper_wick, body = self._detect_pattern(o, h, l, c)
-        if direction is None:
+        c = float(last["close"])
+
+        # ── Ichimoku-фильтр ───────────────────────────────────────────────────
+        senkou_a = last["ISA_9"]
+        senkou_b = last["ISB_26"]
+        tenkan   = last["ITS_9"]
+        kijun    = last["IKS_26"]
+
+        if pd.isna(senkou_a) or pd.isna(senkou_b):
             return None
 
-        # ── Контекстные фильтры ───────────────────────────────────────────────
+        cloud_top = max(senkou_a, senkou_b)
+        cloud_bot = min(senkou_a, senkou_b)
+        ichi_bull = c > cloud_top and tenkan > kijun    # цена над облаком, Tenkan > Kijun
+        ichi_bear = c < cloud_bot and tenkan < kijun
 
-        vol_ok   = last["volume"] > last["vol_ma"] * 1.3
+        # ── PSAR-фильтр ───────────────────────────────────────────────────────
+        psar_dir      = last["PSARd_0.02_0.2"]
+        psar_dir_prev = prev["PSARd_0.02_0.2"]
+        psar_bull = psar_dir == 1                        # SAR ниже цены → бычий тренд
+        psar_bear = psar_dir == -1
+        # Флип: переворот на текущей свече — сигнал сильнее
+        psar_flip_bull = (psar_dir_prev == -1) and (psar_dir == 1)
+        psar_flip_bear = (psar_dir_prev == 1)  and (psar_dir == -1)
 
-        # Поддержка/сопротивление: тень уходит в область последних экстремумов
-        recent_low  = df.iloc[-20:-1]["low"].min()
-        recent_high = df.iloc[-20:-1]["high"].max()
+        # ── Stochastic-фильтр ─────────────────────────────────────────────────
+        sk      = last["STOCHk_14_3_3"]
+        sd      = last["STOCHd_14_3_3"]
+        sk_prev = prev["STOCHk_14_3_3"]
+        sd_prev = prev["STOCHd_14_3_3"]
 
-        if direction == "BUY":
-            rsi_ok      = rsi < 42
-            level_ok    = l <= recent_low * 1.008  # тень ниже/у недавнего минимума
-            context_ok  = c <= ema20 * 1.015       # цена у/под EMA20 → разворот вверх
-        else:
-            rsi_ok      = rsi > 58
-            level_ok    = h >= recent_high * 0.992  # тень выше/у недавнего максимума
-            context_ok  = c >= ema20 * 0.985        # цена у/над EMA20 → разворот вниз
+        stoch_bull = (sk_prev < sd_prev) and (sk > sd) and sk < 45   # пересечение вверх из зоны ≤45
+        stoch_bear = (sk_prev > sd_prev) and (sk < sd) and sk > 55   # пересечение вниз из зоны ≥55
 
-        filters = {
-            "pattern":  True,
-            "rsi":      rsi_ok,
-            "volume":   vol_ok,
-            "level":    level_ok,
-            "context":  context_ok,
+        # ── OBV-фильтр ────────────────────────────────────────────────────────
+        obv_bull = last["obv"] > last["obv_ma"]   # объём поддерживает рост
+        obv_bear = last["obv"] < last["obv_ma"]
+
+        # ── BB-позиция ────────────────────────────────────────────────────────
+        bb_lower = last["BBL_20_2.0"]
+        bb_mid   = last["BBM_20_2.0"]
+        bb_upper = last["BBU_20_2.0"]
+
+        if pd.isna(bb_lower) or pd.isna(bb_upper):
+            return None
+
+        bb_support    = c <= bb_mid               # покупаем в нижней половине BB
+        bb_resistance = c >= bb_mid               # продаём в верхней половине BB
+
+        # ── Сборка фильтров ───────────────────────────────────────────────────
+        long_filters = {
+            "ichimoku":   ichi_bull,
+            "psar":       psar_bull,
+            "stochastic": stoch_bull,
+            "obv":        obv_bull,
+            "bb_zone":    bb_support,
+        }
+        short_filters = {
+            "ichimoku":   ichi_bear,
+            "psar":       psar_bear,
+            "stochastic": stoch_bear,
+            "obv":        obv_bear,
+            "bb_zone":    bb_resistance,
         }
 
-        if not all(filters.values()):
+        long_score  = sum(long_filters.values())
+        short_score = sum(short_filters.values())
+
+        long_ok  = long_score  >= self._MIN_FILTERS
+        short_ok = short_score >= self._MIN_FILTERS
+
+        if not (long_ok or short_ok):
             return None
 
-        # ── Динамический SL/TP ────────────────────────────────────────────────
+        # При конфликте выбираем направление с бо́льшим счётом
+        if long_ok and short_ok:
+            if long_score >= short_score:
+                short_ok = False
+            else:
+                long_ok = False
 
-        entry = float(c)
+        direction = "BUY" if long_ok else "SELL"
+        score     = long_score if long_ok else short_score
+        filters   = long_filters if long_ok else short_filters
 
+        # ── Динамический SL/TP на основе BB ──────────────────────────────────
+        entry = c
         if direction == "BUY":
-            sl = l - self._ATR_BUFFER * atr          # под тенью
-            tp = entry + self._RR * (entry - sl)
+            sl = bb_lower * 0.9995    # чуть ниже нижней полосы
+            tp = bb_upper
         else:
-            sl = h + self._ATR_BUFFER * atr           # над тенью
-            tp = entry - self._RR * (sl - entry)
+            sl = bb_upper * 1.0005    # чуть выше верхней полосы
+            tp = bb_lower
 
         risk_pct = abs(entry - sl) / entry * 100
         if not (self._MIN_RISK_PCT <= risk_pct <= self._MAX_RISK_PCT):
             return None
 
-        # Обновляем атрибуты для to_dict()
-        self.stop_loss_pct  = round(risk_pct, 3)
-        self.take_profit_pct = round(risk_pct * self._RR, 3)
+        # Обновляем параметры для to_dict() / статистики
+        self.stop_loss_pct   = round(risk_pct, 3)
+        self.take_profit_pct = round(abs(tp - entry) / entry * 100, 3)
 
-        confidence = 0.68
-        if vol_ok and rsi_ok:
-            confidence += 0.05
-        if level_ok and context_ok:
-            confidence += 0.05
+        # Флип PSAR — экстра-буст к уверенности
+        flip_boost = 0.05 if (
+            (direction == "BUY"  and psar_flip_bull) or
+            (direction == "SELL" and psar_flip_bear)
+        ) else 0.0
 
-        wick_name = "Dragonfly/Hammer" if direction == "BUY" else "Gravestone/ShootingStar"
+        confidence = round(0.62 + 0.06 * (score - self._MIN_FILTERS) + flip_boost, 2)
+
         return TradingSignal(
             action=direction, symbol=self.symbol,
-            confidence=round(confidence, 2),
+            confidence=min(confidence, 0.92),
             entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"{wick_name} | RSI {rsi:.1f} | risk {risk_pct:.2f}%",
+            reason=(
+                f"Dragonfly {direction} {score}/5 | "
+                f"PSAR {'FLIP ' if flip_boost else ''}"
+                f"Stoch {sk:.0f} | BB-SL risk {risk_pct:.2f}%"
+            ),
             filters_passed=filters,
         )
 
@@ -674,5 +714,5 @@ ALL_STRATEGIES = {
     "S8": TrendMomentumStrategy,    # тренд роста/падения (HH/HL + EMA-стек + ADX)
     "S9": TrendFibonacciStrategy,   # тренд + уровни Фибоначчи (38.2/50/61.8%)
     "S10": ScalperProStrategy,      # 3m высокочастотный скальпер (до 8 сигналов/день/символ)
-    "S11": DragonflyGoldStrategy,   # свечные паттерны (Doji/Hammer) + ATR-адаптивный стоп
+    "S11": DragonflyGoldStrategy,   # Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP
 }

@@ -165,6 +165,103 @@ def obv(close: pd.Series, volume: pd.Series, **kwargs) -> pd.Series:
     return (direction * volume).cumsum()
 
 
+def ichimoku(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    tenkan: int = 9,
+    kijun: int = 26,
+    senkou: int = 52,
+    **kwargs,
+) -> pd.DataFrame:
+    """
+    Ichimoku Kinko Hyo (упрощённый — без сдвига для сравнения с ценой).
+    Senkou A/B не сдвинуты вперёд, что позволяет напрямую сравнивать с close.
+    """
+    tenkan_sen = (high.rolling(tenkan).max() + low.rolling(tenkan).min()) / 2
+    kijun_sen  = (high.rolling(kijun).max()  + low.rolling(kijun).min())  / 2
+    senkou_a   = (tenkan_sen + kijun_sen) / 2
+    senkou_b   = (high.rolling(senkou).max() + low.rolling(senkou).min()) / 2
+    chikou     = close.shift(-kijun)
+
+    return pd.DataFrame({
+        f"ITS_{tenkan}": tenkan_sen,
+        f"IKS_{kijun}":  kijun_sen,
+        f"ISA_{tenkan}": senkou_a,
+        f"ISB_{kijun}":  senkou_b,
+        f"ICS_{kijun}":  chikou,
+    }, index=close.index)
+
+
+def psar(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    af0: float = 0.02,
+    af_step: float = 0.02,
+    max_af: float = 0.2,
+    **kwargs,
+) -> pd.DataFrame:
+    """Parabolic SAR. Возвращает PSARl (лонг, ниже цены), PSARs (шорт, выше), PSARd (направление 1/-1)."""
+    hi = high.values
+    lo = low.values
+    n  = len(hi)
+
+    psar_long  = np.full(n, np.nan)
+    psar_short = np.full(n, np.nan)
+    direction  = np.zeros(n)
+
+    bull = True
+    af   = af0
+    ep   = hi[0]
+    sar  = lo[0]
+
+    for i in range(1, n):
+        if bull:
+            sar_new = sar + af * (ep - sar)
+            # PSAR не может быть выше двух предыдущих минимумов
+            sar_new = min(sar_new, lo[i - 1], lo[max(0, i - 2)])
+            if lo[i] < sar_new:           # разворот → шорт
+                bull    = False
+                sar_new = ep
+                ep      = lo[i]
+                af      = af0
+                psar_short[i] = sar_new
+                direction[i]  = -1
+            else:
+                if hi[i] > ep:
+                    ep = hi[i]
+                    af = min(af + af_step, max_af)
+                psar_long[i] = sar_new
+                direction[i] = 1
+        else:
+            sar_new = sar + af * (ep - sar)
+            # PSAR не может быть ниже двух предыдущих максимумов
+            sar_new = max(sar_new, hi[i - 1], hi[max(0, i - 2)])
+            if hi[i] > sar_new:           # разворот → лонг
+                bull    = True
+                sar_new = ep
+                ep      = hi[i]
+                af      = af0
+                psar_long[i] = sar_new
+                direction[i] = 1
+            else:
+                if lo[i] < ep:
+                    ep = lo[i]
+                    af = min(af + af_step, max_af)
+                psar_short[i] = sar_new
+                direction[i]  = -1
+
+        sar = sar_new
+
+    idx = close.index
+    return pd.DataFrame({
+        f"PSARl_{af0}_{max_af}":  pd.Series(psar_long,  index=idx),
+        f"PSARs_{af0}_{max_af}":  pd.Series(psar_short, index=idx),
+        f"PSARd_{af0}_{max_af}":  pd.Series(direction,  index=idx),
+    })
+
+
 def supertrend(
     high: pd.Series,
     low: pd.Series,
