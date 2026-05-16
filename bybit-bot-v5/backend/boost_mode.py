@@ -60,12 +60,12 @@ PHASES_AGGRESSIVE: List[BoostPhaseConfig] = [
     BoostPhaseConfig(
         name="Рост", leverage=12, risk_pct=60.0, tp_pct=3.0, sl_pct=1.5,
         max_positions=2, daily_loss_limit_pct=25.0,
-        allowed_strategies=["S4", "S8", "S9"], cooldown_after_loss_min=30,
+        allowed_strategies=["S4", "S8", "S9", "S11"], cooldown_after_loss_min=30,
     ),
     BoostPhaseConfig(
         name="Закрепление", leverage=8, risk_pct=40.0, tp_pct=3.5, sl_pct=1.8,
         max_positions=2, daily_loss_limit_pct=20.0,
-        allowed_strategies=["S7", "S8", "S9"], cooldown_after_loss_min=45,
+        allowed_strategies=["S7", "S8", "S9", "S11"], cooldown_after_loss_min=45,
     ),
 ]
 
@@ -76,17 +76,17 @@ PHASES_MODERATE: List[BoostPhaseConfig] = [
     BoostPhaseConfig(
         name="Старт", leverage=5, risk_pct=20.0, tp_pct=4.0, sl_pct=1.0,
         max_positions=1, daily_loss_limit_pct=12.0,
-        allowed_strategies=["S4", "S8", "S9"], cooldown_after_loss_min=30,
+        allowed_strategies=["S4", "S8", "S9", "S11"], cooldown_after_loss_min=30,
     ),
     BoostPhaseConfig(
         name="Рост", leverage=5, risk_pct=20.0, tp_pct=4.0, sl_pct=1.0,
         max_positions=2, daily_loss_limit_pct=12.0,
-        allowed_strategies=["S4", "S8", "S9"], cooldown_after_loss_min=35,
+        allowed_strategies=["S4", "S8", "S9", "S11"], cooldown_after_loss_min=35,
     ),
     BoostPhaseConfig(
         name="Закрепление", leverage=4, risk_pct=15.0, tp_pct=5.0, sl_pct=1.0,
         max_positions=2, daily_loss_limit_pct=10.0,
-        allowed_strategies=["S7", "S8", "S9"], cooldown_after_loss_min=45,
+        allowed_strategies=["S7", "S8", "S9", "S11"], cooldown_after_loss_min=45,
     ),
 ]
 
@@ -102,12 +102,12 @@ PHASES_SAFE: List[BoostPhaseConfig] = [
     BoostPhaseConfig(
         name="Рост", leverage=3, risk_pct=15.0, tp_pct=4.0, sl_pct=1.0,
         max_positions=1, daily_loss_limit_pct=8.0,
-        allowed_strategies=["S8", "S9"], cooldown_after_loss_min=60,
+        allowed_strategies=["S8", "S9", "S11"], cooldown_after_loss_min=60,
     ),
     BoostPhaseConfig(
         name="Финиш", leverage=3, risk_pct=15.0, tp_pct=5.0, sl_pct=1.0,
         max_positions=2, daily_loss_limit_pct=6.0,
-        allowed_strategies=["S7", "S8", "S9"], cooldown_after_loss_min=60,
+        allowed_strategies=["S7", "S8", "S9", "S11"], cooldown_after_loss_min=60,
     ),
 ]
 
@@ -130,7 +130,7 @@ PHASES_SCALP: List[BoostPhaseConfig] = [
     BoostPhaseConfig(
         name="Закреп-Скальп", leverage=4, risk_pct=6.0, tp_pct=0.35, sl_pct=0.12,
         max_positions=6, daily_loss_limit_pct=6.0,
-        allowed_strategies=["S10", "S8", "S9"],  # в фазе 3 добавляем качественные
+        allowed_strategies=["S10", "S8", "S9", "S11"],  # в фазе 3 добавляем качественные
         cooldown_after_loss_min=10,
     ),
 ]
