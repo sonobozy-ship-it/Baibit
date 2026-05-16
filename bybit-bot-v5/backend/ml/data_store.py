@@ -300,7 +300,8 @@ class MLDataStore:
                     r = c.fetchone()
                     return list(r.values())[0] if r else 0
             else:
-                return conn.execute(sql).fetchone()[0]
+                row = conn.execute(sql).fetchone()
+                return row[0] if row is not None else 0
 
         with self.pool.connection() as conn:
             total   = scalar(conn, "SELECT COUNT(*) FROM signal_snapshots")
