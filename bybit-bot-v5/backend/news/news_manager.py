@@ -288,6 +288,147 @@ class NewsManager:
                 conn.row_factory = sqlite3.Row
                 return [dict(r) for r in conn.execute(query, (cutoff,)).fetchall()]
 
+    async def get_trading_recommendations(
+        self,
+        portfolio_context: Optional[Dict] = None,
+        symbols: Optional[List[str]] = None,
+    ) -> Dict:
+        """
+        AI-рекомендации на основе новостей, sentiment и контекста портфеля.
+
+        portfolio_context:
+            {"balance": 1000, "open_positions": 2, "daily_pnl": 15.5,
+             "active_strategies": ["S1","S9"], "regime": "trending_up"}
+
+        Возвращает:
+            {"action": "trade|wait|reduce|stop",
+             "risk_level": "low|medium|high|extreme",
+             "focus_symbols": ["BTCUSDT"],
+             "avoid_symbols": ["DOGEUSDT"],
+             "recommendations": ["...", "..."],
+             "fear_greed": {...},
+             "reasoning": "...",
+             "available": True}
+        """
+        if not self.sentiment._anthropic_client:
+            return {"available": False, "reason": "Anthropic API не настроен", "action": "trade"}
+
+        # Собираем последние данные
+        cutoff = (datetime.utcnow() - timedelta(hours=4)).isoformat()
+        query = self.db.adapt(
+            "SELECT source, title, sentiment_score FROM news_items "
+            "WHERE fetched_at >= ? ORDER BY fetched_at DESC LIMIT 40"
+        )
+        with self.db.connection() as conn:
+            if self.db.is_mysql:
+                with conn.cursor() as c:
+                    c.execute(query, (cutoff,))
+                    recent = list(c.fetchall())
+            else:
+                import sqlite3
+                conn.row_factory = sqlite3.Row
+                recent = [dict(r) for r in conn.execute(query, (cutoff,)).fetchall()]
+
+        # Fear & Greed Index
+        fear_greed = await self.news.fetch_fear_greed()
+
+        # Символы по умолчанию
+        syms = symbols or ["BTC", "ETH", "SOL", "BNB", "XRP"]
+
+        # Строим промпт
+        news_block = "\n".join(
+            f"  [{it.get('source','?')}] {it.get('title','')[:150]} "
+            f"(sentiment: {'+' if (it.get('sentiment_score') or 0) > 0 else ''}"
+            f"{it.get('sentiment_score', 0):.2f})"
+            for it in recent[:25]
+        ) or "  Нет свежих данных"
+
+        fg_block = ""
+        if fear_greed:
+            fg_block = (
+                f"\nFear & Greed Index: {fear_greed['value']}/100 "
+                f"({fear_greed['label']}) "
+                f"{'↑' if fear_greed['change'] > 0 else '↓'}{abs(fear_greed['change'])} за день"
+            )
+
+        sentiment = self.cached_sentiment
+        portfolio_block = ""
+        if portfolio_context:
+            portfolio_block = f"""
+Портфель бота:
+- Баланс: {portfolio_context.get('balance', '?')} USDT
+- Открытых позиций: {portfolio_context.get('open_positions', 0)}
+- Дневной PnL: {portfolio_context.get('daily_pnl', 0):+.2f} USDT
+- Активные стратегии: {', '.join(portfolio_context.get('active_strategies', []))}
+- Режим рынка: {portfolio_context.get('regime', 'неизвестен')}"""
+
+        prompt = f"""Ты — AI-аналитик торгового крипто-бота. Дай конкретные торговые рекомендации.
+
+ТЕКУЩИЙ SENTIMENT РЫНКА:
+- Общий: {sentiment.get('overall_score', 0):+.2f} (−1 медведь .. +1 бык)
+- Новости: {sentiment.get('news_sentiment', {}).get('score', 0):+.2f}
+- Twitter: {sentiment.get('twitter_sentiment', {}).get('score', 0):+.2f}{fg_block}
+
+СВЕЖИЕ НОВОСТИ И ТВИТЫ (последние 4 часа):
+{news_block}
+{portfolio_block}
+
+ТОРГУЕМЫЕ СИМВОЛЫ: {', '.join(syms)}
+
+Ответь СТРОГО JSON (только JSON, без пояснений):
+{{
+  "action": "trade" | "wait" | "reduce" | "stop",
+  "risk_level": "low" | "medium" | "high" | "extreme",
+  "focus_symbols": ["СИМВОЛ1USDT", ...],
+  "avoid_symbols": ["СИМВОЛ2USDT", ...],
+  "recommendations": [
+    "конкретная рекомендация 1",
+    "конкретная рекомендация 2",
+    "конкретная рекомендация 3"
+  ],
+  "key_risks": ["риск1", "риск2"],
+  "reasoning": "2-3 предложения почему такие рекомендации",
+  "confidence": 0.0-1.0
+}}
+
+Правила:
+- action=stop только при экстремальных рисках (FG < 15 или крупный hack/ban)
+- action=reduce при высоком риске или негативных тенденциях
+- action=wait при неопределённости
+- action=trade при позитивном или нейтральном фоне
+- Рекомендации на русском языке"""
+
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.sentiment._anthropic_client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=800,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+            )
+            text = response.content[0].text.strip()
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start >= 0 and end > start:
+                result = json.loads(text[start:end])
+                result["available"] = True
+                result["fear_greed"] = fear_greed
+                result["sentiment_score"] = sentiment.get("overall_score", 0)
+                result["timestamp"] = datetime.utcnow().isoformat()
+                result["news_analyzed"] = len(recent)
+                logger.info(
+                    f"[AI Рекомендации] action={result.get('action')} "
+                    f"risk={result.get('risk_level')} "
+                    f"focus={result.get('focus_symbols', [])}"
+                )
+                return result
+            return {"available": False, "reason": "JSON parse failed", "action": "trade"}
+        except Exception as e:
+            logger.error(f"AI рекомендации ошибка: {e}")
+            return {"available": False, "reason": str(e), "action": "trade"}
+
     async def close(self):
         await self.news.close()
         await self.twitter.close()

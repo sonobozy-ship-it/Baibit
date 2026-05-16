@@ -623,6 +623,45 @@ async def trading_loop():
                     except Exception:
                         sentiment_features = state.news_manager.get_sentiment_features()
 
+                # AI-рекомендации (раз в 30 мин, advisory — не блокируют торговлю)
+                if state.news_enabled and (
+                    not hasattr(state, "_last_ai_rec")
+                    or (datetime.utcnow() - state._last_ai_rec).total_seconds() > 1800
+                ):
+                    try:
+                        portfolio_ctx = {
+                            "balance": balance,
+                            "open_positions": state.risk_manager.open_positions_count,
+                            "daily_pnl": state.risk_manager.daily_pnl,
+                            "active_strategies": [
+                                sid for sid, s in state.strategies.items() if s.enabled
+                            ],
+                            "regime": current_regime_name or "unknown",
+                        }
+                        ai_rec = await state.news_manager.get_trading_recommendations(
+                            portfolio_context=portfolio_ctx,
+                        )
+                        state._last_ai_rec = datetime.utcnow()
+                        state._cached_ai_rec = ai_rec
+                        if ai_rec.get("available"):
+                            action = ai_rec.get("action", "trade")
+                            risk   = ai_rec.get("risk_level", "medium")
+                            await broadcast_log(
+                                f"🧠 AI рекомендация: {action.upper()} | риск={risk} | "
+                                f"{ai_rec.get('reasoning', '')[:120]}",
+                                "warn" if risk in ("high", "extreme") else "info",
+                            )
+                            # Критическая ситуация — уведомление в Telegram
+                            if action == "stop" or risk == "extreme":
+                                asyncio.create_task(state.telegram.send(
+                                    f"🚨 <b>AI СИГНАЛ ОПАСНОСТИ</b>\n"
+                                    f"Действие: {action.upper()}\n"
+                                    f"Риск: {risk}\n"
+                                    f"{ai_rec.get('reasoning', '')}"
+                                ))
+                    except Exception as e:
+                        logger.debug(f"AI рекомендации пропущены: {e}")
+
                 klines_data = {}
                 current_regime_name = None   # инициализируем до цикла (используется в fusion)
                 current_regime_id   = None
@@ -1706,6 +1745,32 @@ async def news_history(hours: int = 24):
 async def news_deep_analysis():
     """Запуск AI-анализа через Claude."""
     return await state.news_manager.deep_analysis()
+
+
+@app.get("/api/news/recommendations")
+async def news_recommendations():
+    """Последние AI-рекомендации (кешированные, обновляются раз в 30 мин)."""
+    cached = getattr(state, "_cached_ai_rec", None)
+    if cached:
+        return cached
+    return {"available": False, "reason": "Рекомендации ещё не сгенерированы — запустите бота"}
+
+
+@app.post("/api/news/recommendations/refresh")
+async def news_recommendations_refresh():
+    """Принудительно обновить AI-рекомендации прямо сейчас."""
+    if not state.news_enabled:
+        return {"available": False, "reason": "News модуль отключён"}
+    portfolio_ctx = {
+        "balance": (state.bybit.get_balance("USDT") if state.bybit else 0),
+        "open_positions": state.risk_manager.open_positions_count,
+        "daily_pnl": state.risk_manager.daily_pnl,
+        "active_strategies": [sid for sid, s in state.strategies.items() if s.enabled],
+    }
+    result = await state.news_manager.get_trading_recommendations(portfolio_context=portfolio_ctx)
+    state._cached_ai_rec = result
+    state._last_ai_rec = datetime.utcnow()
+    return result
 
 
 # ============================================================

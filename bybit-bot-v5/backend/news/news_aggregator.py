@@ -160,6 +160,30 @@ class NewsAggregator:
             logger.warning(f"Reddit error: {e}")
             return []
 
+    async def fetch_fear_greed(self) -> Optional[Dict]:
+        """Fear & Greed Index от Alternative.me (бесплатно, без ключа)."""
+        try:
+            session = await self._get_session()
+            async with session.get("https://api.alternative.me/fng/?limit=2") as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+            entries = data.get("data", [])
+            if not entries:
+                return None
+            latest = entries[0]
+            prev   = entries[1] if len(entries) > 1 else latest
+            return {
+                "value":      int(latest.get("value", 50)),
+                "label":      latest.get("value_classification", "Neutral"),
+                "prev_value": int(prev.get("value", 50)),
+                "change":     int(latest.get("value", 50)) - int(prev.get("value", 50)),
+                "timestamp":  latest.get("timestamp", ""),
+            }
+        except Exception as e:
+            logger.warning(f"Fear&Greed ошибка: {e}")
+            return None
+
     async def fetch_all(self, currencies: List[str] = None) -> List[Dict]:
         """Параллельная загрузка изо всех источников."""
         tasks = [self.fetch_rss(name, url, limit=15) for name, url in self.RSS_FEEDS.items()]

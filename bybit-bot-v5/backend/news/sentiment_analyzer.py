@@ -179,7 +179,7 @@ class SentimentAnalyzer:
             response = await loop.run_in_executor(
                 None,
                 lambda: self._anthropic_client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model="claude-haiku-4-5",
                     max_tokens=1000,
                     messages=[{"role": "user", "content": prompt}],
                 ),
