@@ -495,7 +495,7 @@ class BoostSession:
 
     @property
     def phase(self) -> BoostPhaseConfig:
-        return self.phases[self.phase_index]
+        return self.phases[min(self.phase_index, len(self.phases) - 1)]
 
     @property
     def required_daily_return_pct(self) -> float:
@@ -751,7 +751,8 @@ class BoostManager:
                 losses=sess.day_losses,
                 pnl_usd=round(balance - sess.day_start_balance, 4),
                 pnl_pct=round(
-                    (balance - sess.day_start_balance) / sess.day_start_balance * 100, 2
+                    (balance - sess.day_start_balance) / sess.day_start_balance * 100
+                    if sess.day_start_balance else 0.0, 2
                 ),
             ))
             sess.day_start_balance = balance

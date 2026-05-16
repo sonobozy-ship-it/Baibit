@@ -46,7 +46,7 @@ class RegimeClassifier:
         result["atr_pct"] = atr / df["close"] * 100
 
         adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
-        result["adx"] = adx_df["ADX_14"] if adx_df is not None else 20
+        result["adx"] = adx_df["ADX_14"] if (adx_df is not None and "ADX_14" in adx_df.columns) else 20
 
         bb = ta.bbands(df["close"], length=20, std=2)
         if "BBU_20_2.0" in bb.columns:
@@ -55,7 +55,7 @@ class RegimeClassifier:
             result["bb_width"] = 0
 
         ema_21 = ta.ema(df["close"], length=21)
-        result["trend_direction"] = (df["close"] - ema_21) / df["close"] * 100
+        result["trend_direction"] = (df["close"] - ema_21) / df["close"].replace(0, np.nan) * 100
 
         return result.dropna()
 

@@ -52,11 +52,12 @@ class DBPool:
             return cls._instances[key]
 
     def __init__(self, db_path: str = "data/ml_data.db"):
-        if self._ready:
-            return
-        self.db_path = db_path
-        self._local = threading.local()
-        self._ready = True
+        with self.__class__._lock:
+            if self._ready:
+                return
+            self._ready = True  # set early under lock to prevent double-init
+            self.db_path = db_path
+            self._local = threading.local()
 
         if USE_MYSQL:
             self._verify_mysql()

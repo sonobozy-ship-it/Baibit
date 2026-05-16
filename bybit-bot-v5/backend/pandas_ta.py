@@ -50,7 +50,6 @@ def bbands(series: pd.Series, length: int = 20, std: float = 2.0, **kwargs) -> p
         f"BBM_{length}_{float(std)}": mid,
         f"BBU_{length}_{float(std)}": upper,
         f"BBW_{length}_{float(std)}": bw,
-        f"BBB_{length}_{float(std)}": bw,
         f"BBP_{length}_{float(std)}": bp,
     })
 
@@ -188,7 +187,7 @@ def ichimoku(
         f"ITS_{tenkan}": tenkan_sen,
         f"IKS_{kijun}":  kijun_sen,
         f"ISA_{tenkan}": senkou_a,
-        f"ISB_{kijun}":  senkou_b,
+        f"ISB_{senkou}": senkou_b,
         f"ICS_{kijun}":  chikou,
     }, index=close.index)
 

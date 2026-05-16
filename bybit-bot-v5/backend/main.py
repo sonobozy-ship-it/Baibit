@@ -510,7 +510,6 @@ async def _execute_fusion_signal(
     )
 
     if state.paper_mode:
-        from strategies.base import TradingSignal as _TS
         state.paper.open_position(fused, sid, qty, 3)
         await broadcast_log(f"📄 FUSION {fused.action} {sym} (paper) {log_msg}")
     else:

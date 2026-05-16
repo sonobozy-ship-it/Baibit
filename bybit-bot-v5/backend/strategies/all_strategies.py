@@ -185,15 +185,15 @@ class RSIDivergenceStrategy(BaseStrategy):
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Bullish divergence: цена сделала LL, RSI сделал HL
+        # Bullish divergence: цена сделала LL, RSI на свинг-лоу выше начального
         bull_div = (
             last_10["low"].iloc[-1] < last_10["low"].iloc[0]
-            and last_10["rsi"].iloc[-1] > last_10["rsi"].iloc[0]
+            and rsi_at_low > last_10["rsi"].iloc[0]
             and last["rsi"] < 40
         )
         bear_div = (
             last_10["high"].iloc[-1] > last_10["high"].iloc[0]
-            and last_10["rsi"].iloc[-1] < last_10["rsi"].iloc[0]
+            and rsi_at_high < last_10["rsi"].iloc[0]
             and last["rsi"] > 60
         )
 
@@ -581,7 +581,7 @@ class DragonflyGoldStrategy(BaseStrategy):
 
         # ── Ichimoku-фильтр ───────────────────────────────────────────────────
         senkou_a = last["ISA_9"]
-        senkou_b = last["ISB_26"]
+        senkou_b = last["ISB_52"]
         tenkan   = last["ITS_9"]
         kijun    = last["IKS_26"]
 
