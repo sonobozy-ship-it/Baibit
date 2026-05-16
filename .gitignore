@@ -17,3 +17,4 @@ data/boost_session.json
 **/data/boost_session.json
 logs/
 .DS_Store
+.claude/
