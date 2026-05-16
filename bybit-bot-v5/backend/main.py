@@ -1190,6 +1190,36 @@ async def broadcast_log(message: str, level: str = "info"):
 async def lifespan(app: FastAPI):
     init_strategies()
 
+    # ── Автоподключение Bybit из переменных окружения ─────────────────────────
+    _bybit_key    = os.getenv("BYBIT_API_KEY", "").strip()
+    _bybit_secret = os.getenv("BYBIT_API_SECRET", "").strip()
+    _bybit_testnet = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
+    if _bybit_key and _bybit_secret:
+        try:
+            state.bybit = BybitClient(_bybit_key, _bybit_secret, _bybit_testnet)
+            _bal = state.bybit.get_balance("USDT")
+            _net = "TESTNET" if _bybit_testnet else "MAINNET"
+            logger.info(f"✅ Bybit {_net} подключён автоматически | Баланс: {_bal:.2f} USDT")
+        except Exception as _e:
+            logger.error(f"❌ Автоподключение Bybit не удалось: {_e}")
+            state.bybit = None
+    else:
+        logger.info("ℹ️ BYBIT_API_KEY не задан — подключите через /api/connect или включите Paper Mode")
+
+    # ── Paper Mode из переменной окружения ────────────────────────────────────
+    if os.getenv("PAPER_TRADING", "false").lower() == "true":
+        state.paper_mode = True
+        logger.info("📄 Paper Trading Mode активирован (PAPER_TRADING=true)")
+
+    # ── Автостарт бота ────────────────────────────────────────────────────────
+    if os.getenv("AUTO_START", "false").lower() == "true":
+        if state.bybit or state.paper_mode:
+            state.bot_running = True
+            state.trading_loop_task = asyncio.create_task(trading_loop())
+            logger.info("🚀 Бот запущен автоматически (AUTO_START=true)")
+        else:
+            logger.warning("AUTO_START=true но нет Bybit API и не включён Paper Mode — старт пропущен")
+
     # Загрузка anomaly detector если есть
     from pathlib import Path as _P
     if _P("data/models/anomaly_detector.pkl").exists():
@@ -1291,13 +1321,68 @@ async def root():
     return {"status": "ok", "bot_running": state.bot_running, "strategies": len(state.strategies)}
 
 
+@app.get("/api/connection/status")
+async def connection_status():
+    """Статус подключения: Bybit API, AI, Bot."""
+    # Bybit
+    bybit_ok = False
+    bybit_balance = None
+    bybit_error = None
+    bybit_testnet = None
+    if state.bybit:
+        try:
+            bybit_balance = round(state.bybit.get_balance("USDT"), 4)
+            bybit_ok = True
+            bybit_testnet = getattr(state.bybit, "testnet", None)
+        except Exception as e:
+            bybit_error = str(e)
+
+    # AI (Anthropic / OpenAI / Ollama)
+    ai_ok = state.ai.enabled
+    ai_provider = state.ai._provider.name if ai_ok and state.ai._provider else None
+    ai_model = state.ai._provider.model if ai_ok and state.ai._provider else None
+
+    return {
+        "bybit": {
+            "connected": bybit_ok,
+            "testnet": bybit_testnet,
+            "balance_usdt": bybit_balance,
+            "error": bybit_error,
+        },
+        "ai": {
+            "enabled": ai_ok,
+            "provider": ai_provider,
+            "model": ai_model,
+            "anthropic_key_set": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "openai_key_set": bool(os.getenv("OPENAI_API_KEY")),
+            "ollama_url": os.getenv("OLLAMA_BASE_URL"),
+        },
+        "bot": {
+            "running": state.bot_running,
+            "paper_mode": state.paper_mode,
+            "strategies": len(state.strategies),
+            "news_enabled": state.news_enabled,
+            "ml_enabled": state.ml_enabled,
+        },
+    }
+
+
 @app.post("/api/connect")
 async def connect(req: APIConnectRequest):
     try:
         state.bybit = BybitClient(req.api_key, req.api_secret, req.testnet)
-        balance = state.bybit.get_balance()
-        return {"success": True, "balance": balance, "testnet": req.testnet}
+        balance = state.bybit.get_balance("USDT")
+        net = "TESTNET" if req.testnet else "MAINNET"
+        logger.info(f"✅ Bybit {net} подключён через API | Баланс: {balance:.2f} USDT")
+        return {
+            "success": True,
+            "balance": round(balance, 4),
+            "testnet": req.testnet,
+            "network": net,
+        }
     except Exception as e:
+        state.bybit = None
+        logger.error(f"❌ Подключение Bybit не удалось: {e}")
         raise HTTPException(500, detail=str(e))
 
 
