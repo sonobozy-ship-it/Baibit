@@ -1116,18 +1116,22 @@ async def lifespan(app: FastAPI):
         state.auto_train_task = asyncio.create_task(auto_train_loop())
         logger.info("🔄 Auto-train loop запущен")
 
-    # Claude Orchestrator
+    # Multi-provider Orchestrator (Anthropic → OpenAI → Ollama)
     _anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    if _anthropic_key:
+    _openai_key    = os.getenv("OPENAI_API_KEY")
+    _ollama_url    = os.getenv("OLLAMA_BASE_URL")
+    if _anthropic_key or _openai_key or _ollama_url:
         state.orchestrator = ClaudeOrchestrator(
             api_key=_anthropic_key,
+            openai_key=_openai_key,
+            ollama_url=_ollama_url,
             execute_fn=_execute_bot_command,
             notify_fn=lambda msg, level: asyncio.create_task(state.telegram.send(msg)),
         )
         state.orchestrator_task = asyncio.create_task(orchestrator_loop())
-        logger.info("🤖 Claude Orchestrator запущен")
+        logger.info("🤖 Orchestrator запущен")
     else:
-        logger.info("🤖 ANTHROPIC_API_KEY не задан — оркестратор отключён")
+        logger.info("🤖 Оркестратор отключён — задайте ANTHROPIC_API_KEY / OPENAI_API_KEY / OLLAMA_BASE_URL")
 
     logger.info("✅ Бэкенд готов")
     yield
