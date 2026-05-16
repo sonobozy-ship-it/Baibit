@@ -432,7 +432,14 @@ class TelegramCommander:
     async def _cmd_pause(self, upd, arg):
         self._paused = True
         s = self._get_state()
-        s.bot_running = False   # временно приостанавливаем цикл
+        s.bot_running = False
+        task = getattr(s, "trading_loop_task", None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=3)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
         await self.reply(upd, "⏸ Бот приостановлен — новые сделки не открываются")
 
     async def _cmd_resume(self, upd, arg):
@@ -440,6 +447,8 @@ class TelegramCommander:
             await self.reply(upd, "ℹ️ Бот не на паузе")
             return
         self._paused = False
+        s = self._get_state()
+        s.bot_running = True
         await self._start_fn()
         await self.reply(upd, "▶️ Бот возобновлён")
 

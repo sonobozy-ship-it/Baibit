@@ -218,8 +218,9 @@ class MLDataStore:
                 return json.loads(s)
             except Exception:
                 return {}
-        features_df = pd.json_normalize(df["features_json"].apply(_safe_loads))
-        features_df["label"]       = (df["outcome"] == "win").astype(int)
+        features_df = pd.json_normalize(df["features_json"].apply(_safe_loads)).reset_index(drop=True)
+        df = df.reset_index(drop=True)
+        features_df["label"]       = (df["outcome"] == "win").astype(int).values
         features_df["pnl_r"]       = df["pnl_r"].values
         features_df["strategy_id"] = df["strategy_id"].values
         features_df["symbol"]      = df["symbol"].values

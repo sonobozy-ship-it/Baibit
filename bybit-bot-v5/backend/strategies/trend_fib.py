@@ -396,7 +396,7 @@ class TrendFibonacciStrategy(BaseStrategy):
         df["ema9"]   = ta.ema(df["close"], length=9)
         df["ema21"]  = ta.ema(df["close"], length=21)
         df["ema50"]  = ta.ema(df["close"], length=50)
-        df["ema200"] = ta.ema(df["close"], length=200) if len(df) >= 200 else None
+        df["ema200"] = ta.ema(df["close"], length=200)
         df["rsi"]    = ta.rsi(df["close"], length=14)
         df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
         df["vol_ma"] = df["volume"].rolling(20).mean()
@@ -416,6 +416,9 @@ class TrendFibonacciStrategy(BaseStrategy):
             return None
 
         # ── 2. EMA-стек ──
+        if pd.isna(last["ema200"]):
+            return None
+
         ema_bull = last["ema9"] > last["ema21"] > last["ema50"]
         ema_bear = last["ema9"] < last["ema21"] < last["ema50"]
         ema_200_bull = last["close"] > last["ema200"]

@@ -146,6 +146,7 @@ class BaseStrategy(ABC):
             "entry": entry,
             "sl": sl,
             "tp": tp,
+            "initial_sl": sl,  # хранится для корректного R-multiple после trailing/BE
             "be_moved": False,
             "opened_at": pd.Timestamp.now(),
         }
@@ -161,15 +162,16 @@ class BaseStrategy(ABC):
         entry = self.current_position["entry"]
         side = self.current_position["side"]
         sl = self.current_position["sl"]
+        initial_sl = self.current_position.get("initial_sl", sl)
 
         # PnL = qty * price_diff минус комиссии
         if side == "Buy":
             gross = qty * (exit_price - entry)
-            r_dist = entry - sl
+            r_dist = entry - initial_sl  # исходный риск, не смещается trailing/BE
             r_gain = exit_price - entry
         else:
             gross = qty * (entry - exit_price)
-            r_dist = sl - entry
+            r_dist = initial_sl - entry  # исходный риск; для SELL initial_sl > entry
             r_gain = entry - exit_price
 
         notional_in = qty * entry

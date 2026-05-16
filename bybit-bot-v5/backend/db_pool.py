@@ -96,10 +96,13 @@ class DBPool:
 
     def _get_sqlite(self):
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(
-                self.db_path, check_same_thread=False, timeout=10
-            )
-            self._local.conn.row_factory = sqlite3.Row
+            conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-64000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            self._local.conn = conn
         return self._local.conn
 
     # ── публичный API ─────────────────────────────────────────

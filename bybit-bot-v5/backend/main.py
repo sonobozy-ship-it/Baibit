@@ -282,7 +282,13 @@ def _execute_bot_command(cmd_dict: Dict) -> Dict:
     if cmd == "start":
         if not state.bot_running:
             state.bot_running = True
-            state.trading_loop_task = asyncio.create_task(trading_loop())
+            # create_task требует запущенного event loop; вызывается из asyncio-контекста через orchestrator
+            try:
+                loop = asyncio.get_running_loop()
+                if not state.trading_loop_lock.locked():
+                    state.trading_loop_task = loop.create_task(trading_loop())
+            except RuntimeError:
+                logger.error("[Orchestrator] create_task невозможен — нет running event loop")
         return {"bot_running": state.bot_running}
 
     if cmd == "stop":
@@ -609,7 +615,7 @@ async def trading_loop():
         logger.info("🚀 Торговый цикл запущен")
         while state.bot_running:
             try:
-                if not state.bybit:
+                if not state.bybit and not state.paper_mode:
                     await asyncio.sleep(2)
                     continue
 
@@ -837,17 +843,22 @@ async def trading_loop():
                             regime_id=regime_id,
                         )
 
-                        # Anomaly detection
-                        if state.anomaly_detector.model:
-                            anom_score = state.anomaly_detector.score(features)
-                            features["anomaly_score"] = anom_score
-                            if state.anomaly_detector.is_anomaly(features, threshold=-0.65):
-                                logger.warning(f"{sid}: 🚨 АНОМАЛИЯ (score={anom_score:.2f}) — пропускаем")
-                                await broadcast_log(f"🚨 {sid} аномальные условия рынка, skip", "warn")
-                                continue
+                        # Проверяем что фичи реально извлечены (< 50 свечей → {})
+                        if not features:
+                            logger.debug(f"{sid}: недостаточно свечей для ML-фич, пропуск")
+                            ml_prediction = None
+                        else:
+                            # Anomaly detection — score() вызывается один раз, передаём результат
+                            if state.anomaly_detector.model:
+                                anom_score = state.anomaly_detector.score(features)
+                                features["anomaly_score"] = anom_score
+                                if anom_score < -0.65:  # is_anomaly без повторного score()
+                                    logger.warning(f"{sid}: 🚨 АНОМАЛИЯ (score={anom_score:.2f}) — пропускаем")
+                                    await broadcast_log(f"🚨 {sid} аномальные условия рынка, skip", "warn")
+                                    continue
 
                         # ML prediction
-                        ml_prediction = state.ml_predictor.predict(sid, features)
+                        ml_prediction = state.ml_predictor.predict(sid, features) if features else None
 
                         # Сохраняем snapshot
                         snapshot_id = state.ml_store.save_signal_snapshot({
@@ -889,6 +900,7 @@ async def trading_loop():
 
                     # Boost-режим: переопределить SL/TP и leverage
                     boost_params = state.boost.get_risk_params()
+                    effective_boost_leverage = strat.leverage  # дефолт — собственное плечо стратегии
                     if boost_params:
                         signal.stop_loss, signal.take_profit = state.boost.apply_sl_tp(
                             entry=signal.entry_price,
@@ -896,18 +908,18 @@ async def trading_loop():
                             original_sl=signal.stop_loss,
                             original_tp=signal.take_profit,
                         )
-                        strat.leverage = boost_params["leverage"]
+                        effective_boost_leverage = boost_params["leverage"]  # не мутируем strat.leverage
 
                     # ============== Position Sizing ==============
                     if state.boost.is_active:
-                        qty = state.boost.calculate_qty(balance, signal.entry_price, strat.leverage)
+                        qty = state.boost.calculate_qty(balance, signal.entry_price, effective_boost_leverage)
                     elif state.use_kelly and ml_prediction and ml_prediction.get("available"):
                         kelly_res = kelly_position_size(
                             balance=balance,
                             entry=signal.entry_price,
                             stop_loss=signal.stop_loss,
                             take_profit=signal.take_profit,
-                            win_probability=ml_prediction.get("probability", 0.5) or 0.5,
+                            win_probability=ml_prediction.get("probability") if ml_prediction.get("probability") is not None else 0.5,
                             side=signal.action,
                             kelly_fraction=0.25,
                             max_risk_pct=state.risk_manager.risk_per_trade_pct * 2,
@@ -1594,7 +1606,9 @@ async def emergency_close():
             if strat.current_position:
                 try:
                     ticker = state.paper.positions.get(strat.symbol, {})
-                    exit_price = ticker.get("entry_price", 0) if ticker else 0
+                    exit_price = ticker.get("mark_price") or ticker.get("entry_price", 0) if ticker else 0
+                    if exit_price and strat.current_position:
+                        state.paper._close_position(strat.symbol, exit_price, reason="emergency_close")
                     strat.current_position = None
                     closed.append(sid)
                 except Exception as e:
@@ -2081,7 +2095,7 @@ async def boost_start(req: BoostStartRequest):
     """Запустить сессию разгона депозита."""
     if req.initial_balance <= 0 or req.target_balance <= req.initial_balance:
         raise HTTPException(400, "Некорректные параметры: target должен быть > initial")
-    if req.mode not in ("safe", "moderate", "aggressive"):
+    if req.mode not in ("safe", "moderate", "aggressive", "scalp"):
         raise HTTPException(400, "mode должен быть: safe | moderate | aggressive")
     result = state.boost.start(req.initial_balance, req.target_balance, req.deadline_days, req.mode)
     if result.get("success"):
@@ -2195,7 +2209,7 @@ async def boost_analyze(req: BoostAnalyzeRequest):
     """
     if req.initial <= 0 or req.target <= req.initial or req.days <= 0:
         raise HTTPException(400, "Некорректные параметры")
-    if req.mode not in ("safe", "moderate", "aggressive"):
+    if req.mode not in ("safe", "moderate", "aggressive", "scalp"):
         raise HTTPException(400, "mode должен быть: safe | moderate | aggressive")
     return BoostCalculator.full_analysis(req.initial, req.target, req.days, req.mode)
 

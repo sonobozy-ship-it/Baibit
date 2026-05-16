@@ -36,6 +36,7 @@ class EMACrossoverStrategy(BaseStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 50:
             return None
+        df = df.copy()
 
         df["ema_fast"] = ta.ema(df["close"], length=self.fast_ema)
         df["ema_slow"] = ta.ema(df["close"], length=self.slow_ema)
@@ -101,6 +102,7 @@ class BollingerBandsStrategy(BaseStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 60:
             return None
+        df = df.copy()
 
         bb = ta.bbands(df["close"], length=20, std=2)
         df = df.join(bb)
@@ -170,6 +172,7 @@ class RSIDivergenceStrategy(BaseStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 50:
             return None
+        df = df.copy()
 
         df["rsi"] = ta.rsi(df["close"], length=14)
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
@@ -241,6 +244,7 @@ class BreakoutHunterStrategy(BaseStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 60:
             return None
+        df = df.copy()
 
         # Уровни: high/low за последние 48 свечей
         lookback = 48
@@ -301,6 +305,7 @@ class ScalperGridStrategy(BaseStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 50:
             return None
+        df = df.copy()
 
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
         df["ema_20"] = ta.ema(df["close"], length=20)
@@ -365,6 +370,7 @@ class TrendFollowerStrategy(BaseStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 220:
             return None
+        df = df.copy()
 
         adx = ta.adx(df["high"], df["low"], df["close"], length=14)
         df = df.join(adx)
@@ -424,6 +430,7 @@ class MultiConfirmStrategy(BaseStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 60:
             return None
+        df = df.copy()
 
         df["ema_21"] = ta.ema(df["close"], length=21)
         df["ema_50"] = ta.ema(df["close"], length=50)
@@ -547,6 +554,7 @@ class DragonflyGoldStrategy(BaseStrategy):
         # Ichimoku требует 52 бара Senkou B + запас
         if len(df) < 65:
             return None
+        df = df.copy()
 
         df = df.copy()
 

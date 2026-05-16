@@ -286,7 +286,8 @@ class StrategyFusion:
         if direction == "BUY":
             # SL: максимальный (наиболее консервативный / ближний к цене)
             raw_sl = max(sig.stop_loss for sig in best_signals.values())
-            sl = max(raw_sl, entry * 0.985)   # не ближе 1.5%
+            # min() гарантирует, что структурный стоп не «сдвигается» вверх — только вниз
+            sl = min(raw_sl, entry * 0.985)   # не ближе 1.5%
             # TP: S9 имеет приоритет (содержит Fibonacci расширение)
             if "S9" in best_signals:
                 tp = best_signals["S9"].take_profit
@@ -297,7 +298,10 @@ class StrategyFusion:
                 ))
         else:
             raw_sl = min(sig.stop_loss for sig in best_signals.values())
-            sl = min(raw_sl, entry * 1.015)
+            # max() гарантирует, что структурный стоп не «сдвигается» вниз — только вверх
+            sl = max(raw_sl, entry * 1.015)   # не ближе 1.5%
+            if sl <= entry:
+                sl = entry * 1.015
             if "S9" in best_signals:
                 tp = best_signals["S9"].take_profit
             else:

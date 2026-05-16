@@ -110,14 +110,22 @@ def kelly_position_size(
 
     # Kelly formula
     full_kelly = (b * p - q) / b
-    used_kelly = max(0, full_kelly * kelly_fraction)
+    if full_kelly <= 0:
+        # Нет математического преимущества — не торгуем
+        return {"qty": 0, "risk_pct": 0, "kelly_pct": round(full_kelly * 100, 3),
+                "fractional_kelly_pct": 0, "rr": round(b, 2), "win_prob": round(p, 3)}
+
+    used_kelly = full_kelly * kelly_fraction
 
     # Кэп на риск
     risk_pct = min(used_kelly * 100, max_risk_pct)
     risk_usd = balance * (risk_pct / 100)
 
     qty = risk_usd / sl_dist
-    qty = max(min_qty, round(qty, 4))
+    qty = round(qty, 4)
+    if qty <= 0:
+        return {"qty": 0, "risk_pct": 0, "kelly_pct": round(full_kelly * 100, 3),
+                "fractional_kelly_pct": round(used_kelly * 100, 3), "rr": round(b, 2), "win_prob": round(p, 3)}
 
     return {
         "qty": qty,
