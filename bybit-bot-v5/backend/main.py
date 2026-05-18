@@ -1201,6 +1201,69 @@ async def broadcast_log(message: str, level: str = "info"):
 
 
 # ============================================================
+# Часовой отчёт в Telegram
+# ─────────────────────────────────────────────────────────────
+async def _hourly_report_loop():
+    """Каждый час отправляет краткий отчёт в Telegram."""
+    await asyncio.sleep(60)  # небольшая задержка при старте
+    while True:
+        try:
+            await _send_hourly_report()
+        except Exception as e:
+            logger.error(f"[HourlyReport] Ошибка: {e}")
+        await asyncio.sleep(3600)
+
+
+async def _send_hourly_report():
+    """Формирует и отправляет часовой отчёт."""
+    rm = state.risk_manager
+    balance = 0.0
+    if state.paper_mode:
+        balance = state.paper.balance
+    elif state.bybit:
+        try:
+            bal = state.bybit.get_balance()
+            balance = bal.get("total", 0) if isinstance(bal, dict) else 0
+        except Exception:
+            balance = 0
+
+    # Открытые позиции
+    open_pos = []
+    for sid, strat in state.strategies.items():
+        if strat.current_position:
+            pos = strat.current_position
+            open_pos.append(
+                f"  • {sid} {strat.symbol} {pos['side']} @ {pos['entry']:.4f}"
+            )
+
+    # Статистика за сессию
+    total_trades = sum(s.trades for s in state.strategies.values())
+    total_wins   = sum(s.wins   for s in state.strategies.values())
+    total_losses = sum(s.losses for s in state.strategies.values())
+    total_pnl    = sum(s.pnl    for s in state.strategies.values())
+    win_rate     = (total_wins / total_trades * 100) if total_trades > 0 else 0
+
+    mode = "📄 Paper" if state.paper_mode else "💰 Real"
+    status = "🟢 Работает" if state.bot_running else "🔴 Остановлен"
+
+    pos_block = "\n".join(open_pos) if open_pos else "  нет открытых позиций"
+
+    text = (
+        f"⏰ <b>Часовой отчёт</b>\n\n"
+        f"Режим: {mode} | {status}\n"
+        f"Баланс: <b>{balance:.2f} USDT</b>\n\n"
+        f"📈 <b>Сессия:</b>\n"
+        f"  Сделок: {total_trades} | Побед: {total_wins} | Убытков: {total_losses}\n"
+        f"  Win Rate: <b>{win_rate:.1f}%</b>\n"
+        f"  PnL: <b>{'+'if total_pnl>=0 else ''}{total_pnl:.2f} USDT</b>\n\n"
+        f"📂 <b>Позиции ({len(open_pos)}):</b>\n{pos_block}\n\n"
+        f"🛡 Дневной PnL: {rm.daily_pnl:+.2f} USDT | "
+        f"Лимит: -{rm.daily_max_loss_pct}%"
+    )
+    await state.telegram.send(text)
+
+
+# ============================================================
 # FastAPI приложение
 # ── Вспомогательные корутины для Telegram Commander ──────────────────────────
 async def _tg_start_bot():
@@ -1302,6 +1365,11 @@ async def lifespan(app: FastAPI):
         logger.info("📱 Telegram Commander запущен (long-polling)")
     else:
         logger.info("📱 Telegram Commander отключён — задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID")
+
+    # ── Часовой отчёт в Telegram ──────────────────────────────────────────────
+    if state.telegram.enabled:
+        asyncio.create_task(_hourly_report_loop())
+        logger.info("📊 Часовой Telegram-отчёт запущен")
 
     logger.info("✅ Бэкенд готов")
     yield
