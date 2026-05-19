@@ -173,8 +173,8 @@ class RiskManager:
                 logger.critical(self.kill_switch_reason)
                 return {"allowed": False, "reason": self.kill_switch_reason}
 
-        # 3. Стоп по дневным убыткам
-        if self.daily_losses_count >= self.max_daily_losses:
+        # 3. Стоп по дневным убыткам (0 = отключено)
+        if self.max_daily_losses > 0 and self.daily_losses_count >= self.max_daily_losses:
             self.kill_switch = True
             self.kill_switch_reason = f"Достигнут лимит убытков за день: {self.daily_losses_count}/{self.max_daily_losses}"
             logger.critical(self.kill_switch_reason)
