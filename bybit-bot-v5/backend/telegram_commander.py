@@ -218,6 +218,12 @@ class TelegramCommander:
             "news":        self._cmd_news,
         }
 
+        # Закрытие отдельной позиции
+        if data.startswith("close_pos:"):
+            sid = data[len("close_pos:"):]
+            await self._cmd_close_one_position(fake_upd, sid)
+            return
+
         fn = action_map.get(data)
         if fn:
             if data in ("menu",):
@@ -419,19 +425,157 @@ class TelegramCommander:
             await self.reply(upd, f"❌ {e}")
 
     async def _cmd_positions(self, upd, arg):
+        from datetime import datetime, timezone
         s = self._get_state()
         open_pos = [(sid, st) for sid, st in s.strategies.items() if st.current_position]
         if not open_pos:
             await self.reply(upd, "📭 Нет открытых позиций", reply_markup=self._main_menu())
             return
-        lines = ["<b>Открытые позиции</b>\n"]
+
+        now = datetime.now(timezone.utc)
+        lines = [f"📌 <b>Открытые позиции ({len(open_pos)})</b>\n"]
+        close_buttons = []
+
         for sid, st in open_pos:
-            pos   = st.current_position
-            side  = pos.get("side", "?")
-            e, sl, tp = pos.get("entry",0), pos.get("sl",0), pos.get("tp",0)
+            pos  = st.current_position
+            side = pos.get("side", "?")
+            e    = pos.get("entry", 0)
+            sl   = pos.get("sl", 0)
+            tp   = pos.get("tp", 0)
+            qty  = pos.get("qty", 0)
+            lev  = pos.get("leverage", 1)
             emoji = "🟢" if side == "Buy" else "🔴"
-            lines.append(f"{emoji} <b>{sid}</b> {st.symbol} {side}\n   Вход: {e:.4f} | SL: {sl:.4f} | TP: {tp:.4f}")
-        await self.reply(upd, "\n".join(lines), reply_markup=self._main_menu())
+
+            # Текущая рыночная цена
+            cur_price = None
+            if s.bybit:
+                try:
+                    ticker = s.bybit.get_ticker(st.symbol)
+                    cur_price = ticker.get("price") if ticker else None
+                except Exception:
+                    pass
+
+            # Длительность
+            opened_at = pos.get("opened_at")
+            dur_str = ""
+            open_str = ""
+            if opened_at:
+                try:
+                    oa = opened_at if isinstance(opened_at, str) else str(opened_at)
+                    dt_open = datetime.fromisoformat(oa.replace("Z", "+00:00"))
+                    if dt_open.tzinfo is None:
+                        dt_open = dt_open.replace(tzinfo=timezone.utc)
+                    open_str = dt_open.strftime("%d.%m.%Y %H:%M:%S UTC")
+                    mins = int((now - dt_open).total_seconds() // 60)
+                    h, m = divmod(mins, 60)
+                    dur_str = f"{h}ч {m}мин" if h else f"{m}мин"
+                except Exception:
+                    pass
+
+            # Нереализованный PnL по текущей цене
+            unreal_str = ""
+            if cur_price and e and qty:
+                if side == "Buy":
+                    unreal_pnl = qty * (cur_price - e)
+                else:
+                    unreal_pnl = qty * (e - cur_price)
+                unreal_emoji = "📈" if unreal_pnl >= 0 else "📉"
+                unreal_str = f"   {unreal_emoji} Текущий PnL: <b>{unreal_pnl:+.4f} USDT</b>\n"
+
+            # Дистанция до TP и SL
+            ref = cur_price if cur_price else e
+            if e > 0 and ref > 0:
+                if side == "Buy":
+                    dist_tp = (tp - ref) / ref * 100
+                    dist_sl = (sl - ref) / ref * 100
+                    pnl_tp  = qty * (tp - ref)
+                    pnl_sl  = qty * (sl - ref)
+                else:
+                    dist_tp = (ref - tp) / ref * 100
+                    dist_sl = (ref - sl) / ref * 100
+                    pnl_tp  = qty * (ref - tp)
+                    pnl_sl  = qty * (ref - sl)
+                dist_tp_str = f"+{dist_tp:.2f}% (≈{pnl_tp:+.2f} USDT)"
+                dist_sl_str = f"{dist_sl:.2f}% (≈{pnl_sl:+.2f} USDT)"
+            else:
+                dist_tp_str = dist_sl_str = "—"
+
+            margin = round(qty * e / lev, 2) if e and lev else 0
+            cur_str = f"   📡 Текущая цена: <b>{cur_price:.4f}</b>\n" if cur_price else ""
+
+            block = (
+                f"{emoji} <b>{sid}</b> {st.symbol} {side} ×{lev}\n"
+                + (f"   ⏰ Открыта: {open_str} ({dur_str})\n" if open_str else "")
+                + f"   💰 Вход: <b>{e:.4f}</b> | Маржа: {margin:.2f} USDT\n"
+                + cur_str
+                + unreal_str
+                + f"   🎯 До TP ({tp:.4f}): {dist_tp_str}\n"
+                f"   🛑 До SL ({sl:.4f}): {dist_sl_str}"
+            )
+            lines.append(block)
+            close_buttons.append([_btn(f"❌ Закрыть {sid} {st.symbol}", f"close_pos:{sid}")])
+
+        close_buttons.append([_btn("🔄 Обновить", "positions"), _btn("🏠 Меню", "menu")])
+        kb = _keyboard(close_buttons)
+        await self.reply(upd, "\n\n".join(lines), reply_markup=kb)
+
+    async def _cmd_close_one_position(self, upd, sid: str):
+        s = self._get_state()
+        strat = s.strategies.get(sid)
+        if not strat or not strat.current_position:
+            await self.reply(upd, f"❌ Позиция <b>{sid}</b> не найдена или уже закрыта",
+                             reply_markup=self._main_menu())
+            return
+
+        symbol = strat.symbol
+        pos = strat.current_position
+        entry = pos.get("entry", 0)
+
+        if s.paper_mode:
+            cur_price = entry
+            if s.bybit:
+                try:
+                    ticker = s.bybit.get_ticker(symbol)
+                    cur_price = ticker.get("price", entry) if ticker else entry
+                except Exception:
+                    pass
+
+            result = s.paper._close_position(symbol, cur_price, reason="manual_tg_close")
+            strat.current_position = None
+            s.risk_manager.register_position_close(sid)
+
+            pnl = result.get("pnl_usd", 0) if result else 0
+            pnl_emoji = "📈" if pnl >= 0 else "📉"
+            await self.reply(upd,
+                f"{pnl_emoji} <b>Позиция {sid} закрыта вручную</b>\n"
+                f"Цена закрытия: <b>{cur_price:.4f}</b>\n"
+                f"PnL: <b>{pnl:+.4f} USDT</b>\n"
+                f"Баланс: <b>{s.paper.balance:.2f} USDT</b>",
+                reply_markup=self._main_menu()
+            )
+        else:
+            side_close = "Sell" if pos.get("side") == "Buy" else "Buy"
+            qty = str(pos.get("qty", 0))
+            try:
+                result = s.bybit.session.place_order(
+                    category="linear",
+                    symbol=symbol,
+                    side=side_close,
+                    orderType="Market",
+                    qty=qty,
+                    reduceOnly=True,
+                )
+                if result.get("retCode") == 0:
+                    strat.current_position = None
+                    s.risk_manager.register_position_close(sid)
+                    await self.reply(upd,
+                        f"✅ <b>Позиция {sid} {symbol} закрыта вручную</b>",
+                        reply_markup=self._main_menu()
+                    )
+                else:
+                    await self.reply(upd, f"❌ Ошибка закрытия: {result.get('retMsg')}")
+            except Exception as ex:
+                await self.reply(upd, f"❌ Ошибка: {ex}")
 
     async def _cmd_go(self, upd, arg):
         s = self._get_state()
