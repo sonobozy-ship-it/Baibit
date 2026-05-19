@@ -75,25 +75,52 @@ class RiskManager:
 
         return {"allowed": True, "effective_leverage": effective_lev, "capped": capped}
 
+    def adaptive_risk_pct(self, balance: float) -> float:
+        """
+        Адаптивный % риска на сделку в зависимости от размера баланса.
+        Малый депозит торгует агрессивнее чтобы расти, крупный — консервативнее.
+        """
+        if balance < 300:
+            return 2.0    # 200 USDT → 4 USDT риска / сделку
+        elif balance < 1000:
+            return 1.5    # 500 USDT → 7.5 USDT риска
+        elif balance < 5000:
+            return 1.0    # 2000 USDT → 20 USDT риска
+        else:
+            return 0.75   # 10000 USDT → 75 USDT риска
+
+    def max_positions_for_balance(self, balance: float) -> int:
+        """Лимит одновременных позиций по размеру депозита."""
+        if balance < 300:
+            return 2
+        elif balance < 1000:
+            return 3
+        else:
+            return self.max_open_positions
+
     def calculate_position_size(
         self,
         balance: float,
         entry_price: float,
         stop_loss_price: float,
         leverage: int = 1,
+        min_notional: float = 5.0,  # минимальная стоимость позиции в USDT
     ) -> float:
         """
-        Расчёт размера позиции по риску.
-        Например: депо 1000, риск 1% → потеря не больше 10 USDT при срабатывании SL.
-        Плечо ограничивается max_leverage_cap.
+        Расчёт размера позиции по адаптивному риску.
+        При срабатывании SL теряем adaptive_risk_pct% от баланса.
         """
-        effective_lev = min(leverage, self.max_leverage_cap)
-        risk_usd = balance * (self.risk_per_trade_pct / 100)
+        risk_pct = self.adaptive_risk_pct(balance)
+        risk_usd = balance * (risk_pct / 100)
         sl_distance = abs(entry_price - stop_loss_price) / entry_price
         if sl_distance == 0:
             return 0
         qty = risk_usd / (sl_distance * entry_price)
-        return round(qty, 4)
+        qty = round(qty, 4)
+        # Проверяем минимальный порог
+        if qty * entry_price < min_notional:
+            return 0
+        return qty
 
     def can_open_trade(self, strategy_id: str, balance: float) -> Dict:
         """
@@ -115,8 +142,9 @@ class RiskManager:
                 logger.critical(self.kill_switch_reason)
                 return {"allowed": False, "reason": self.kill_switch_reason}
 
-        # 3. Лимит открытых позиций
-        if self.open_positions_count >= self.max_open_positions:
+        # 3. Лимит открытых позиций (адаптивный по балансу)
+        pos_limit = self.max_positions_for_balance(balance)
+        if self.open_positions_count >= pos_limit:
             return {
                 "allowed": False,
                 "reason": f"Достигнут лимит позиций ({self.max_open_positions})"

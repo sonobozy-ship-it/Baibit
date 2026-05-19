@@ -818,6 +818,7 @@ async def trading_loop():
                     # ============== AI-АНАЛИЗ сигнала ==============
                     ai_score = None
                     if state.ai.enabled:
+                        risk_pct = state.risk_manager.adaptive_risk_pct(balance)
                         ai_result = await state.ai.analyze_signal_async(
                             signal_data={
                                 "strategy_name": strat.NAME,
@@ -830,6 +831,9 @@ async def trading_loop():
                                 "filters_passed": signal.filters_passed,
                                 "confidence": signal.confidence,
                                 "reason": signal.reason,
+                                "balance_usdt": round(balance, 2),
+                                "risk_per_trade_usdt": round(balance * risk_pct / 100, 2),
+                                "open_positions": state.risk_manager.open_positions_count,
                             },
                             df=df,
                             sentiment=sentiment_features,
