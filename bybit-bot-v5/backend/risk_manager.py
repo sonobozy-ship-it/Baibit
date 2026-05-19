@@ -155,7 +155,7 @@ class RiskManager:
 
         # Hard cap: риск в $ не превышает risk_hard_cap_pct от баланса
         hard_cap_usd = balance * (self.risk_hard_cap_pct / 100)
-        if sl_dist > 0 and qty * entry_price * effective_sl_dist > hard_cap_usd * 1.1:
+        if effective_sl_dist > 0 and qty * entry_price * effective_sl_dist > hard_cap_usd * 1.1:
             qty = hard_cap_usd / (effective_sl_dist * entry_price)
             qty = round(qty, 4)
 

@@ -11,25 +11,33 @@ logger = logging.getLogger(__name__)
 
 def calculate_pnl(
     entry: float,
-    exit: float,
     qty: float,
     side: str,
+    exit: float = 0.0,
+    exit_price: float = 0.0,
     fees_pct: float = 0.06,
+    fee_pct: float = 0.0,
     funding_pct: float = 0.0,
 ) -> Dict:
     """
     Точный PnL в USDT.
 
+    exit / exit_price  — цена закрытия (оба параметра принимаются)
+    fees_pct / fee_pct — комиссия в % (оба параметра принимаются)
+
     Returns: {pnl_usd, pnl_pct, gross, fees, funding}
     """
+    exit_val = exit_price if exit_price else exit
+    fees_val = fee_pct if fee_pct else fees_pct
+
     if side.upper() in ("BUY", "LONG"):
-        gross = qty * (exit - entry)
+        gross = qty * (exit_val - entry)
     else:  # SELL / SHORT
-        gross = qty * (entry - exit)
+        gross = qty * (entry - exit_val)
 
     notional_in = qty * entry
-    notional_out = qty * exit
-    fees = (notional_in + notional_out) * (fees_pct / 100)
+    notional_out = qty * exit_val
+    fees = (notional_in + notional_out) * (fees_val / 100)
     funding = notional_in * (funding_pct / 100)
 
     pnl_usd = gross - fees - funding

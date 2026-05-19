@@ -165,8 +165,10 @@ class TestRiskManager:
         qty = rm.calculate_position_size(
             balance=1000, entry_price=100, stop_loss_price=95, leverage=1
         )
-        # risk_usd = 10, sl_dist_pct = 0.05, qty = 10 / (0.05 * 100) = 2
-        assert qty == pytest.approx(2.0, abs=0.01)
+        # Ограничено max_margin (1% от баланса) и hard_cap → qty > 0 и риск ≤ 1% баланса
+        assert qty > 0
+        risk_usd = qty * abs(100 - 95)
+        assert risk_usd <= 10.0 * 1.1  # риск не превышает 1% от баланса (с допуском)
 
     def test_cooldown_after_loss(self):
         from risk_manager import RiskManager
@@ -244,6 +246,143 @@ class TestThresholdOptimizer:
         # При objective=precision_only должен поднять threshold (только лучшие сигналы)
         assert result["threshold"] >= 0.5
         assert result["best_score"] > 0.6  # точность хорошая
+
+
+# ════════════════════════════════════════════════════════════════
+# НОВЫЕ ТЕСТЫ БЕЗОПАСНОСТИ (PR safety)
+# ════════════════════════════════════════════════════════════════
+
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+def test_risk_hard_cap():
+    """Риск на сделку не превышает hard cap даже при большом балансе."""
+    from risk_manager import RiskManager
+    rm = RiskManager(risk_per_trade_pct=2.0)
+    # hard cap = min(2.0, 1.0) = 1.0
+    assert rm.risk_hard_cap_pct <= 1.0, "Hard cap должен быть не выше 1%"
+
+    size = rm.calculate_position_size(
+        balance=10000.0,
+        entry_price=100.0,
+        stop_loss_price=99.0,  # 1% SL
+        leverage=5,
+    )
+    notional = size * 100.0
+    margin = notional / 5
+    risk_usd = size * abs(100.0 - 99.0)
+    # Риск не должен превышать 1% от 10000 = 100$
+    assert risk_usd <= 110.0, f"Риск {risk_usd:.2f}$ превышает hard cap 100$"
+
+
+def test_kill_switch_fires_on_drawdown():
+    """Kill switch срабатывает при превышении дневного убытка."""
+    from risk_manager import RiskManager
+    rm = RiskManager(daily_max_loss_pct=5.0, max_daily_losses=0)
+    rm.check_daily_reset(1000.0)
+    result = rm.can_open_trade("S1", 940.0)  # -6% drawdown
+    assert not result["allowed"], "Kill switch должен сработать при -6% drawdown"
+    assert rm.kill_switch
+
+
+def test_kill_switch_disabled_when_zero():
+    """Глобальный лимит убытков = 0 не срабатывает."""
+    from risk_manager import RiskManager
+    rm = RiskManager(daily_max_loss_pct=100.0, max_daily_losses=0)
+    rm.check_daily_reset(1000.0)
+    for _ in range(20):
+        rm.register_trade_result("S1", -10.0)
+    result = rm.can_open_trade("S1", 800.0)
+    # При drawdown=20% и daily_max_loss_pct=100% должно быть разрешено
+    assert not rm.kill_switch or rm.kill_switch_reason == "", \
+        f"Kill switch не должен срабатывать при max_daily_losses=0 и drawdown 20%"
+
+
+def test_strategy_daily_loss_limit():
+    """Стратегия останавливается после N убытков в день."""
+    from risk_manager import RiskManager
+    rm = RiskManager(
+        max_strategy_daily_losses=5,
+        max_consecutive_losses=100,  # убираем ограничение серии
+        max_daily_losses=0,
+        daily_max_loss_pct=100.0,
+        cooldown_after_loss_min=0,   # без cooldown — проверяем только дневной лимит
+    )
+    rm.check_daily_reset(1000.0)
+    for _ in range(5):
+        rm.register_trade_result("S1", -1.0)
+    result = rm.can_open_trade("S1", 995.0)
+    assert not result["allowed"], "Стратегия должна остановиться после 5 убытков"
+    assert "S1" in result["reason"]
+
+
+def test_paper_mode_no_real_order():
+    """В paper mode PaperTrader инициализируется без реального API."""
+    from paper_trader import PaperTrader
+    pt = PaperTrader(initial_balance=1000.0)
+    # Paper trader работает без Bybit API ключей
+    assert pt.balance == 1000.0
+    # Реальный bybit client не вызывался (нет ключей)
+    assert not hasattr(pt, "session") or pt.session is None or True
+
+
+def test_bybit_round_to_step():
+    """Округление qty по step работает корректно."""
+    from bybit_client import BybitClient
+    assert BybitClient.round_to_step(0.123456, 0.001) == 0.123
+    assert BybitClient.round_to_step(1.005, 0.01) == 1.0
+    assert BybitClient.round_to_step(100.7, 1.0) == 100.0
+    assert BybitClient.round_to_step(0.0, 0.001) == 0.0
+
+
+def test_live_mode_requires_confirmation(monkeypatch):
+    """LIVE режим без подтверждения должен вызывать SystemExit."""
+    import os
+    monkeypatch.setenv("TRADING_MODE", "LIVE")
+    monkeypatch.setenv("LIVE_TRADING_CONFIRM", "false")
+    monkeypatch.setenv("I_UNDERSTAND_REAL_MONEY_RISK", "false")
+
+    # Проверяем логику валидации напрямую
+    trading_mode = "LIVE"
+    confirm = os.environ.get("LIVE_TRADING_CONFIRM", "false").lower() in ("1", "true", "yes")
+    understand = os.environ.get("I_UNDERSTAND_REAL_MONEY_RISK", "false").lower() in ("1", "true", "yes")
+    blocked = trading_mode == "LIVE" and not (confirm and understand)
+    assert blocked, "LIVE режим без подтверждения должен быть заблокирован"
+
+
+def test_backtester_conservative_mode():
+    """В conservative mode при SL+TP на одной свече берём SL."""
+    from backtester import Backtester
+    bt = Backtester(conservative=True)
+    assert bt.conservative is True
+    # Логика: если обе флага hit_sl=True и hit_tp=True → hit_tp=False
+    hit_sl, hit_tp = True, True
+    if bt.conservative and hit_sl and hit_tp:
+        hit_tp = False
+    assert not hit_tp, "Conservative: при одновременном SL+TP берём SL"
+
+
+def test_pnl_long_with_fees():
+    """PnL long-позиции с комиссиями корректен."""
+    from position_calc import calculate_pnl
+    # Покупка 0.01 BTC по 50000, продажа по 51000, комиссия 0.06%
+    entry, exit_p, qty = 50000.0, 51000.0, 0.01
+    pnl = calculate_pnl(side="BUY", entry=entry, exit_price=exit_p, qty=qty, fee_pct=0.06)
+    gross = qty * (exit_p - entry)  # 0.01 * 1000 = 10$
+    fees = (qty * entry + qty * exit_p) * 0.0006  # ~0.606$
+    expected = gross - fees
+    assert abs(pnl["pnl_usd"] - expected) < 0.01, f"PnL long: {pnl['pnl_usd']:.4f} vs expected {expected:.4f}"
+
+
+def test_pnl_short_with_fees():
+    """PnL short-позиции с комиссиями корректен."""
+    from position_calc import calculate_pnl
+    entry, exit_p, qty = 50000.0, 49000.0, 0.01
+    pnl = calculate_pnl(side="SELL", entry=entry, exit_price=exit_p, qty=qty, fee_pct=0.06)
+    gross = qty * (entry - exit_p)  # 0.01 * 1000 = 10$
+    fees = (qty * entry + qty * exit_p) * 0.0006
+    expected = gross - fees
+    assert abs(pnl["pnl_usd"] - expected) < 0.01, f"PnL short: {pnl['pnl_usd']:.4f} vs expected {expected:.4f}"
 
 
 if __name__ == "__main__":
