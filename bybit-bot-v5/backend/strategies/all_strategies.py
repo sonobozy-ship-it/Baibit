@@ -119,8 +119,8 @@ class BollingerBandsStrategy(BaseStrategy):
 
         below_lower = last["close"] <= bb_lower * 1.001
         above_upper = last["close"] >= bb_upper * 0.999
-        rsi_oversold = last["rsi"] < 30
-        rsi_overbought = last["rsi"] > 70
+        rsi_oversold = last["rsi"] < 33
+        rsi_overbought = last["rsi"] > 65
         vol_spike = last["volume"] > last["vol_ma"] * 1.5
         ema_slope_up = last["ema50"] > df.iloc[-5]["ema50"]
         ema_slope_down = last["ema50"] < df.iloc[-5]["ema50"]
@@ -318,7 +318,7 @@ class ScalperGridStrategy(BaseStrategy):
         # Боковик: ATR низкий, EMA20 и EMA50 близко
         atr_pct = last["atr"] / last["close"] * 100
         low_atr = atr_pct < 2.0  # расширен с 1.5% до 2.0% для больше сигналов
-        flat_ema = abs(last["ema_20"] - last["ema_50"]) / last["close"] * 100 < 0.5
+        flat_ema = abs(last["ema_20"] - last["ema_50"]) / last["close"] * 100 < 0.8
         bbw = (last["BBU_20_2.0"] - last["BBL_20_2.0"]) / last["close"]
         narrow_bb = bbw < 0.05
 
@@ -715,6 +715,117 @@ class DragonflyGoldStrategy(BaseStrategy):
 
 
 # ============================================================
+# S12: OVERBOUGHT SHORT — специализирован на шортах
+# ============================================================
+class OverboughtShortStrategy(BaseStrategy):
+    """
+    Ищет перегретые активы для шорта:
+      1. RSI(14) > 62 и падает (разворот вниз)
+      2. Цена у верхней BB или выше
+      3. MACD histogram снижается
+      4. Цена выше EMA(50) — перегрев относительно средней
+      5. Объём падает при высокой цене (дивергенция)
+
+    Также генерирует BUY при зеркальных условиях (RSI < 38, ниже нижней BB).
+    """
+    ID   = "S12"
+    NAME = "OVERBOUGHT SHORT"
+    DESCRIPTION = "RSI разворот + BB верхний/нижний + MACD + объём дивергенция"
+    REGIME_PREFERENCE = ["volatile", "flat"]
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            stop_loss_pct=1.2,
+            take_profit_pct=3.0,
+            edge_wr_target=0.63,
+            timeframe="15",
+            **kwargs,
+        )
+
+    def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
+        if len(df) < 60:
+            return None
+        df = df.copy()
+
+        bb   = ta.bbands(df["close"], length=20, std=2)
+        df   = df.join(bb)
+        df["rsi"]    = ta.rsi(df["close"], length=14)
+        df["ema50"]  = ta.ema(df["close"], length=50)
+        macd_df      = ta.macd(df["close"], fast=12, slow=26, signal=9)
+        df           = df.join(macd_df)
+        df["vol_ma"] = df["volume"].rolling(20).mean()
+
+        last = df.iloc[-1]
+        prev = df.iloc[-2] if len(df) >= 2 else last
+
+        rsi0 = last["rsi"]
+        rsi1 = prev["rsi"]
+        bbu  = last["BBU_20_2.0"]
+        bbl  = last["BBL_20_2.0"]
+        c    = last["close"]
+        vol_falling = last["volume"] < last["vol_ma"] * 0.85
+
+        # ── SELL: RSI разворачивается вниз от перегрева ────────────
+        sell = (
+            rsi0 > 62 and rsi0 < rsi1          # RSI высокий и начинает падать
+            and c >= bbu * 0.998               # цена у верхней BB или выше
+            and last["MACDh_12_26_9"] < prev["MACDh_12_26_9"]  # MACD гистограмма падает
+            and c > last["ema50"]              # перегрев от средней
+        )
+
+        # ── BUY: зеркально — RSI разворачивается вверх от перепроданности ──
+        buy = (
+            rsi0 < 38 and rsi0 > rsi1          # RSI низкий и начинает расти
+            and c <= bbl * 1.002               # цена у нижней BB или ниже
+            and last["MACDh_12_26_9"] > prev["MACDh_12_26_9"]  # MACD гистограмма растёт
+            and c < last["ema50"]              # перепроданность
+        )
+
+        if not (sell or buy):
+            return None
+
+        # Если оба — выбираем более сильный сигнал
+        if sell and buy:
+            sell_strength = rsi0 - 62
+            buy_strength  = 38 - rsi0
+            if sell_strength >= buy_strength:
+                buy = False
+            else:
+                sell = False
+
+        side  = "SELL" if sell else "BUY"
+        entry = float(c)
+        if side == "SELL":
+            sl = round(entry * (1 + self.stop_loss_pct / 100), 8)
+            tp = round(entry * (1 - self.take_profit_pct / 100), 8)
+        else:
+            sl = round(entry * (1 - self.stop_loss_pct / 100), 8)
+            tp = round(entry * (1 + self.take_profit_pct / 100), 8)
+
+        confidence = 0.66
+        if vol_falling and side == "SELL":
+            confidence += 0.04   # объём падает при хаях — доп. подтверждение шорта
+        if abs(rsi0 - (62 if sell else 38)) > 5:
+            confidence += 0.03   # RSI экстремальнее → чуть выше уверенность
+
+        bb_side = "верхняя" if sell else "нижняя"
+        return TradingSignal(
+            action=side, symbol=self.symbol,
+            confidence=round(min(0.85, confidence), 2),
+            entry_price=entry, stop_loss=sl, take_profit=tp,
+            reason=f"OB-Short {side}: RSI{rsi0:.0f}({'↓' if sell else '↑'}) BB-{bb_side} MACD{'↓' if sell else '↑'}",
+            filters_passed={
+                "rsi_reversal": True,
+                "bb_touch":     True,
+                "macd_confirm": True,
+                "ema50_side":   True,
+                "vol_div":      vol_falling,
+                "rsi_value":    round(rsi0, 1),
+            },
+        )
+
+
+# ============================================================
 # Реестр всех стратегий
 # ============================================================
 ALL_STRATEGIES = {
@@ -729,4 +840,5 @@ ALL_STRATEGIES = {
     "S9": TrendFibonacciStrategy,   # тренд + уровни Фибоначчи (38.2/50/61.8%)
     "S10": ScalperProStrategy,      # 3m высокочастотный скальпер (до 8 сигналов/день/символ)
     "S11": DragonflyGoldStrategy,   # Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP
+    "S12": OverboughtShortStrategy, # RSI разворот + BB + MACD — специализирован на шортах
 }

@@ -138,9 +138,12 @@ class ScalperTrendContext:
 
     @staticmethod
     def aligns(trend_ctx: Dict, action: str) -> bool:
-        """True если тренд нейтральный (пропускаем) или совпадает с направлением."""
+        """True если тренд нейтральный, совпадает с направлением, или ADX слабый (< 30)."""
         d = trend_ctx["direction"]
-        return d == "NEUTRAL" or d == action
+        if d == "NEUTRAL" or d == action:
+            return True
+        # Слабый контр-тренд (ADX < 30) не блокирует шорт/лонг
+        return trend_ctx.get("strength", 0) < 30
 
 
 # ── ScalperPro стратегия ──────────────────────────────────────────────────
@@ -174,8 +177,8 @@ class ScalperProStrategy(BaseStrategy):
     _BB_PERIOD  = 20
     _BB_K       = 2.0
     _VOL_MULT   = 1.2
-    _RSI_OS     = 35   # перепроданность → BUY
-    _RSI_OB     = 65   # перекупленность → SELL
+    _RSI_OS     = 38   # перепроданность → BUY
+    _RSI_OB     = 60   # перекупленность → SELL (было 65, снижено для больше шортов)
     _MIN_BARS   = 60
 
     def __init__(self, symbol: str = "DOGEUSDT", **kwargs):

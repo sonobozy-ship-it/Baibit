@@ -177,6 +177,7 @@ def init_strategies():
         "S7": "BTCUSDT",
         "S8": "ETHUSDT",    # Trend Momentum
         "S9": "BTCUSDT",    # Trend + Fibonacci
+        "S12": "SOLUSDT",   # Overbought Short — RSI разворот + BB
     }
     for sid, cls in ALL_STRATEGIES.items():
         state.strategies[sid] = cls(symbol=symbol_map.get(sid, "BTCUSDT"))
