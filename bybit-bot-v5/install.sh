@@ -46,6 +46,10 @@ echo "    Python-зависимости установлены"
 echo "[5/6] Настройка конфигурации..."
 mkdir -p backend/data/candles backend/data/features backend/data/models backend/logs
 
+# Не перезаписываем .env если уже существует (сохраняем ключи)
+if [ -f backend/.env ]; then
+    echo "    .env уже существует — ключи сохранены"
+else
 cat > backend/.env << 'ENVEOF'
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
@@ -72,6 +76,7 @@ AUTO_START=true
 MAX_LEVERAGE=5
 ADAPTIVE_WINDOW=30
 ENVEOF
+fi
 
 echo "    Конфигурация создана"
 
