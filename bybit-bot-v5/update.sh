@@ -1,62 +1,75 @@
 #!/bin/bash
-# Обновление бота без затирания ключей и БД
+# Обновление бота с полным бэкапом ключей и БД
 set -e
 
 APP_DIR="/opt/baibit"
 BRANCH="claude/analyze-repository-files-TvlQi"
 VENV="$APP_DIR/bybit-bot-v5/venv/bin/activate"
+BACKEND="$APP_DIR/bybit-bot-v5/backend"
+
+# Директория бэкапов — хранится ВНЕ репозитория, никогда не удаляется
+BACKUP_ROOT="/opt/baibit_backups"
+BACKUP_DIR="$BACKUP_ROOT/$(date +%Y%m%d_%H%M%S)"
 
 echo ""
 echo "🔄 Обновление Baibit..."
+echo "   Бэкап → $BACKUP_DIR"
 
-cd "$APP_DIR"
+mkdir -p "$BACKUP_DIR"
 
-# .env и data/ в .gitignore — git их не трогает.
-# Для надёжности делаем резервную копию .env перед любыми git-операциями.
-ENV_FILE="$APP_DIR/bybit-bot-v5/backend/.env"
-ENV_BACKUP="/tmp/baibit_env_backup"
+# ── 1. Бэкап .env (ключи API) ────────────────────────────────────────────────
+ENV_FILE="$BACKEND/.env"
 if [ -f "$ENV_FILE" ]; then
-    cp "$ENV_FILE" "$ENV_BACKUP"
-    echo "   .env сохранён во временный бэкап"
+    cp "$ENV_FILE" "$BACKUP_DIR/.env"
+    echo "   ✅ .env сохранён"
 fi
 
-# Стягиваем новый код
+# ── 2. Бэкап всех БД и JSON-состояний ────────────────────────────────────────
+DATA_DIR="$BACKEND/data"
+if [ -d "$DATA_DIR" ]; then
+    cp -r "$DATA_DIR" "$BACKUP_DIR/data"
+    echo "   ✅ data/ сохранена (БД, paper_state, модели)"
+fi
+
+# ── 3. Бэкап логов (последние 5 МБ) ──────────────────────────────────────────
+LOGS_DIR="$BACKEND/logs"
+if [ -d "$LOGS_DIR" ]; then
+    mkdir -p "$BACKUP_DIR/logs"
+    find "$LOGS_DIR" -name "*.log" -newer "$BACKEND" 2>/dev/null \
+        | head -10 | xargs -I{} cp {} "$BACKUP_DIR/logs/" 2>/dev/null || true
+    echo "   ✅ Логи сохранены"
+fi
+
+# ── 4. Обновление кода ────────────────────────────────────────────────────────
+cd "$APP_DIR"
 git fetch origin "$BRANCH" -q
 git reset --hard "origin/$BRANCH" -q
-echo "   Код обновлён"
+echo "   ✅ Код обновлён до последнего коммита"
 
-# Восстанавливаем .env если git его случайно затёр
-if [ -f "$ENV_BACKUP" ] && [ ! -f "$ENV_FILE" ]; then
-    cp "$ENV_BACKUP" "$ENV_FILE"
-    echo "   .env восстановлен из бэкапа"
+# ── 5. Восстановление .env если git его затронул ─────────────────────────────
+if [ -f "$BACKUP_DIR/.env" ] && [ ! -f "$ENV_FILE" ]; then
+    cp "$BACKUP_DIR/.env" "$ENV_FILE"
+    echo "   ⚠️  .env восстановлен из бэкапа (git его удалил)"
 fi
 
-# Обновляем Python-зависимости (новые пакеты из requirements.txt)
-if [ -f "$VENV" ]; then
-    echo "   Обновление зависимостей..."
-    source "$VENV"
-    pip install -r "$APP_DIR/bybit-bot-v5/requirements.txt" -q
-    echo "   Зависимости актуальны"
+# ── 6. Восстановление data/ если git её затронул ─────────────────────────────
+if [ -d "$BACKUP_DIR/data" ] && [ ! -d "$DATA_DIR" ]; then
+    cp -r "$BACKUP_DIR/data" "$DATA_DIR"
+    echo "   ⚠️  data/ восстановлена из бэкапа"
 fi
 
-# Создаём директории если их нет (git не хранит пустые папки)
-mkdir -p "$APP_DIR/bybit-bot-v5/backend/data/candles"
-mkdir -p "$APP_DIR/bybit-bot-v5/backend/data/features"
-mkdir -p "$APP_DIR/bybit-bot-v5/backend/data/models"
-mkdir -p "$APP_DIR/bybit-bot-v5/backend/logs"
+# ── 7. Создаём папки если их нет ─────────────────────────────────────────────
+mkdir -p "$DATA_DIR/candles" "$DATA_DIR/features" "$DATA_DIR/models"
+mkdir -p "$BACKEND/logs"
 
-# Сброс кривого paper state (баланс без учёта маржи).
-# Удаляем только если версия стейта не содержит поля margin (старый формат).
-PAPER_STATE="$APP_DIR/bybit-bot-v5/backend/data/paper_state.json"
+# ── 8. Проверка paper_state: сброс только если старый формат ─────────────────
+PAPER_STATE="$DATA_DIR/paper_state.json"
 if [ -f "$PAPER_STATE" ]; then
     if ! python3 -c "
 import json, sys
 d = json.load(open('$PAPER_STATE'))
-positions = d.get('positions', {})
-# Если есть хоть одна позиция без поля margin — стейт старый, сбрасываем
-if any('margin' not in p for p in positions.values()):
+if any('margin' not in p for p in d.get('positions', {}).values()):
     sys.exit(1)
-sys.exit(0)
 " 2>/dev/null; then
         INIT_BAL=$(grep -oP '(?<=PAPER_INITIAL_BALANCE=)\S+' "$ENV_FILE" 2>/dev/null || echo "200")
         python3 -c "
@@ -64,18 +77,39 @@ import json
 d = {'balance': $INIT_BAL, 'positions': {}, 'trades_history': [], 'saved_at': ''}
 open('$PAPER_STATE', 'w').write(json.dumps(d, indent=2))
 "
-        echo "   ⚠️  Paper state сброшен (старый формат без маржи). Баланс: ${INIT_BAL} USDT"
+        echo "   ⚠️  Paper state сброшен (старый формат). Баланс: ${INIT_BAL} USDT"
     fi
 fi
 
+# ── 9. Обновление Python-зависимостей ────────────────────────────────────────
+if [ -f "$VENV" ]; then
+    echo "   Обновление зависимостей..."
+    source "$VENV"
+    pip install -r "$APP_DIR/bybit-bot-v5/requirements.txt" -q
+    echo "   ✅ Зависимости актуальны"
+fi
+
+# ── 10. Очистка старых бэкапов (оставляем последние 10) ──────────────────────
+if [ -d "$BACKUP_ROOT" ]; then
+    ls -1t "$BACKUP_ROOT" | tail -n +11 | while read old; do
+        rm -rf "$BACKUP_ROOT/$old"
+    done
+fi
+
+# ── 11. Перезапуск сервиса ────────────────────────────────────────────────────
 systemctl restart baibit
 sleep 3
 
 if systemctl is-active --quiet baibit; then
+    echo ""
     echo "✅ Готово! Бот обновлён и запущен."
+    echo "   Бэкап: $BACKUP_DIR"
     echo "   Откройте Telegram и напишите /menu"
 else
-    echo "❌ Ошибка запуска. Логи:"
-    journalctl -u baibit -n 30 --no-pager
+    echo ""
+    echo "❌ Ошибка запуска. Последние логи:"
+    journalctl -u baibit -n 40 --no-pager
+    echo ""
+    echo "   Для отката: cp $BACKUP_DIR/.env $ENV_FILE && systemctl restart baibit"
 fi
 echo ""
