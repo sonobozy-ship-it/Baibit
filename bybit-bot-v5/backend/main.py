@@ -50,6 +50,7 @@ from db_pool import DBPool
 from boost_mode import BoostManager, BoostCalculator
 from adaptive_params import AdaptiveParamManager
 from claude_orchestrator import ClaudeOrchestrator
+from strategy_advisor import StrategyAdvisor
 
 # ============================================================
 # Загрузка конфига
@@ -126,6 +127,13 @@ class BotState:
             openai_key=os.getenv("OPENAI_API_KEY"),
         )
         self.news_enabled = os.getenv("NEWS_ENABLED", "true").lower() == "true"
+
+        # ============== Strategy Advisor ==============
+        self.advisor = StrategyAdvisor(
+            db_pool=self.db_pool,
+            anthropic_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            openai_key=os.getenv("OPENAI_API_KEY", ""),
+        )
 
         # Locks для предотвращения race conditions
         self.trading_loop_lock = asyncio.Lock()
@@ -466,6 +474,32 @@ async def auto_train_loop():
 # ============================================================
 # AI-советы по стратегии (раз в 10 сделок или по запросу)
 # ============================================================
+async def _auto_advisor_run():
+    """Автоматический запуск AI-советника по всем стратегиям."""
+    if not state.advisor.enabled:
+        return
+    try:
+        journal_stats = state.journal.get_stats_by_strategy()
+        market_ctx = {
+            "balance": state.paper.balance if state.paper_mode else 0,
+            "open_positions": state.risk_manager.open_positions_count,
+            "regime": "unknown",
+        }
+        result = await state.advisor.analyze_all(
+            journal_stats=journal_stats,
+            strategies=state.strategies,
+            market_context=market_ctx,
+            triggered_by="auto",
+        )
+        if result.get("available"):
+            brief = StrategyAdvisor.format_telegram(result, brief=True)
+            asyncio.create_task(state.telegram.send(
+                f"🤖 <b>Авто-анализ стратегий</b>\n\n{brief}"
+            ))
+    except Exception as e:
+        logger.debug(f"_auto_advisor_run: {e}")
+
+
 async def _auto_ai_improve(sid: str, strat_name: str, strat_symbol: str, trades_done: int):
     """Запускает AI-анализ стратегии и отправляет советы в Telegram."""
     if not state.ai.enabled:
@@ -1363,6 +1397,10 @@ async def trading_loop():
                                     asyncio.create_task(_auto_ai_improve(
                                         sid, strat.NAME, strat.symbol, strat.trades
                                     ))
+                                # Strategy Advisor: автоанализ всех стратегий
+                                total_trades = state.risk_manager.daily_trades_count
+                                if state.advisor.should_auto_run(total_trades):
+                                    asyncio.create_task(_auto_advisor_run())
 
                                 exit_reason = "TP" if pnl_usd > 0 else "SL"
 

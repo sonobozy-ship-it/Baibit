@@ -191,6 +191,7 @@ class TelegramCommander:
             "/trades":     self._cmd_trades,
             "/best":       self._cmd_best_models,
             "/improve":    self._cmd_improve,
+            "/advisor":    self._cmd_advisor,
         }
 
         handler = handlers.get(cmd)
@@ -247,6 +248,18 @@ class TelegramCommander:
         if data.startswith("improve:"):
             sid = data[len("improve:"):]
             await self._cmd_improve(fake_upd, sid)
+            return
+
+        # Advisor кнопки
+        if data == "advisor_run":
+            await self._run_advisor_full(fake_upd)
+            return
+        if data == "advisor_all":
+            await self._cmd_advisor(fake_upd, "")
+            return
+        if data.startswith("advisor:"):
+            sid = data[len("advisor:"):]
+            await self._cmd_advisor(fake_upd, sid)
             return
 
         fn = action_map.get(data)
@@ -433,7 +446,9 @@ class TelegramCommander:
             "/paper_on  |  /paper_off\n"
             "/enable S1  |  /disable S1\n"
             "/ai — AI рекомендации\n"
-            "/news — новостной сентимент"
+            "/news — новостной сентимент\n"
+            "/advisor — AI-анализ всех стратегий + рекомендации\n"
+            "/advisor S1 — детальный анализ стратегии"
         )
 
     async def _cmd_status(self, upd, arg):
@@ -815,6 +830,101 @@ class TelegramCommander:
         except Exception as e:
             logger.error(f"[TgCommander] improve {sid}: {e}")
             await self.reply(upd, f"❌ Ошибка анализа: {e}", reply_markup=self._main_menu())
+
+    async def _cmd_advisor(self, upd, arg):
+        """AI-анализ всех стратегий: /advisor или /advisor S1."""
+        s = self._get_state()
+        sid = arg.upper().strip() if arg else ""
+
+        if not s.advisor.enabled:
+            await self.reply(upd,
+                "❌ AI-советник недоступен\n"
+                "Задайте <code>ANTHROPIC_API_KEY</code> или <code>OPENAI_API_KEY</code> в .env",
+                reply_markup=self._main_menu())
+            return
+
+        # Если указана стратегия — показываем детали из последнего анализа
+        if sid:
+            last = s.advisor.get_last_analysis()
+            if last:
+                analysis = last.get("analysis", {})
+                analysis["available"] = True
+                text = s.advisor.format_strategy_detail(analysis, sid)
+                await self.reply(upd, text, reply_markup=_keyboard([
+                    [_btn("🔄 Запустить новый анализ", "advisor_run"),
+                     _btn("📊 Все стратегии", "advisor_all")],
+                    [_btn("🏠 Меню", "menu")],
+                ]))
+            else:
+                await self.reply(upd,
+                    f"⚠️ Нет сохранённого анализа для <code>{sid}</code>\n"
+                    "Запустите /advisor чтобы провести анализ.")
+            return
+
+        # Показываем последний анализ или предлагаем запустить
+        last = s.advisor.get_last_analysis()
+        if last:
+            ts = last.get("timestamp", "")[:16].replace("T", " ")
+            total = last.get("total_trades", 0)
+            age_min = int((datetime.utcnow() - datetime.fromisoformat(
+                last["timestamp"][:19]
+            )).total_seconds() / 60) if last.get("timestamp") else 999
+            age_str = f"{age_min} мин назад" if age_min < 60 else f"{age_min//60}ч назад"
+
+            analysis = last.get("analysis", {})
+            analysis["available"] = True
+            text = s.advisor.format_telegram(analysis, brief=True)
+            text += f"\n\n<i>Анализ от {ts} UTC ({age_str})</i>"
+            await self.reply(upd, text, reply_markup=_keyboard([
+                [_btn("🔄 Обновить анализ", "advisor_run"),
+                 _btn("📋 Подробно", "advisor_all")],
+                [_btn("🏠 Меню", "menu")],
+            ]))
+        else:
+            journal_stats = s.journal.get_stats_by_strategy()
+            total = sum(x.get("trades", 0) for x in journal_stats)
+            await self.reply(upd,
+                f"🤖 <b>AI-советник по стратегиям</b>\n\n"
+                f"Сделок в БД: <b>{total}</b>\n"
+                f"Нажми кнопку для запуска анализа всех стратегий.",
+                reply_markup=_keyboard([
+                    [_btn("🚀 Запустить анализ", "advisor_run")],
+                    [_btn("🏠 Меню", "menu")],
+                ]))
+
+    async def _run_advisor_full(self, upd):
+        """Запуск полного AI-анализа всех стратегий."""
+        s = self._get_state()
+        journal_stats = s.journal.get_stats_by_strategy()
+        total = sum(x.get("trades", 0) for x in journal_stats)
+        await self.reply(upd, f"⏳ AI анализирует все стратегии ({total} сделок в БД)...")
+        try:
+            market_ctx = {
+                "balance": s.paper.balance if s.paper_mode else 0,
+                "open_positions": s.risk_manager.open_positions_count,
+                "daily_pnl": s.risk_manager.daily_pnl,
+                "regime": "unknown",
+            }
+            result = await s.advisor.analyze_all(
+                journal_stats=journal_stats,
+                strategies=s.strategies,
+                market_context=market_ctx,
+                triggered_by="manual",
+            )
+            if result.get("available"):
+                text = s.advisor.format_telegram(result, brief=False)
+                await self.reply(upd, text[:4000], reply_markup=_keyboard([
+                    [_btn("🔄 Обновить", "advisor_run"),
+                     _btn("📊 Стратегии", "strategies")],
+                    [_btn("🏠 Меню", "menu")],
+                ]))
+            else:
+                await self.reply(upd,
+                    f"❌ Ошибка анализа: {result.get('reason', '?')}",
+                    reply_markup=self._main_menu())
+        except Exception as e:
+            logger.error(f"[TgCommander] advisor run: {e}")
+            await self.reply(upd, f"❌ Ошибка: {e}", reply_markup=self._main_menu())
 
     async def _cmd_enable(self, upd, arg):
         s   = self._get_state()
