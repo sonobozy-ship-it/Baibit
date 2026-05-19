@@ -317,11 +317,15 @@ class AIAnalyzer:
         if not self.enabled:
             return {"score": 5, "comment": "AI недоступен", "approved": True}
         try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(
-                self.analyze_signal_async(signal_data, df=None, sentiment=market_context)
-            )
+            prompt = self._build_full_signal_prompt(signal_data, None, market_context)
+            text = self._ask_sync(prompt, "signal")
+            if not text:
+                return {"score": 5, "comment": "Нет ответа AI", "approved": True}
+            parsed = self._extract_json(text)
+            if parsed and "score" in parsed:
+                parsed.setdefault("approved", parsed["score"] >= 5)
+                return parsed
+            return {"score": 5, "comment": text[:200], "approved": True}
         except Exception:
             return {"score": 5, "comment": "AI ошибка", "approved": True}
 

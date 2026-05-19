@@ -80,7 +80,8 @@ class TelegramNotifier:
     async def notify_trade_open(self, strategy_id: str, symbol: str, side: str,
                                 entry: float, sl: float, tp: float, reason: str,
                                 qty: float = 0.0, leverage: int = 1,
-                                df=None, timeframe: str = ""):
+                                df=None, timeframe: str = "",
+                                ai_score=None, ai_reasoning: str = ""):
         from datetime import datetime, timezone
         emoji = "🟢" if side in ("BUY", "Buy") else "🔴"
         notional = round(qty * entry, 2) if qty else 0
@@ -90,6 +91,10 @@ class TelegramNotifier:
         now = datetime.now(timezone.utc)
         time_str = now.strftime("%d.%m.%Y %H:%M:%S UTC")
         tf_str = self._fmt_timeframe(timeframe) if timeframe else ""
+        ai_line = ""
+        if ai_score is not None:
+            ai_bar = "🟢" if ai_score >= 7 else ("🟡" if ai_score >= 5 else "🔴")
+            ai_line = f"\n{ai_bar} <b>AI-оценка: {ai_score}/10</b>" + (f" — <i>{ai_reasoning[:120]}</i>" if ai_reasoning else "")
         caption = (
             f"{emoji} <b>ВХОД: {side} {symbol}</b>\n"
             f"⏰ Открыт: <b>{time_str}</b>\n"
@@ -103,6 +108,7 @@ class TelegramNotifier:
             ) +
             f"🛑 SL: <code>{sl:.4f}</code>\n"
             f"🎯 TP: <code>{tp:.4f}</code>"
+            + ai_line
         )
         if _CHART_OK and df is not None:
             try:

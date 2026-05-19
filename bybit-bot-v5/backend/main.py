@@ -78,8 +78,9 @@ class BotState:
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "4")),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             cooldown_after_loss_min=int(os.getenv("COOLDOWN_AFTER_LOSS_MIN", "15")),
-            max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "0")),     # 0 = без лимита
-            max_daily_losses=int(os.getenv("MAX_DAILY_LOSSES", "3")),     # стоп после 3 убытков
+            max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "0")),          # 0 = без лимита
+            max_daily_losses=int(os.getenv("MAX_DAILY_LOSSES", "3")),          # глобальный стоп
+            max_strategy_daily_losses=int(os.getenv("MAX_STRATEGY_DAILY_LOSSES", "10")),  # лимит на стратегию
         )
         self.journal = TradeJournal()
         self.correlation = CorrelationFilter()
@@ -862,6 +863,7 @@ async def trading_loop():
 
                     # ============== AI-АНАЛИЗ сигнала ==============
                     ai_score = None
+                    ai_reasoning = ""
                     if state.ai.enabled:
                         risk_pct = state.risk_manager.adaptive_risk_pct(balance)
                         ai_result = await state.ai.analyze_signal_async(
@@ -885,17 +887,15 @@ async def trading_loop():
                         )
                         ai_score = ai_result.get("score", 5)
                         approved = ai_result.get("approved", True)
-                        reasoning = ai_result.get("reasoning", ai_result.get("comment", ""))
-                        # Telegram-превью с решением AI
-                        ai_emoji = "✅" if approved else "🚫"
-                        asyncio.create_task(state.telegram.send(
-                            f"🤖 <b>AI-анализ: {signal.action} {strat.symbol}</b>\n"
-                            f"{ai_emoji} Оценка: <b>{ai_score}/10</b>"
-                            + (" — ОДОБРЕНО" if approved else " — ОТКЛОНЕНО") + "\n"
-                            f"<i>{reasoning}</i>"
-                        ))
+                        ai_reasoning = ai_result.get("reasoning", ai_result.get("comment", ""))
                         if not approved:
-                            logger.info(f"{sid}: AI отверг (score={ai_score}) — {reasoning}")
+                            # Уведомляем об отклонении и пропускаем сделку
+                            asyncio.create_task(state.telegram.send(
+                                f"🚫 <b>AI отверг: {signal.action} {strat.symbol}</b>\n"
+                                f"Оценка: {ai_score}/10 | {sid}\n"
+                                f"<i>{ai_reasoning[:200]}</i>"
+                            ))
+                            logger.info(f"{sid}: AI отверг (score={ai_score}) — {ai_reasoning}")
                             continue
 
                     # ============== ML ФИЛЬТР v2 (с sentiment + orderbook) ==============
@@ -1054,6 +1054,7 @@ async def trading_loop():
                             signal.reason,
                             qty=qty, leverage=effective_leverage, df=df,
                             timeframe=strat.timeframe,
+                            ai_score=ai_score, ai_reasoning=ai_reasoning,
                         ))
                     else:
                         result = state.bybit.place_order(
@@ -1106,6 +1107,7 @@ async def trading_loop():
                                 signal.reason,
                                 qty=qty, leverage=effective_leverage, df=df,
                                 timeframe=strat.timeframe,
+                                ai_score=ai_score, ai_reasoning=ai_reasoning,
                             ))
                             await broadcast_log(f"🟢 {sid} {signal.action} {signal.symbol} @ {signal.entry_price}")
 
