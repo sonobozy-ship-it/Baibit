@@ -78,7 +78,8 @@ class BotState:
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "4")),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             cooldown_after_loss_min=int(os.getenv("COOLDOWN_AFTER_LOSS_MIN", "15")),
-            max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "10")),
+            max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "0")),     # 0 = без лимита
+            max_daily_losses=int(os.getenv("MAX_DAILY_LOSSES", "3")),     # стоп после 3 убытков
         )
         self.journal = TradeJournal()
         self.correlation = CorrelationFilter()
