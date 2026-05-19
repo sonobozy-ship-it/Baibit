@@ -181,13 +181,13 @@ def init_strategies():
         "S4":  "BNBUSDT",
         "S5":  "DOGEUSDT",
         "S6":  "XRPUSDT",
-        "S7":  "BTCUSDT",
-        "S8":  "ETHUSDT",         # Trend Momentum
-        "S9":  "SOLUSDT",         # Trend + Fibonacci (H1, не конфликтует с S3 H4)
-        "S11": "AVAXUSDT",        # DragonflyGold — отдельный символ, не конфликтует с S7/S9
-        "S12": "ADAUSDT",         # Overbought Short — RSI разворот + BB
-        "S13": "1000PEPEUSDT",    # Overbought Short — мем-коин (правильный символ Bybit)
-        "S14": "WIFUSDT",         # Overbought Short — мем-коин резкие откаты
+        "S7":  "LINKUSDT",        # отдельный символ — не конфликтует с S1 (BTCUSDT)
+        "S8":  "DOTUSDT",         # отдельный символ — не конфликтует с S2 (ETHUSDT)
+        "S9":  "NEARUSDT",        # отдельный символ — не конфликтует с S3 (SOLUSDT)
+        "S11": "AVAXUSDT",        # DragonflyGold
+        "S12": "ADAUSDT",
+        "S13": "1000PEPEUSDT",
+        "S14": "WIFUSDT",
     }
     for sid, cls in ALL_STRATEGIES.items():
         state.strategies[sid] = cls(symbol=symbol_map.get(sid, "BTCUSDT"))

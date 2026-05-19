@@ -19,7 +19,7 @@ class EMACrossoverStrategy(BaseStrategy):
     ID = "S1"
     NAME = "EMA CROSSOVER"
     DESCRIPTION = "EMA 9/21 cross + RSI зона + объём × 1.5 + свеча подтверждения"
-    REGIME_PREFERENCE = ["uptrend", "downtrend"]  # работает в трендовых режимах
+    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -46,11 +46,11 @@ class EMACrossoverStrategy(BaseStrategy):
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Фильтры
+        # Фильтры (расслабленные для сбора ML-данных)
         ema_bull_cross = prev["ema_fast"] < prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
         ema_bear_cross = prev["ema_fast"] > prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
-        rsi_in_zone = 30 < last["rsi"] < 70
-        vol_confirm = last["volume"] > last["vol_ma"] * 1.2
+        rsi_in_zone = 20 < last["rsi"] < 80
+        vol_confirm = last["volume"] > last["vol_ma"] * 1.0  # объём любой
 
         filters = {
             "ema_cross": ema_bull_cross or ema_bear_cross,
@@ -85,7 +85,7 @@ class BollingerBandsStrategy(BaseStrategy):
     ID = "S2"
     NAME = "BOLLINGER BANDS"
     DESCRIPTION = "BB squeeze + RSI экстремум + объём + наклон 50EMA"
-    REGIME_PREFERENCE = ["volatile", "flat"]  # mean-reversion в боковике и при высокой волатильности
+    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -160,7 +160,7 @@ class RSIDivergenceStrategy(BaseStrategy):
             stop_loss_pct=1.2,
             take_profit_pct=3.6,
             edge_wr_target=0.60,
-            timeframe="240",  # H4
+            timeframe="60",  # H1 (было H4 — слишком редкие сигналы)
             **kwargs,
         )
 
@@ -228,7 +228,7 @@ class BreakoutHunterStrategy(BaseStrategy):
     ID = "S4"
     NAME = "BREAKOUT HUNTER"
     DESCRIPTION = "Пробой + ретест уровня + объём × 2 + ATR фильтр"
-    REGIME_PREFERENCE = ["uptrend", "downtrend", "volatile"]  # нужно движение
+    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -256,11 +256,11 @@ class BreakoutHunterStrategy(BaseStrategy):
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Пробой
-        break_up = prev["close"] < resistance and last["close"] > resistance * 1.001
-        break_down = prev["close"] > support and last["close"] < support * 0.999
-        vol_confirm = last["volume"] > last["vol_ma"] * 1.5
-        atr_expand = last["atr"] > df.iloc[-10:]["atr"].mean() * 1.05
+        # Пробой (расслабленные условия для сбора ML-данных)
+        break_up = prev["close"] < resistance and last["close"] > resistance * 1.0005
+        break_down = prev["close"] > support and last["close"] < support * 0.9995
+        vol_confirm = last["volume"] > last["vol_ma"] * 1.0
+        atr_expand = last["atr"] > df.iloc[-10:]["atr"].mean() * 0.9
 
         if not ((break_up or break_down) and vol_confirm and atr_expand):
             return None
@@ -289,7 +289,7 @@ class ScalperGridStrategy(BaseStrategy):
     ID = "S5"
     NAME = "SCALPER GRID"
     DESCRIPTION = "Сетка в боковике + ATR < порога + низкая волатильность"
-    REGIME_PREFERENCE = ["flat"]  # только в боковике
+    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -354,7 +354,7 @@ class TrendFollowerStrategy(BaseStrategy):
     ID = "S6"
     NAME = "TREND FOLLOWER"
     DESCRIPTION = "ADX > 25 + Supertrend + EMA200 выше + HTF согласован"
-    REGIME_PREFERENCE = ["uptrend", "downtrend"]  # только тренд
+    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -531,7 +531,7 @@ class DragonflyGoldStrategy(BaseStrategy):
     ID = "S11"
     NAME = "DRAGONFLY GOLD"
     DESCRIPTION = "Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP"
-    REGIME_PREFERENCE = ["uptrend", "downtrend", "volatile"]
+    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
 
     _MIN_RISK_PCT  = 0.20   # меньше — шум
     _MAX_RISK_PCT  = 5.0    # больше — нет смысла открывать
@@ -730,7 +730,7 @@ class OverboughtShortStrategy(BaseStrategy):
     ID   = "S12"
     NAME = "OVERBOUGHT SHORT"
     DESCRIPTION = "RSI разворот + BB верхний/нижний + MACD + объём дивергенция"
-    REGIME_PREFERENCE = ["volatile", "flat"]
+    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
 
     def __init__(self, **kwargs):
         super().__init__(
