@@ -79,7 +79,7 @@ class BotState:
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             cooldown_after_loss_min=int(os.getenv("COOLDOWN_AFTER_LOSS_MIN", "15")),
             max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "0")),          # 0 = без лимита
-            max_daily_losses=int(os.getenv("MAX_DAILY_LOSSES", "3")),          # глобальный стоп
+            max_daily_losses=int(os.getenv("MAX_DAILY_LOSSES", "10")),         # глобальный стоп
             max_strategy_daily_losses=int(os.getenv("MAX_STRATEGY_DAILY_LOSSES", "10")),  # лимит на стратегию
         )
         self.journal = TradeJournal()
@@ -787,7 +787,16 @@ async def trading_loop():
                     await asyncio.sleep(2)
                     continue
 
-                balance = (state.bybit.get_balance("USDT") if state.bybit else 0) if not state.paper_mode else state.paper.balance
+                if state.paper_mode:
+                    # Equity = free balance + locked margin (правильный баланс для risk-менеджера)
+                    locked = sum(
+                        p.get("margin", 0) for p in state.paper.positions.values()
+                    )
+                    balance = round(state.paper.balance + locked, 4)
+                elif state.bybit and not getattr(state.bybit, "public_only", False):
+                    balance = state.bybit.get_balance("USDT")
+                else:
+                    balance = 0
                 state.risk_manager.check_daily_reset(balance)
 
                 # Получаем актуальный sentiment с проверкой свежести (не старше 30 мин)
