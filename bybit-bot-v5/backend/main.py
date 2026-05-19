@@ -120,6 +120,7 @@ class BotState:
             db_pool=self.db_pool,
             cryptopanic_key=os.getenv("CRYPTOPANIC_API_KEY"),
             anthropic_key=os.getenv("ANTHROPIC_API_KEY"),
+            openai_key=os.getenv("OPENAI_API_KEY"),
         )
         self.news_enabled = os.getenv("NEWS_ENABLED", "true").lower() == "true"
 

@@ -24,12 +24,13 @@ class NewsManager:
         db_pool,
         cryptopanic_key: Optional[str] = None,
         anthropic_key: Optional[str] = None,
+        openai_key: Optional[str] = None,
         twitter_accounts: Optional[List[str]] = None,
     ):
         self.db = db_pool
         self.news = NewsAggregator(cryptopanic_api_key=cryptopanic_key)
         self.twitter = TwitterCollector(custom_accounts=twitter_accounts)
-        self.sentiment = SentimentAnalyzer(anthropic_api_key=anthropic_key)
+        self.sentiment = SentimentAnalyzer(anthropic_api_key=anthropic_key, openai_api_key=openai_key)
 
         self.last_fetch: Optional[datetime] = None
         self.last_deep_analysis: Optional[datetime] = None
@@ -204,7 +205,8 @@ class NewsManager:
             if self.db.is_mysql:
                 with conn.cursor() as c:
                     c.execute(query, (cutoff,))
-                    recent = list(c.fetchall())
+                    cols = [d[0] for d in c.description]
+                    recent = [dict(zip(cols, row)) for row in c.fetchall()]
             else:
                 import sqlite3
                 conn.row_factory = sqlite3.Row
@@ -310,8 +312,8 @@ class NewsManager:
              "reasoning": "...",
              "available": True}
         """
-        if not self.sentiment._anthropic_client:
-            return {"available": False, "reason": "Anthropic API не настроен", "action": "trade"}
+        if not self.sentiment.has_ai:
+            return {"available": False, "reason": "AI API не настроен (нужен ANTHROPIC_API_KEY или OPENAI_API_KEY)", "action": "trade"}
 
         # Собираем последние данные
         cutoff = (datetime.utcnow() - timedelta(hours=4)).isoformat()
@@ -323,7 +325,8 @@ class NewsManager:
             if self.db.is_mysql:
                 with conn.cursor() as c:
                     c.execute(query, (cutoff,))
-                    recent = list(c.fetchall())
+                    cols = [d[0] for d in c.description]
+                    recent = [dict(zip(cols, row)) for row in c.fetchall()]
             else:
                 import sqlite3
                 conn.row_factory = sqlite3.Row
@@ -399,16 +402,27 @@ class NewsManager:
 - Рекомендации на русском языке"""
 
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.sentiment._anthropic_client.messages.create(
-                    model="claude-haiku-4-5",
-                    max_tokens=800,
-                    messages=[{"role": "user", "content": prompt}],
-                ),
-            )
-            text = response.content[0].text.strip()
+            loop = asyncio.get_running_loop()
+            if self.sentiment._anthropic_client:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.sentiment._anthropic_client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=800,
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                )
+                text = response.content[0].text.strip()
+            else:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.sentiment._openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        max_tokens=800,
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                )
+                text = response.choices[0].message.content.strip()
             start = text.find("{")
             end = text.rfind("}") + 1
             if start >= 0 and end > start:

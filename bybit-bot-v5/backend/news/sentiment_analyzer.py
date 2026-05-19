@@ -70,15 +70,27 @@ class SimpleSentiment:
 class SentimentAnalyzer:
     """Главный анализатор с агрегацией."""
 
-    def __init__(self, anthropic_api_key: Optional[str] = None):
+    def __init__(self, anthropic_api_key: Optional[str] = None, openai_api_key: Optional[str] = None):
         self.anthropic_key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
+        self.openai_key = openai_api_key or os.getenv("OPENAI_API_KEY")
         self._anthropic_client = None
+        self._openai_client = None
         try:
             from anthropic import Anthropic
             if self.anthropic_key:
                 self._anthropic_client = Anthropic(api_key=self.anthropic_key)
         except ImportError:
             pass
+        try:
+            import openai
+            if self.openai_key:
+                self._openai_client = openai.OpenAI(api_key=self.openai_key)
+        except ImportError:
+            pass
+
+    @property
+    def has_ai(self) -> bool:
+        return bool(self._anthropic_client or self._openai_client)
 
     def analyze_item(self, text: str) -> Dict:
         """Быстрый анализ одного элемента (rule-based)."""
@@ -145,8 +157,8 @@ class SentimentAnalyzer:
         Глубокий анализ через Claude AI.
         Используется реже (раз в час), даёт content-aware sentiment.
         """
-        if not self._anthropic_client or not items:
-            return {"available": False, "reason": "No Anthropic client or items"}
+        if not self.has_ai or not items:
+            return {"available": False, "reason": "No AI client or items"}
 
         # Берём топ-20 свежих
         sample = items[:20]
@@ -175,16 +187,27 @@ class SentimentAnalyzer:
 ТОЛЬКО JSON, без других слов."""
 
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self._anthropic_client.messages.create(
-                    model="claude-haiku-4-5",
-                    max_tokens=1000,
-                    messages=[{"role": "user", "content": prompt}],
-                ),
-            )
-            text = response.content[0].text.strip()
+            loop = asyncio.get_running_loop()
+            if self._anthropic_client:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._anthropic_client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=1000,
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                )
+                text = response.content[0].text.strip()
+            else:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        max_tokens=1000,
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                )
+                text = response.choices[0].message.content.strip()
 
             # Извлекаем JSON
             import json

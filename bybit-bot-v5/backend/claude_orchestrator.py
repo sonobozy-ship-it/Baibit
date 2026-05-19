@@ -144,7 +144,7 @@ class AnthropicProvider(BaseProvider):
 
     async def complete(self, system: str, messages: List[Dict], max_tokens: int = 1024) -> str:
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _sync():
             response = self._client.messages.create(
@@ -186,7 +186,7 @@ class OpenAIProvider(BaseProvider):
 
     async def complete(self, system: str, messages: List[Dict], max_tokens: int = 1024) -> str:
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _sync():
             # Конвертируем в формат OpenAI (добавляем system в начало)
@@ -218,7 +218,7 @@ class OllamaProvider(BaseProvider):
 
     async def complete(self, system: str, messages: List[Dict], max_tokens: int = 1024) -> str:
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _sync():
             # Ollama поддерживает OpenAI-совместимый /v1/chat/completions
@@ -493,10 +493,12 @@ class ClaudeOrchestrator:
                 "consec_losses":      boost.get("consecutive_losses"),
             } if boost.get("active") else {"active": False},
             "risk": {
-                "daily_loss_pct":  risk.get("daily_loss_pct"),
-                "open_positions":  risk.get("open_positions_count"),
-                "kill_switch":     risk.get("kill_switch_active"),
-                "consec_losses":   risk.get("consecutive_losses"),
+                "daily_pnl_pct":    risk.get("daily_pnl_pct"),
+                "open_positions":   risk.get("open_positions"),
+                "kill_switch":      risk.get("kill_switch"),
+                "daily_losses":     risk.get("daily_losses_count", 0),
+                "max_daily_losses": risk.get("max_daily_losses", 3),
+                "daily_trades":     risk.get("daily_trades_count", 0),
             },
             "ml_mode":         s.get("ml", {}).get("filter_mode"),
             "previous_cycles": prev,
