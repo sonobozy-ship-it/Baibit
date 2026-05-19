@@ -164,7 +164,7 @@ def cmd_open(client: BybitClient, symbol: str, side: str,
         leverage=leverage,
     )
     if result.get("success"):
-        print(f"\n  ✅ Ордер исполнен: orderId={result['data'].get('orderId')}\n")
+        print(f"\n  ✅ Ордер исполнен: orderId={result.get('data', {}).get('orderId')}\n")
     else:
         print(f"\n  ❌ Ошибка: {result.get('error')}\n")
 

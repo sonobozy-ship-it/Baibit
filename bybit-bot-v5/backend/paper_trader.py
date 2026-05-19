@@ -103,7 +103,9 @@ class PaperTrader:
         return closed
 
     def _close_position(self, symbol: str, exit_price: float, reason: str) -> Dict:
-        pos = self.positions.pop(symbol)
+        pos = self.positions.pop(symbol, None)
+        if pos is None:
+            return {"pnl_usd": 0, "pnl_pct": 0, "symbol": symbol, "exit_reason": reason}
         entry = pos["entry_price"]
         qty = pos["qty"]
         side = pos["side"]

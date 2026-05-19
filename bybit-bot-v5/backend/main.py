@@ -597,7 +597,7 @@ async def _execute_fusion_signal(
             take_profit=fused.take_profit,
             leverage=lev_check["effective_leverage"],
         )
-        if result["success"]:
+        if result.get("success"):
             notional = qty * fused.entry_price
             state.risk_manager.register_position_open(sid, notional)
 
@@ -802,6 +802,8 @@ async def trading_loop():
                         try:
                             import pandas_ta as ta
                             atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
+                            if atr_series is None or len(atr_series) == 0:
+                                raise ValueError("ATR empty")
                             atr = float(atr_series.iloc[-1])
                             if atr > 0:
                                 sl_mult, rr = state.adaptive.atr_params(sid, regime=current_regime_name)
@@ -1033,7 +1035,7 @@ async def trading_loop():
                             take_profit=signal.take_profit,
                             leverage=effective_leverage,
                         )
-                        if result["success"]:
+                        if result.get("success"):
                             strat.register_position(
                                 "Buy" if signal.action == "BUY" else "Sell",
                                 signal.entry_price, signal.stop_loss, signal.take_profit,
@@ -1157,8 +1159,8 @@ async def trading_loop():
 
                                 # Корректный PnL
                                 close_result = strat.close_position(exit_price, qty=qty)
-                                pnl_usd = close_result["pnl_usd"]
-                                r_multiple = close_result["r_multiple"]
+                                pnl_usd = close_result.get("pnl_usd", 0)
+                                r_multiple = close_result.get("r_multiple", 0)
 
                                 state.risk_manager.register_trade_result(sid, pnl_usd)
                                 state.risk_manager.register_position_close(sid)

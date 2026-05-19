@@ -106,7 +106,7 @@ class FeatureExtractor:
 
         features = {}
         last = df.iloc[-1]
-        prev = df.iloc[-2]
+        prev = df.iloc[-2] if len(df) >= 2 else last
         price = float(last["close"])
 
         # --- Считаем все индикаторы один раз ---
