@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('bybit-bot-v5/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r bybit-bot-v5/requirements.txt
+
+      - name: Syntax check (compileall)
+        run: python -m compileall bybit-bot-v5/backend -q
+
+      - name: Basic import check
+        working-directory: bybit-bot-v5/backend
+        run: |
+          python -c "from strategies.base import BaseStrategy, TradingSignal; print('OK: base')"
+          python -c "from strategies.all_strategies import ALL_STRATEGIES; print('OK: strategies', list(ALL_STRATEGIES.keys()))"
+          python -c "from risk_manager import RiskManager; print('OK: risk_manager')"
+          python -c "from paper_trader import PaperTrader; print('OK: paper_trader')"
+          python -c "from backtester import Backtester; print('OK: backtester')"
+          python -c "from position_calc import calculate_pnl; print('OK: position_calc')"
+
+      - name: Run tests
+        working-directory: bybit-bot-v5/backend
+        run: pytest tests/ -v --tb=short --timeout=60
+        env:
+          PAPER_TRADING: "true"
+          BYBIT_TESTNET: "true"
+          TRADING_MODE: "PAPER"

@@ -162,6 +162,7 @@ class BotState:
         self.strategies: Dict[str, object] = {}
         self.bot_running = False
         self.paper_mode = False
+        self.trading_mode: str = "PAPER"
         self.ws_clients: List[WebSocket] = []
         self.tickers: Dict[str, Dict] = {}
 
@@ -767,6 +768,23 @@ async def _execute_fusion_signal(
             logger.error(f"[Fusion] Ошибка ордера: {result.get('error')}")
 
 
+def _log_trade_attempt(mode: str, strategy_id: str, symbol: str, side: str,
+                        entry: float, sl: float, tp: float, qty: float,
+                        leverage: int, balance: float, reason: str):
+    notional = qty * entry
+    margin = notional / leverage if leverage else notional
+    risk_usd = abs(entry - sl) * qty if sl else 0
+    risk_pct = risk_usd / balance * 100 if balance else 0
+    logger.info(
+        f"[TRADE:{mode}] {strategy_id} {symbol} {side} | "
+        f"entry={entry:.6g} SL={sl:.6g} TP={tp:.6g} | "
+        f"qty={qty} notional={notional:.2f}$ margin={margin:.2f}$ "
+        f"lev={leverage}x | "
+        f"risk={risk_usd:.2f}$ ({risk_pct:.2f}%) | "
+        f"reason={reason[:120]}"
+    )
+
+
 # ============================================================
 # Главный торговый цикл
 # ============================================================
@@ -1158,6 +1176,19 @@ async def trading_loop():
                             logger.debug(f"{sid}: ATR={_atr_val:.6f} → qty={qty}")
 
                     # ============== Открытие позиции ==============
+                    _log_trade_attempt(
+                        mode=state.trading_mode,
+                        strategy_id=sid,
+                        symbol=signal.symbol,
+                        side=signal.action,
+                        entry=signal.entry_price,
+                        sl=signal.stop_loss,
+                        tp=signal.take_profit,
+                        qty=qty,
+                        leverage=effective_leverage,
+                        balance=balance,
+                        reason=getattr(signal, "reason", ""),
+                    )
                     if state.paper_mode:
                         paper_result = state.paper.open_position(signal, sid, qty, effective_leverage)
                         if not paper_result.get("success"):
@@ -1552,6 +1583,48 @@ async def _tg_stop_bot():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_strategies()
+
+    # ── Определение режима торговли ──────────────────────────────
+    _trading_mode = os.getenv("TRADING_MODE", "").upper()
+    if not _trading_mode:
+        # Обратная совместимость
+        if os.getenv("PAPER_TRADING", "true").lower() in ("1", "true", "yes"):
+            _trading_mode = "PAPER"
+        elif os.getenv("BYBIT_TESTNET", "true").lower() in ("1", "true", "yes"):
+            _trading_mode = "TESTNET"
+        else:
+            _trading_mode = "LIVE"
+    state.trading_mode = _trading_mode
+
+    # ── Защита от случайной LIVE-торговли ────────────────────────
+    if _trading_mode == "LIVE":
+        confirm = os.getenv("LIVE_TRADING_CONFIRM", "false").lower() in ("1", "true", "yes")
+        understand = os.getenv("I_UNDERSTAND_REAL_MONEY_RISK", "false").lower() in ("1", "true", "yes")
+        if not (confirm and understand):
+            logger.critical(
+                "🚫 LIVE-режим заблокирован! "
+                "Установи LIVE_TRADING_CONFIRM=true и I_UNDERSTAND_REAL_MONEY_RISK=true в .env"
+            )
+            raise SystemExit(
+                "\n\n❌ LIVE TRADING ЗАБЛОКИРОВАН\n"
+                "Для активации реальной торговли установи в .env:\n"
+                "  LIVE_TRADING_CONFIRM=true\n"
+                "  I_UNDERSTAND_REAL_MONEY_RISK=true\n"
+                "Убедись, что понимаешь риски потери средств!\n"
+            )
+
+    if _trading_mode == "DRY_RUN":
+        state.paper_mode = True
+        logger.info("🔇 DRY_RUN режим: ордера не отправляются, только логи")
+    elif _trading_mode == "PAPER":
+        state.paper_mode = True
+        logger.info("📄 PAPER режим: виртуальная торговля")
+    elif _trading_mode == "TESTNET":
+        state.paper_mode = False
+        logger.info("🧪 TESTNET режим: реальные ордера на тестовой бирже")
+    elif _trading_mode == "LIVE":
+        state.paper_mode = False
+        logger.warning("💰 LIVE режим: РЕАЛЬНЫЕ ДЕНЬГИ!")
 
     # ── Автоподключение Bybit из переменных окружения ─────────────────────────
     _bybit_key    = os.getenv("BYBIT_API_KEY", "").strip()
