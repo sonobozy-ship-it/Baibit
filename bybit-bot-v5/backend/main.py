@@ -1011,13 +1011,17 @@ async def trading_loop():
 
                     # ============== Открытие позиции ==============
                     if state.paper_mode:
-                        state.paper.open_position(signal, sid, qty, strat.leverage)
+                        paper_result = state.paper.open_position(signal, sid, qty, strat.leverage)
+                        if not paper_result.get("success"):
+                            logger.warning(f"[PAPER] {sid} отказ: {paper_result.get('reason')}")
+                            continue
                         strat.register_position(
                             "Buy" if signal.action == "BUY" else "Sell",
                             signal.entry_price, signal.stop_loss, signal.take_profit,
                         )
                         strat.current_position["qty"] = qty
                         strat.current_position["leverage"] = strat.leverage
+                        strat.current_position["opened_at"] = state.paper.positions[signal.symbol]["opened_at"]
                         notional = qty * signal.entry_price
                         state.risk_manager.register_position_open(sid, notional)
                         asyncio.create_task(state.telegram.notify_trade_open(

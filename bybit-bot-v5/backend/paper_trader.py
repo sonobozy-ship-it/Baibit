@@ -61,12 +61,19 @@ class PaperTrader:
         if signal.symbol in self.positions:
             return {"success": False, "reason": "Уже есть позиция на этом символе"}
 
-        cost = qty * signal.entry_price / leverage
-        if cost > self.balance:
-            return {"success": False, "reason": "Недостаточно виртуальных средств"}
+        margin = round(qty * signal.entry_price / leverage, 4)   # залог маржи
+        open_fee = round(qty * signal.entry_price * (self.fee_pct / 100), 4)
+        total_cost = margin + open_fee
 
-        fee = cost * (self.fee_pct / 100)
-        self.balance -= fee
+        if total_cost > self.balance:
+            logger.warning(
+                f"[PAPER] {strategy_id} ОТКАЗ: нужно {total_cost:.2f} USDT "
+                f"(маржа {margin:.2f} + комиссия {open_fee:.4f}), "
+                f"доступно {self.balance:.2f}"
+            )
+            return {"success": False, "reason": f"Недостаточно средств: нужно {total_cost:.2f} USDT"}
+
+        self.balance = round(self.balance - total_cost, 4)
 
         self.positions[signal.symbol] = {
             "strategy_id": strategy_id,
@@ -74,13 +81,17 @@ class PaperTrader:
             "entry_price": signal.entry_price,
             "qty": qty,
             "leverage": leverage,
+            "margin": margin,
             "stop_loss": signal.stop_loss,
             "take_profit": signal.take_profit,
             "opened_at": datetime.utcnow().isoformat(),
             "be_moved": False,
         }
         self._save_state()
-        logger.info(f"[PAPER] {strategy_id} OPEN {signal.action} {signal.symbol} @ {signal.entry_price}")
+        logger.info(
+            f"[PAPER] {strategy_id} OPEN {signal.action} {signal.symbol} "
+            f"@ {signal.entry_price} | маржа={margin:.2f} USDT | баланс={self.balance:.2f}"
+        )
         return {"success": True, "position": self.positions[signal.symbol]}
 
     def check_positions(self, current_prices: Dict[str, float]):
@@ -110,18 +121,23 @@ class PaperTrader:
         qty = pos["qty"]
         side = pos["side"]
         lev = pos["leverage"]
+        margin = pos.get("margin", round(qty * entry / lev, 4))
 
         if side == "Buy":
-            pnl_usd = qty * (exit_price - entry)
+            raw_pnl = qty * (exit_price - entry)
         else:
-            pnl_usd = qty * (entry - exit_price)
+            raw_pnl = qty * (entry - exit_price)
 
-        pnl_pct = ((exit_price - entry) / entry * 100 if side == "Buy" else (entry - exit_price) / entry * 100) * lev
-        # Комиссия на notional обеих сторон сделки (как на реальной бирже)
-        fee = qty * (entry + exit_price) * (self.fee_pct / 100)
-        pnl_usd -= fee
+        # Комиссия только на закрытие (открытие уже вычтено при open)
+        close_fee = round(qty * exit_price * (self.fee_pct / 100), 4)
+        pnl_usd = round(raw_pnl - close_fee, 4)
 
-        self.balance += pnl_usd
+        pnl_pct = round(
+            (pnl_usd / margin * 100) if margin > 0 else 0, 2
+        )
+
+        # Возвращаем маржу + PnL
+        self.balance = round(self.balance + margin + pnl_usd, 4)
 
         trade = {
             **pos,

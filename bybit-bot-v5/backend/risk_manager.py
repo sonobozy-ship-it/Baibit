@@ -116,6 +116,12 @@ class RiskManager:
         if sl_distance == 0:
             return 0
         qty = risk_usd / (sl_distance * entry_price)
+
+        # Ограничиваем по доступной марже: notional ≤ balance * leverage * 0.9
+        max_notional = balance * leverage * 0.9
+        if qty * entry_price > max_notional:
+            qty = max_notional / entry_price
+
         qty = round(qty, 4)
         # Проверяем минимальный порог
         if qty * entry_price < min_notional:
