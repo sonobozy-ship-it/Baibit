@@ -460,6 +460,33 @@ async def auto_train_loop():
 
 
 # ============================================================
+# AI-советы по стратегии (раз в 10 сделок или по запросу)
+# ============================================================
+async def _auto_ai_improve(sid: str, strat_name: str, strat_symbol: str, trades_done: int):
+    """Запускает AI-анализ стратегии и отправляет советы в Telegram."""
+    if not state.ai.enabled:
+        return
+    try:
+        trades_hist = state.journal.get_trades(strategy_id=sid, limit=50)
+        stats_list  = state.journal.get_stats_by_strategy()
+        stats       = next((x for x in stats_list if x["strategy_id"] == sid), {})
+        result = state.ai.analyze_strategy_performance({
+            "id":     sid,
+            "name":   strat_name,
+            "symbol": strat_symbol,
+            "trades": trades_hist,
+            "stats":  stats,
+        })
+        if result.get("available"):
+            analysis = result.get("analysis", "")[:2000]
+            asyncio.create_task(state.telegram.send(
+                f"🤖 <b>AI-советы: {sid} ({trades_done} сделок)</b>\n\n{analysis}"
+            ))
+    except Exception as e:
+        logger.debug(f"_auto_ai_improve {sid}: {e}")
+
+
+# ============================================================
 # Fusion — исполнение объединённого сигнала
 # ============================================================
 async def _execute_fusion_signal(
@@ -1152,6 +1179,11 @@ async def trading_loop():
                                 state.risk_manager.register_trade_result(_sid, pnl)
                                 state.risk_manager.register_position_close(_sid)
                                 state.adaptive.record(_sid, close_res.get("r_multiple", 0))
+                                # AI-советы каждые 10 закрытых сделок стратегии
+                                if _strat.trades > 0 and _strat.trades % 10 == 0:
+                                    asyncio.create_task(_auto_ai_improve(
+                                        _sid, _strat.NAME, _strat.symbol, _strat.trades
+                                    ))
                                 asyncio.create_task(state.telegram.notify_trade_close(
                                     _sid, c_sym, pnl, reason,
                                     leverage=closed_pos.get("leverage", 1),
@@ -1198,6 +1230,11 @@ async def trading_loop():
                                 state.risk_manager.register_position_close(sid)
                                 # Адаптивное самообучение: записываем результат в R-multiple
                                 state.adaptive.record(sid, r_multiple)
+                                # AI-советы каждые 10 закрытых сделок стратегии
+                                if strat.trades > 0 and strat.trades % 10 == 0:
+                                    asyncio.create_task(_auto_ai_improve(
+                                        sid, strat.NAME, strat.symbol, strat.trades
+                                    ))
 
                                 exit_reason = "TP" if pnl_usd > 0 else "SL"
 

@@ -176,6 +176,7 @@ class TelegramCommander:
             "/resume":     self._cmd_resume,
             "/trades":     self._cmd_trades,
             "/best":       self._cmd_best_models,
+            "/improve":    self._cmd_improve,
         }
 
         handler = handlers.get(cmd)
@@ -222,6 +223,12 @@ class TelegramCommander:
         if data.startswith("close_pos:"):
             sid = data[len("close_pos:"):]
             await self._cmd_close_one_position(fake_upd, sid)
+            return
+
+        # AI-советы по стратегии
+        if data.startswith("improve:"):
+            sid = data[len("improve:"):]
+            await self._cmd_improve(fake_upd, sid)
             return
 
         fn = action_map.get(data)
@@ -608,13 +615,92 @@ class TelegramCommander:
     async def _cmd_strategies(self, upd, arg):
         s = self._get_state()
         lines = ["<b>Стратегии</b>\n"]
+        improve_buttons = []
         for sid, st in s.strategies.items():
             icon = "🚫" if st.auto_disabled else ("✅" if st.enabled else "⏹")
             pos  = "📌" if st.current_position else "  "
             wr   = st.wins / st.trades * 100 if st.trades else 0
             pnl_str = f"{st.pnl:+.1f}$" if st.trades else "—"
             lines.append(f"{icon}{pos} <code>{sid}</code> WR={wr:.0f}% PnL={pnl_str}")
-        await self.reply(upd, "\n".join(lines), reply_markup=self._main_menu())
+            if st.trades >= 5:
+                improve_buttons.append(_btn(f"🤖 {sid}", f"improve:{sid}"))
+        # Кнопки AI-советов (по 3 в ряд)
+        kb_rows = [
+            improve_buttons[i:i+3] for i in range(0, len(improve_buttons), 3)
+        ]
+        if improve_buttons:
+            lines.append("\n<i>Нажми кнопку — AI-советы по стратегии</i>")
+        kb_rows.append([_btn("🏠 Меню", "menu")])
+        await self.reply(upd, "\n".join(lines), reply_markup=_keyboard(kb_rows))
+
+    async def _cmd_improve(self, upd, arg):
+        """AI-советы по улучшению стратегии на основе закрытых сделок."""
+        s = self._get_state()
+        sid = arg.upper().strip() if arg else ""
+
+        if not s.ai.enabled:
+            await self.reply(upd,
+                "❌ AI недоступен — задайте <code>ANTHROPIC_API_KEY</code> или <code>OPENAI_API_KEY</code> в .env",
+                reply_markup=self._main_menu())
+            return
+
+        if not sid:
+            # Показываем список стратегий с кнопками
+            lines = ["<b>🤖 AI-советы по стратегии</b>\n",
+                     "Выберите стратегию или напишите <code>/improve S3</code>:"]
+            btns = []
+            for k, st in s.strategies.items():
+                wr = st.wins / st.trades * 100 if st.trades else 0
+                lines.append(f"  <code>{k}</code> — {st.NAME} ({st.trades} сд., WR={wr:.0f}%)")
+                if st.trades >= 5:
+                    btns.append(_btn(f"🤖 {k}", f"improve:{k}"))
+            btns_rows = [btns[i:i+3] for i in range(0, len(btns), 3)]
+            btns_rows.append([_btn("🏠 Меню", "menu")])
+            await self.reply(upd, "\n".join(lines), reply_markup=_keyboard(btns_rows))
+            return
+
+        if sid not in s.strategies:
+            await self.reply(upd,
+                f"❌ Стратегия <code>{sid}</code> не найдена\nДоступны: {', '.join(s.strategies.keys())}")
+            return
+
+        strat = s.strategies[sid]
+        if strat.trades < 5:
+            await self.reply(upd,
+                f"⚠️ У <code>{sid}</code> только {strat.trades} сделок — нужно минимум 5 для анализа")
+            return
+
+        await self.reply(upd, f"⏳ AI анализирует <b>{sid}</b> ({strat.trades} сделок)...")
+        try:
+            trades_hist = s.journal.get_trades(strategy_id=sid, limit=50)
+            stats_list  = s.journal.get_stats_by_strategy()
+            stats       = next((x for x in stats_list if x["strategy_id"] == sid), {})
+            result = s.ai.analyze_strategy_performance({
+                "id":     sid,
+                "name":   strat.NAME,
+                "symbol": strat.symbol,
+                "trades": trades_hist,
+                "stats":  stats,
+            })
+            if not result.get("available"):
+                await self.reply(upd,
+                    f"❌ AI недоступен: {result.get('message', '?')}",
+                    reply_markup=self._main_menu())
+                return
+            analysis = result.get("analysis", "Нет данных")[:2000]
+            wr = strat.wins / strat.trades * 100 if strat.trades else 0
+            await self.reply(upd,
+                f"🤖 <b>AI-советы: {sid} ({strat.NAME})</b>\n"
+                f"<i>Сделок: {strat.trades} | WR: {wr:.0f}% | PnL: {strat.pnl:+.2f}$</i>\n\n"
+                f"{analysis}",
+                reply_markup=_keyboard([
+                    [_btn(f"🔄 Обновить анализ {sid}", f"improve:{sid}")],
+                    [_btn("📈 Стратегии", "strategies"), _btn("🏠 Меню", "menu")],
+                ])
+            )
+        except Exception as e:
+            logger.error(f"[TgCommander] improve {sid}: {e}")
+            await self.reply(upd, f"❌ Ошибка анализа: {e}", reply_markup=self._main_menu())
 
     async def _cmd_enable(self, upd, arg):
         s   = self._get_state()
