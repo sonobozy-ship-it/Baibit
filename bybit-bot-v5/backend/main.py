@@ -174,18 +174,19 @@ state = BotState()
 def init_strategies():
     """Создание всех 9 стратегий с дефолтными символами."""
     symbol_map = {
-        "S1": "BTCUSDT",
-        "S2": "ETHUSDT",
-        "S3": "SOLUSDT",
-        "S4": "BNBUSDT",
-        "S5": "DOGEUSDT",
-        "S6": "XRPUSDT",
-        "S7": "BTCUSDT",
-        "S8": "ETHUSDT",    # Trend Momentum
-        "S9": "BTCUSDT",    # Trend + Fibonacci
-        "S12": "SOLUSDT",   # Overbought Short — RSI разворот + BB
-        "S13": "PEPEUSDT",  # Overbought Short — мем-коин высокая волатильность
-        "S14": "WIFUSDT",   # Overbought Short — мем-коин резкие откаты
+        "S1":  "BTCUSDT",
+        "S2":  "ETHUSDT",
+        "S3":  "SOLUSDT",
+        "S4":  "BNBUSDT",
+        "S5":  "DOGEUSDT",
+        "S6":  "XRPUSDT",
+        "S7":  "BTCUSDT",
+        "S8":  "ETHUSDT",         # Trend Momentum
+        "S9":  "SOLUSDT",         # Trend + Fibonacci (H1, не конфликтует с S3 H4)
+        "S11": "AVAXUSDT",        # DragonflyGold — отдельный символ, не конфликтует с S7/S9
+        "S12": "ADAUSDT",         # Overbought Short — RSI разворот + BB
+        "S13": "1000PEPEUSDT",    # Overbought Short — мем-коин (правильный символ Bybit)
+        "S14": "WIFUSDT",         # Overbought Short — мем-коин резкие откаты
     }
     for sid, cls in ALL_STRATEGIES.items():
         state.strategies[sid] = cls(symbol=symbol_map.get(sid, "BTCUSDT"))
