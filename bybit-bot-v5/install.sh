@@ -106,15 +106,22 @@ SVCEOF
 
 systemctl daemon-reload
 systemctl enable baibit
-systemctl start baibit
+systemctl restart baibit
 
+sleep 3
 echo ""
-echo "╔══════════════════════════════════════════════════════╗"
-echo "║              ✅  Baibit запущен!                     ║"
-echo "╠══════════════════════════════════════════════════════╣"
-echo "║  Telegram:    управление через бота                  ║"
-echo "║  Логи:        journalctl -u baibit -f                ║"
-echo "║  Статус:      systemctl status baibit                ║"
-echo "║  Стоп:        systemctl stop baibit                  ║"
-echo "╚══════════════════════════════════════════════════════╝"
+if systemctl is-active --quiet baibit; then
+    echo "╔══════════════════════════════════════════════════════╗"
+    echo "║          ✅  Всё готово! Baibit запущен.             ║"
+    echo "╠══════════════════════════════════════════════════════╣"
+    echo "║  Telegram:    откройте бота и напишите /menu         ║"
+    echo "║  Логи:        journalctl -u baibit -f                ║"
+    echo "║  Обновление:  bash /opt/baibit/bybit-bot-v5/update.sh║"
+    echo "╚══════════════════════════════════════════════════════╝"
+else
+    echo "╔══════════════════════════════════════════════════════╗"
+    echo "║  ❌  Сервис не запустился. Проверьте логи:           ║"
+    echo "║  journalctl -u baibit -n 30 --no-pager              ║"
+    echo "╚══════════════════════════════════════════════════════╝"
+fi
 echo ""
