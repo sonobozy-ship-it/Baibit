@@ -459,10 +459,10 @@ class ClaudeOrchestrator:
             "time_utc":         datetime.utcnow().isoformat(),
             "bot_running":      s.get("bot_running"),
             "paper_mode":       s.get("paper_mode"),
-            "balance_usdt":     s.get("balance", {}).get("usdt"),
-            "equity_usdt":      s.get("balance", {}).get("equity_usdt"),
-            "locked_margin":    s.get("balance", {}).get("locked_margin", 0),
-            "balance_note":     s.get("balance", {}).get("note", ""),
+            "balance_usdt":     (s.get("balance") or {}).get("usdt"),
+            "equity_usdt":      (s.get("balance") or {}).get("equity_usdt"),
+            "locked_margin":    (s.get("balance") or {}).get("locked_margin", 0),
+            "balance_note":     (s.get("balance") or {}).get("note", ""),
             "open_positions":   s.get("open_count", 0),
             "positions_detail": [
                 {"strategy": p["strategy"], "symbol": p["symbol"], "side": p["side"]}

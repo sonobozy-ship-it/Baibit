@@ -30,12 +30,34 @@ class PaperTrader:
         try:
             if _STATE_FILE.exists():
                 data = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-                self.balance = data.get("balance", self.initial_balance)
-                self.positions = data.get("positions", {})
-                self.trades_history = data.get("trades_history", [])
+                loaded_balance = data.get("balance", self.initial_balance)
+                positions = data.get("positions", {})
+
+                # Если баланс подозрительно мал (< 30% от стартового) и нет позиций —
+                # скорее всего стейт сохранился пока маржа была заблокирована.
+                # Восстанавливаем баланс = stартовый + сумма маржи открытых позиций.
+                locked = sum(
+                    p.get("margin", p.get("qty", 0) * p.get("entry_price", 0) / max(p.get("leverage", 1), 1))
+                    for p in positions.values()
+                )
+                equity = loaded_balance + locked
+                if equity < self.initial_balance * 0.30 and not positions:
+                    logger.warning(
+                        f"[PaperTrader] Баланс {loaded_balance:.2f} подозрителен без позиций "
+                        f"→ сбрасываем до {self.initial_balance:.2f}"
+                    )
+                    self.balance = self.initial_balance
+                    self.positions = {}
+                    self.trades_history = data.get("trades_history", [])
+                else:
+                    self.balance = loaded_balance
+                    self.positions = positions
+                    self.trades_history = data.get("trades_history", [])
+
                 logger.info(
-                    f"[PaperTrader] Восстановлено: баланс={self.balance:.2f} USDT, "
-                    f"позиций={len(self.positions)}, сделок={len(self.trades_history)}"
+                    f"[PaperTrader] Восстановлено: баланс={self.balance:.2f} USDT "
+                    f"(equity={equity:.2f}), позиций={len(self.positions)}, "
+                    f"сделок={len(self.trades_history)}"
                 )
         except Exception as e:
             logger.warning(f"[PaperTrader] Не удалось загрузить state: {e}")

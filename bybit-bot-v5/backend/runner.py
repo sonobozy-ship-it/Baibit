@@ -71,7 +71,13 @@ async def main():
     # ── Paper mode ────────────────────────────────────────────
     if os.getenv("PAPER_TRADING", "false").lower() == "true":
         state.paper_mode = True
-        logger.info(f"📄 Paper Trading | Баланс: {state.paper.balance:.2f} USDT")
+        # Восстанавливаем open positions в стратегии ПОСЛЕ того как paper_mode=True
+        from main import _restore_paper_positions
+        _restore_paper_positions()
+        logger.info(
+            f"📄 Paper Trading | Баланс: {state.paper.balance:.2f} USDT "
+            f"| Позиций восстановлено: {len(state.paper.positions)}"
+        )
 
     # ── Anomaly detector ──────────────────────────────────────
     if Path("data/models/anomaly_detector.pkl").exists():

@@ -576,7 +576,10 @@ async def _execute_fusion_signal(
 
     if state.paper_mode:
         _fusion_lev = min(3, state.risk_manager.max_leverage_cap)
-        state.paper.open_position(fused, sid, qty, _fusion_lev)
+        _fp_result = state.paper.open_position(fused, sid, qty, _fusion_lev)
+        if not _fp_result.get("success"):
+            logger.warning(f"[Fusion PAPER] отказ: {_fp_result.get('reason')}")
+            return
         asyncio.create_task(state.telegram.notify_trade_open(
             sid, sym, fused.action,
             fused.entry_price, fused.stop_loss, fused.take_profit,
@@ -946,15 +949,15 @@ async def trading_loop():
                             "stop_loss": signal.stop_loss,
                             "take_profit": signal.take_profit,
                             "features": features,
-                            "ml_prediction": ml_prediction.get("probability"),
-                            "ml_confidence": ml_prediction.get("probability"),
-                            "ml_model_version": ml_prediction.get("model_version"),
+                            "ml_prediction": ml_prediction.get("probability") if ml_prediction else None,
+                            "ml_confidence": ml_prediction.get("probability") if ml_prediction else None,
+                            "ml_model_version": ml_prediction.get("model_version") if ml_prediction else None,
                             "trade_taken": False,
                         })
 
                         # Решение: адаптивный порог уверенности
                         adaptive_threshold = state.adaptive.confidence_threshold(sid)
-                        if ml_prediction["available"] and state.ml_filter_mode == "strict":
+                        if ml_prediction and ml_prediction.get("available") and state.ml_filter_mode == "strict":
                             prob = ml_prediction.get("probability", 0)
                             if prob < adaptive_threshold:
                                 logger.info(
@@ -965,10 +968,10 @@ async def trading_loop():
                                     "warn",
                                 )
                                 continue
-                        elif ml_prediction["available"]:
-                            emoji = "✅" if ml_prediction["should_take"] else "⚠️"
+                        elif ml_prediction and ml_prediction.get("available"):
+                            emoji = "✅" if ml_prediction.get("should_take") else "⚠️"
                             await broadcast_log(
-                                f"{emoji} {sid} ML P(win)={ml_prediction['probability']:.2f} "
+                                f"{emoji} {sid} ML P(win)={ml_prediction.get('probability', 0):.2f} "
                                 f"| Sentiment={sentiment_features.get('sentiment_score', 0):+.2f}",
                                 "info",
                             )
@@ -1783,8 +1786,8 @@ async def emergency_close():
         for sid, strat in state.strategies.items():
             if strat.current_position:
                 try:
-                    ticker = state.paper.positions.get(strat.symbol, {})
-                    exit_price = ticker.get("mark_price") or ticker.get("entry_price", 0) if ticker else 0
+                    paper_pos = state.paper.positions.get(strat.symbol, {})
+                    exit_price = strat.current_position.get("entry", paper_pos.get("entry_price", 0))
                     if exit_price and strat.current_position:
                         state.paper._close_position(strat.symbol, exit_price, reason="emergency_close")
                     strat.current_position = None
