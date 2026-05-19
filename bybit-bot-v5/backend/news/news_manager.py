@@ -38,6 +38,30 @@ class NewsManager:
         self.cached_deep: Dict = {}
         self._init_db()
 
+    @staticmethod
+    def _to_float(value, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            if isinstance(value, str):
+                cleaned = value.replace("%", "").replace(",", ".").strip()
+                return float(cleaned) if cleaned else default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _to_int(value, default: int = 0) -> int:
+        try:
+            if value is None:
+                return default
+            if isinstance(value, str):
+                cleaned = value.replace(",", ".").strip()
+                return int(float(cleaned)) if cleaned else default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def _init_db(self):
         """Таблицы для новостей."""
         ai = self.db.ai_pk()
@@ -245,14 +269,19 @@ class NewsManager:
         """Sentiment-фичи для ML (текущее состояние)."""
         sent = self.cached_sentiment
         deep = self.cached_deep
+        news_distribution = sent.get("news_sentiment", {}).get("distribution", {}) or {}
+        twitter_distribution = sent.get("twitter_sentiment", {}).get("distribution", {}) or {}
         return {
-            "sentiment_score": float(sent.get("overall_score", 0)),
-            "sentiment_magnitude": float(sent.get("overall_magnitude", 0)),
-            "news_sentiment": float(sent.get("news_sentiment", {}).get("score", 0)),
-            "twitter_sentiment": float(sent.get("twitter_sentiment", {}).get("score", 0)),
-            "news_count_24h": int(sent.get("news_count", 0)),
-            "tweet_count_24h": int(sent.get("tweet_count", 0)),
-            "deep_sentiment_score": float(deep.get("overall_score", 0)) if deep.get("available") else 0,
+            "sentiment_score": self._to_float(sent.get("overall_score", 0)),
+            "sentiment_magnitude": self._to_float(sent.get("overall_magnitude", 0)),
+            "news_sentiment": self._to_float(sent.get("news_sentiment", {}).get("score", 0)),
+            "twitter_sentiment": self._to_float(sent.get("twitter_sentiment", {}).get("score", 0)),
+            "news_count_24h": self._to_int(sent.get("news_count", 0)),
+            "tweet_count_24h": self._to_int(sent.get("tweet_count", 0)),
+            "bull_count": self._to_int(news_distribution.get("bullish", 0)) + self._to_int(twitter_distribution.get("bullish", 0)),
+            "bear_count": self._to_int(news_distribution.get("bearish", 0)) + self._to_int(twitter_distribution.get("bearish", 0)),
+            "neutral_count": self._to_int(news_distribution.get("neutral", 0)) + self._to_int(twitter_distribution.get("neutral", 0)),
+            "deep_sentiment_score": self._to_float(deep.get("overall_score", 0)) if deep.get("available") else 0.0,
             "sentiment_data_freshness_min": (
                 (datetime.utcnow() - self.last_fetch).total_seconds() / 60
                 if self.last_fetch else 999
@@ -334,43 +363,56 @@ class NewsManager:
 
         # Fear & Greed Index
         fear_greed = await self.news.fetch_fear_greed()
+        fg_value = self._to_int((fear_greed or {}).get("value"), 0)
+        fg_change = self._to_float((fear_greed or {}).get("change"), 0.0)
+        fg_label = (fear_greed or {}).get("label", "")
 
         # Символы по умолчанию
         syms = symbols or ["BTC", "ETH", "SOL", "BNB", "XRP"]
 
         # Строим промпт
-        news_block = "\n".join(
-            f"  [{it.get('source','?')}] {it.get('title','')[:150]} "
-            f"(sentiment: {'+' if (it.get('sentiment_score') or 0) > 0 else ''}"
-            f"{it.get('sentiment_score', 0):.2f})"
-            for it in recent[:25]
-        ) or "  Нет свежих данных"
+        news_lines = []
+        for it in recent[:25]:
+            sentiment_score = self._to_float(it.get("sentiment_score"), 0.0)
+            sentiment_prefix = "+" if sentiment_score > 0 else ""
+            news_lines.append(
+                f"  [{it.get('source', '?')}] {it.get('title', '')[:150]} "
+                f"(sentiment: {sentiment_prefix}{sentiment_score:.2f})"
+            )
+        news_block = "\n".join(news_lines) or "  Нет свежих данных"
 
         fg_block = ""
         if fear_greed:
             fg_block = (
-                f"\nFear & Greed Index: {fear_greed['value']}/100 "
-                f"({fear_greed['label']}) "
-                f"{'↑' if fear_greed['change'] > 0 else '↓'}{abs(fear_greed['change'])} за день"
+                f"\nFear & Greed Index: {fg_value}/100 "
+                f"({fg_label}) "
+                f"{'↑' if fg_change > 0 else '↓'}{abs(fg_change)} за день"
             )
 
         sentiment = self.cached_sentiment
         portfolio_block = ""
         if portfolio_context:
+            balance = self._to_float(portfolio_context.get("balance"), 0.0)
+            open_positions = self._to_int(portfolio_context.get("open_positions"), 0)
+            daily_pnl = self._to_float(portfolio_context.get("daily_pnl"), 0.0)
+            active_strategies = portfolio_context.get("active_strategies", [])
+            if not isinstance(active_strategies, list):
+                active_strategies = [str(active_strategies)]
+            regime = str(portfolio_context.get("regime", "неизвестен"))
             portfolio_block = f"""
 Портфель бота:
-- Баланс: {portfolio_context.get('balance', '?')} USDT
-- Открытых позиций: {portfolio_context.get('open_positions', 0)}
-- Дневной PnL: {portfolio_context.get('daily_pnl', 0):+.2f} USDT
-- Активные стратегии: {', '.join(portfolio_context.get('active_strategies', []))}
-- Режим рынка: {portfolio_context.get('regime', 'неизвестен')}"""
+- Баланс: {balance:.2f} USDT
+- Открытых позиций: {open_positions}
+- Дневной PnL: {daily_pnl:+.2f} USDT
+- Активные стратегии: {', '.join(active_strategies) if active_strategies else 'нет'}
+- Режим рынка: {regime}"""
 
         prompt = f"""Ты — AI-аналитик торгового крипто-бота. Дай конкретные торговые рекомендации.
 
 ТЕКУЩИЙ SENTIMENT РЫНКА:
-- Общий: {sentiment.get('overall_score', 0):+.2f} (−1 медведь .. +1 бык)
-- Новости: {sentiment.get('news_sentiment', {}).get('score', 0):+.2f}
-- Twitter: {sentiment.get('twitter_sentiment', {}).get('score', 0):+.2f}{fg_block}
+- Общий: {self._to_float(sentiment.get('overall_score', 0)):+.2f} (−1 медведь .. +1 бык)
+- Новости: {self._to_float(sentiment.get('news_sentiment', {}).get('score', 0)):+.2f}
+- Twitter: {self._to_float(sentiment.get('twitter_sentiment', {}).get('score', 0)):+.2f}{fg_block}
 
 СВЕЖИЕ НОВОСТИ И ТВИТЫ (последние 4 часа):
 {news_block}
