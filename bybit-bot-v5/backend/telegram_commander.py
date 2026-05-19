@@ -651,22 +651,74 @@ class TelegramCommander:
         )
 
     async def _cmd_ai(self, upd, arg):
+        from datetime import datetime, timezone
         s   = self._get_state()
         rec = getattr(s, "_cached_ai_rec", None)
+
+        # Если нет кэша или устарел — запускаем получение прямо сейчас
         if not rec or not rec.get("available"):
-            await self.reply(upd, "ℹ️ AI рекомендации ещё не получены (обновляются каждые 30 мин)")
-            return
+            reason = (rec or {}).get("reason", "")
+            # Объясняем конкретную причину
+            if "Anthropic API" in reason:
+                await self.reply(upd,
+                    "❌ <b>AI недоступен</b>\n\n"
+                    "Не задан <code>ANTHROPIC_API_KEY</code> в .env\n"
+                    "Добавьте ключ и перезапустите бот",
+                    reply_markup=self._main_menu()
+                )
+                return
+            if not s.news_enabled:
+                await self.reply(upd,
+                    "ℹ️ Новостной модуль отключён (<code>NEWS_ENABLED=false</code>)\n"
+                    "AI рекомендации требуют новостных данных",
+                    reply_markup=self._main_menu()
+                )
+                return
+            # Пробуем получить прямо сейчас
+            await self.reply(upd, "⏳ Запрашиваю AI рекомендации...")
+            try:
+                balance = s.paper.balance if s.paper_mode else 0
+                portfolio_ctx = {
+                    "balance": balance,
+                    "open_positions": s.risk_manager.open_positions_count,
+                    "daily_pnl": s.risk_manager.daily_pnl,
+                    "active_strategies": [sid for sid, st in s.strategies.items() if st.enabled],
+                }
+                rec = await s.news_manager.get_trading_recommendations(portfolio_context=portfolio_ctx)
+                s._cached_ai_rec = rec
+                s._last_ai_rec = datetime.utcnow()
+            except Exception as e:
+                await self.reply(upd, f"❌ Ошибка получения AI рекомендаций: {e}",
+                                 reply_markup=self._main_menu())
+                return
+            if not rec or not rec.get("available"):
+                reason2 = (rec or {}).get("reason", "нет свежих данных")
+                await self.reply(upd,
+                    f"ℹ️ AI рекомендации недоступны\n<i>Причина: {reason2}</i>\n\n"
+                    "Попробуйте через несколько минут — новостной модуль собирает данные каждые 15 мин",
+                    reply_markup=self._main_menu()
+                )
+                return
+
         action = rec.get("action", "?").upper()
         risk   = rec.get("risk_level", "?")
-        reason = rec.get("reasoning", "")[:300]
+        reason = rec.get("reasoning", "")[:400]
         fg     = rec.get("fear_greed", {})
         fg_val = fg.get("value","?") if fg else "?"
         fg_lbl = fg.get("label","") if fg else ""
+        recs   = rec.get("recommendations", [])
+        last_upd = getattr(s, "_last_ai_rec", None)
+        upd_str = last_upd.strftime("%H:%M UTC") if last_upd else "?"
+
+        risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "extreme": "🔴"}.get(risk, "⚪")
+        rec_block = ("\n" + "\n".join(f"• {r}" for r in recs[:4])) if recs else ""
+
         await self.reply(upd,
-            f"🧠 <b>AI Рекомендация</b>\n\n"
+            f"🧠 <b>AI Рекомендация</b> <i>({upd_str})</i>\n\n"
             f"Действие: <b>{action}</b>\n"
-            f"Риск: <b>{risk}</b>\n"
-            f"Fear &amp; Greed: <b>{fg_val}</b> {fg_lbl}\n\n"
+            f"{risk_emoji} Риск: <b>{risk}</b>\n"
+            f"Fear &amp; Greed: <b>{fg_val}</b> {fg_lbl}"
+            + rec_block + "\n\n"
             f"<i>{reason}</i>",
             reply_markup=self._main_menu()
         )
