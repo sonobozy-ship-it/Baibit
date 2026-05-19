@@ -88,7 +88,7 @@ Type=simple
 User=root
 WorkingDirectory=${APP_DIR}/bybit-bot-v5/backend
 EnvironmentFile=${APP_DIR}/bybit-bot-v5/backend/.env
-ExecStart=${APP_DIR}/bybit-bot-v5/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+ExecStart=${APP_DIR}/bybit-bot-v5/venv/bin/python runner.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -107,7 +107,7 @@ echo ""
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║              ✅  Baibit запущен!                     ║"
 echo "╠══════════════════════════════════════════════════════╣"
-echo "║  Веб-панель:  http://31.172.77.105:8000              ║"
+echo "║  Telegram:    управление через бота                  ║"
 echo "║  Логи:        journalctl -u baibit -f                ║"
 echo "║  Статус:      systemctl status baibit                ║"
 echo "║  Стоп:        systemctl stop baibit                  ║"
