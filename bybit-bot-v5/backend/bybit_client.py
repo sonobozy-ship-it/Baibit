@@ -259,16 +259,24 @@ class BybitClient:
             logger.error(f"Ошибка тикера {symbol}: {e}")
             return {}
 
+    # Не крипто — металлы, стейблкоины и прочие CFD на Bybit
+    _NON_CRYPTO = frozenset({
+        "XAUUSDT", "XAGUSDT", "XAUTUSDT",            # золото, серебро
+        "USDCUSDT", "BUSDUSDT", "FDUSDUSDT",          # стейблкоины
+        "DAIUSDT", "TUSDUSDT", "USDDUSDT",
+    })
+
     def get_top_usdt_symbols(
         self,
         top_n: int = 30,
         exclude: set = None,
-        min_volume_usdt: float = 5_000_000,
+        min_trades: int = 50_000,      # минимум 50к сделок за 24ч (не USD-объём!)
     ) -> List[str]:
         """
-        Возвращает топ-N USDT-перп символов по объёму за 24ч.
-        Отфильтровывает малоликвидные пары (< min_volume_usdt).
-        exclude — символы которые уже заняты другими стратегиями.
+        Возвращает топ-N ликвидных USDT-перп символов.
+        Сортировка по volume24h (кол-во контрактов) — не turnover, т.к.
+        metals/stablecoins искусственно завышают USD-объём.
+        Исключает металлы, стейблкоины, пары из exclude.
         """
         try:
             res = self.session.get_tickers(category="linear")
@@ -281,10 +289,11 @@ class BybitClient:
                 sym = t.get("symbol", "")
                 if not sym.endswith("USDT"):
                     continue
-                vol = float(t.get("turnover24h") or t.get("volume24h") or 0)
-                if vol < min_volume_usdt:
+                if sym in self._NON_CRYPTO or sym in exclude:
                     continue
-                if sym in exclude:
+                # Фильтруем по числу сделок (count24h), fallback — volume24h
+                vol = float(t.get("count24h") or t.get("volume24h") or 0)
+                if vol < min_trades:
                     continue
                 candidates.append((sym, vol))
             candidates.sort(key=lambda x: x[1], reverse=True)

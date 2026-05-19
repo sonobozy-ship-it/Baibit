@@ -171,6 +171,8 @@ class PaperTrader:
             "closed_at": datetime.utcnow().isoformat(),
         }
         self.trades_history.append(trade)
+        if len(self.trades_history) > 5000:
+            self.trades_history = self.trades_history[-5000:]
         self._save_state()
         logger.info(f"[PAPER] CLOSE {symbol} @ {exit_price} → {pnl_usd:+.2f} USDT ({reason})")
         return trade

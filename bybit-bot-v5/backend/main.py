@@ -338,61 +338,41 @@ def deactivate_scalp_mode():
 
 async def auto_select_symbols():
     """
-    Авто-назначает символы ВСЕМ стратегиям по топу объёма с Bybit.
-    Вызывается при старте и периодически (каждые 4 часа).
-    Стратегии с открытой позицией не трогаются.
+    Авто-назначает символы ТОЛЬКО скальперам SC_* по топу объёма с Bybit.
+    Основные стратегии S1-S14 НИКОГДА не трогаются — у них параметры
+    заточены под конкретные рынки (S1=BTC-тренд, S5=DOGE-волатильность и т.д.).
     Если AUTO_SELECT_SYMBOLS=false — пропускаем.
     """
     if os.getenv("AUTO_SELECT_SYMBOLS", "true").lower() == "false":
         return
     if not state.bybit:
         return
-
-    main_sids = sorted(
-        [sid for sid in state.strategies if not sid.startswith("SC_")]
-    )
-    n_main  = len(main_sids)
-    n_scalp = int(os.getenv("SCALP_TOP_N", "15"))
-    total   = n_main + n_scalp + 10   # +10 запас
-
-    top = state.bybit.get_top_usdt_symbols(top_n=total)
-    if len(top) < n_main:
-        logger.warning("[SymbolSelect] Не удалось получить достаточно символов, пропускаем")
+    if not state.scalp_active:
         return
 
-    used: set = set()
+    n_scalp = int(os.getenv("SCALP_TOP_N", "15"))
 
-    # Основные стратегии — первые N самых ликвидных
-    assigned_main = []
-    for sid in main_sids:
-        strat = state.strategies[sid]
-        if strat.current_position:
-            used.add(strat.symbol)   # занят открытой позицией, не меняем
-            continue
-        for sym in top:
-            if sym not in used:
-                if strat.symbol != sym:
-                    logger.info(f"[SymbolSelect] {sid}: {strat.symbol} → {sym}")
-                    strat.symbol = sym
-                used.add(sym)
-                assigned_main.append(f"{sid}={sym}")
-                break
+    # Символы занятые основными стратегиями — скальперы не берут их
+    used = {strat.symbol for sid, strat in state.strategies.items()
+            if not sid.startswith("SC_")}
 
-    # Скальперы — следующий пул
-    scalp_pool = [s for s in top if s not in used][:n_scalp]
-    if state.scalp_active and scalp_pool:
-        # Пересоздаём SC_* без открытых позиций
-        to_remove = [
-            sid for sid, strat in state.strategies.items()
-            if sid.startswith("SC_") and not strat.current_position
-        ]
-        for sid in to_remove:
-            del state.strategies[sid]
-        activate_scalp_mode(symbols=scalp_pool)
+    scalp_pool = state.bybit.get_top_usdt_symbols(top_n=n_scalp + 10, exclude=used)
+    scalp_pool = scalp_pool[:n_scalp]
 
-    logger.info(
-        f"[SymbolSelect] Готово: {len(assigned_main)} осн. + {len(scalp_pool)} скальперов"
-    )
+    if not scalp_pool:
+        logger.warning("[SymbolSelect] Bybit вернул пустой список, оставляем текущие скальперы")
+        return
+
+    # Пересоздаём SC_* без открытых позиций
+    to_remove = [
+        sid for sid, strat in list(state.strategies.items())
+        if sid.startswith("SC_") and not strat.current_position
+    ]
+    for sid in to_remove:
+        del state.strategies[sid]
+
+    activate_scalp_mode(symbols=scalp_pool)
+    logger.info(f"[SymbolSelect] Скальперы обновлены: {scalp_pool[:5]}... ({len(scalp_pool)} пар)")
 
 
 def _get_h1_cached(symbol: str) -> Optional[object]:
@@ -728,10 +708,15 @@ async def _execute_fusion_signal(
     sid = "FUSION"
 
     # Проверяем, нет ли уже открытой позиции на этом символе через любую стратегию
-    for strat in state.strategies.values():
-        if strat.symbol == sym and strat.current_position:
-            logger.debug(f"[Fusion] {sym}: уже открыта позиция через {strat.ID}, пропускаем fusion")
-            return
+    # Snapshot стратегий под локом чтобы избежать race condition
+    async with state.trading_loop_lock:
+        existing = any(
+            s.symbol == sym and s.current_position
+            for s in state.strategies.values()
+        )
+    if existing:
+        logger.debug(f"[Fusion] {sym}: уже открыта позиция, пропускаем fusion")
+        return
 
     # Риск-менеджер
     check = state.risk_manager.can_open_trade(sid, balance)
@@ -958,7 +943,10 @@ async def trading_loop():
                     )
                     balance = round(state.paper.balance + locked, 4)
                 elif state.bybit and not getattr(state.bybit, "public_only", False):
-                    balance = state.bybit.get_balance("USDT")
+                    loop = asyncio.get_running_loop()
+                    balance = await loop.run_in_executor(
+                        None, lambda: state.bybit.get_balance("USDT")
+                    )
                 else:
                     balance = 0
                 state.risk_manager.check_daily_reset(balance)

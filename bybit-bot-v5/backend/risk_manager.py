@@ -137,7 +137,7 @@ class RiskManager:
         else:
             effective_sl_dist = signal_sl_dist
 
-        if effective_sl_dist == 0:
+        if effective_sl_dist == 0 or entry_price <= 0:
             return 0
 
         qty = risk_usd / (effective_sl_dist * entry_price)
