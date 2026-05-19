@@ -259,6 +259,40 @@ class BybitClient:
             logger.error(f"Ошибка тикера {symbol}: {e}")
             return {}
 
+    def get_top_usdt_symbols(
+        self,
+        top_n: int = 30,
+        exclude: set = None,
+        min_volume_usdt: float = 5_000_000,
+    ) -> List[str]:
+        """
+        Возвращает топ-N USDT-перп символов по объёму за 24ч.
+        Отфильтровывает малоликвидные пары (< min_volume_usdt).
+        exclude — символы которые уже заняты другими стратегиями.
+        """
+        try:
+            res = self.session.get_tickers(category="linear")
+            if res["retCode"] != 0:
+                return []
+            items = res["result"]["list"]
+            exclude = exclude or set()
+            candidates = []
+            for t in items:
+                sym = t.get("symbol", "")
+                if not sym.endswith("USDT"):
+                    continue
+                vol = float(t.get("turnover24h") or t.get("volume24h") or 0)
+                if vol < min_volume_usdt:
+                    continue
+                if sym in exclude:
+                    continue
+                candidates.append((sym, vol))
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            return [sym for sym, _ in candidates[:top_n]]
+        except Exception as e:
+            logger.error(f"get_top_usdt_symbols: {e}")
+            return []
+
     def get_orderbook(self, symbol: str, limit: int = 25) -> Dict:
         """Получить ордербук (для slippage и orderbook фич)."""
         try:

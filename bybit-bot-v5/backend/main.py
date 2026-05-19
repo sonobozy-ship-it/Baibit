@@ -279,23 +279,48 @@ def _restore_paper_positions():
     logger.info("🔄 ContinuousTrainer инициализирован (порог: 300 сделок)")
 
 
-def activate_scalp_mode():
+def _scalp_sid(symbol: str) -> str:
+    """SC_BTC из BTCUSDT, SC_SHIB из 1000SHIBUSDT и т.д."""
+    base = symbol.replace("USDT", "")
+    if base.startswith("1000"):
+        base = base[4:]   # 1000SHIB → SHIB
+    return f"SC_{base[:4]}"
+
+
+def activate_scalp_mode(symbols: List[str] = None):
     """
-    Создаёт экземпляры ScalperPro для каждого символа из SCALP_SYMBOLS
-    и регистрирует их в state.strategies как SC_XXX.
-    Вызывается при старте boost-режима с mode='scalp' или вручную.
+    Создаёт ScalperPro для каждого символа и регистрирует как SC_XXX.
+    symbols — явный список; если None, авто-выбирает топ по объёму с Bybit
+    (или SCALP_SYMBOLS как резервный вариант).
     """
+    # Определяем список символов
+    if symbols:
+        chosen = symbols
+    else:
+        # Символы уже занятые основными стратегиями
+        used = {strat.symbol for sid, strat in state.strategies.items()
+                if not sid.startswith("SC_")}
+        top_n = int(os.getenv("SCALP_TOP_N", "15"))
+        if state.bybit:
+            chosen = state.bybit.get_top_usdt_symbols(top_n=top_n, exclude=used)
+        else:
+            chosen = []
+        if not chosen:
+            # Резервный список (уже без конфликтов с S1-S14)
+            chosen = SCALP_SYMBOLS
+
     added = []
-    for sym in SCALP_SYMBOLS:
-        sid = f"SC_{sym[:3]}"
+    for sym in chosen:
+        sid = _scalp_sid(sym)
         if sid not in state.strategies:
             strat = ScalperProStrategy(symbol=sym)
             state.strategies[sid] = strat
             added.append(sid)
         else:
+            state.strategies[sid].symbol  = sym
             state.strategies[sid].enabled = True
     state.scalp_active = True
-    logger.info(f"⚡ Scalp Mode: добавлено {len(added)} скальперов → {added}")
+    logger.info(f"⚡ Scalp Mode: {len(added)} скальперов → {added}")
     return added
 
 
@@ -309,6 +334,65 @@ def deactivate_scalp_mode():
     state.scalp_active = False
     logger.info(f"⚡ Scalp Mode отключён: {deactivated}")
     return deactivated
+
+
+async def auto_select_symbols():
+    """
+    Авто-назначает символы ВСЕМ стратегиям по топу объёма с Bybit.
+    Вызывается при старте и периодически (каждые 4 часа).
+    Стратегии с открытой позицией не трогаются.
+    Если AUTO_SELECT_SYMBOLS=false — пропускаем.
+    """
+    if os.getenv("AUTO_SELECT_SYMBOLS", "true").lower() == "false":
+        return
+    if not state.bybit:
+        return
+
+    main_sids = sorted(
+        [sid for sid in state.strategies if not sid.startswith("SC_")]
+    )
+    n_main  = len(main_sids)
+    n_scalp = int(os.getenv("SCALP_TOP_N", "15"))
+    total   = n_main + n_scalp + 10   # +10 запас
+
+    top = state.bybit.get_top_usdt_symbols(top_n=total)
+    if len(top) < n_main:
+        logger.warning("[SymbolSelect] Не удалось получить достаточно символов, пропускаем")
+        return
+
+    used: set = set()
+
+    # Основные стратегии — первые N самых ликвидных
+    assigned_main = []
+    for sid in main_sids:
+        strat = state.strategies[sid]
+        if strat.current_position:
+            used.add(strat.symbol)   # занят открытой позицией, не меняем
+            continue
+        for sym in top:
+            if sym not in used:
+                if strat.symbol != sym:
+                    logger.info(f"[SymbolSelect] {sid}: {strat.symbol} → {sym}")
+                    strat.symbol = sym
+                used.add(sym)
+                assigned_main.append(f"{sid}={sym}")
+                break
+
+    # Скальперы — следующий пул
+    scalp_pool = [s for s in top if s not in used][:n_scalp]
+    if state.scalp_active and scalp_pool:
+        # Пересоздаём SC_* без открытых позиций
+        to_remove = [
+            sid for sid, strat in state.strategies.items()
+            if sid.startswith("SC_") and not strat.current_position
+        ]
+        for sid in to_remove:
+            del state.strategies[sid]
+        activate_scalp_mode(symbols=scalp_pool)
+
+    logger.info(
+        f"[SymbolSelect] Готово: {len(assigned_main)} осн. + {len(scalp_pool)} скальперов"
+    )
 
 
 def _get_h1_cached(symbol: str) -> Optional[object]:
@@ -461,6 +545,16 @@ async def orchestrator_loop():
 # ============================================================
 # Авто-обучение (фоновая задача)
 # ============================================================
+async def symbol_refresh_loop():
+    """Обновляет символы стратегий каждые 4 часа по топу объёма."""
+    while True:
+        await asyncio.sleep(4 * 3600)
+        try:
+            await auto_select_symbols()
+        except Exception as e:
+            logger.warning(f"[SymbolRefresh] Ошибка: {e}")
+
+
 async def auto_train_loop():
     """Проверяет и запускает переобучение каждые 30 минут."""
     logger.info("🔄 Auto-train loop запущен (интервал: 30 мин, порог: 300 сделок)")
@@ -1717,6 +1811,11 @@ async def lifespan(app: FastAPI):
     if os.getenv("SCALP_DEFAULT", "true").lower() != "false":
         activate_scalp_mode()
         logger.info("⚡ ScalperPro активирован автоматически (SCALP_DEFAULT=true)")
+
+    # ── Авто-выбор символов по топу объёма (для всех стратегий + скальперов) ──
+    asyncio.create_task(auto_select_symbols())
+    asyncio.create_task(symbol_refresh_loop())
+    logger.info("📊 Авто-выбор символов по объёму запущен (обновление каждые 4ч)")
 
     # ── Автостарт бота ────────────────────────────────────────────────────────
     if os.getenv("AUTO_START", "false").lower() == "true":

@@ -180,8 +180,10 @@ class ScalperProStrategy(BaseStrategy):
     _BB_PERIOD  = 20
     _BB_K       = 2.0
     _VOL_MULT   = 1.0
-    _RSI_OS     = 42   # перепроданность → BUY
-    _RSI_OB     = 58   # перекупленность → SELL
+    _RSI_OS     = 45   # перепроданность → BUY  (было 42, расширено для большего числа сигналов)
+    _RSI_OB     = 55   # перекупленность → SELL (было 58)
+    _RSI_WINDOW = 3    # RSI-кросс засчитывается если был в последних N свечах
+    _BB_TOUCH   = 0.02 # цена считается "у полосы" если в пределах 2% (было 0.6%)
     _MIN_BARS   = 60
 
     def __init__(self, symbol: str = "DOGEUSDT", **kwargs):
@@ -221,22 +223,28 @@ class ScalperProStrategy(BaseStrategy):
 
         c0        = close.iloc[-1]
         ef0, es0  = ema_fast.iloc[-1], ema_slow.iloc[-1]
-        r0, r1    = rsi.iloc[-1], rsi.iloc[-2]
+        # RSI: смотрим последние _RSI_WINDOW свечей — засчитываем если кросс был недавно
+        w = self._RSI_WINDOW
+        rsi_vals = [rsi.iloc[-i] for i in range(1, w + 2)]  # [r0, r1, r2, ...]
+        r0 = rsi_vals[0]
+        rsi_was_os  = any(v < self._RSI_OS  for v in rsi_vals[1:])  # был под порогом
+        rsi_was_ob  = any(v > self._RSI_OB  for v in rsi_vals[1:])  # был над порогом
         bbu0, bbl0 = bb_up.iloc[-1], bb_lo.iloc[-1]
         vol_ratio  = volume.iloc[-1] / (avg_vol.iloc[-1] + 1e-9)
+        bb_tol = self._BB_TOUCH
 
         buy  = (
             ef0 > es0
             and c0 > es0
-            and r1 < self._RSI_OS and r0 >= self._RSI_OS
-            and c0 <= bbl0 * 1.006
+            and rsi_was_os and r0 >= self._RSI_OS
+            and c0 <= bbl0 * (1 + bb_tol)
             and vol_ratio >= self._VOL_MULT
         )
         sell = (
             ef0 < es0
             and c0 < es0
-            and r1 > self._RSI_OB and r0 <= self._RSI_OB
-            and c0 >= bbu0 * 0.994
+            and rsi_was_ob and r0 <= self._RSI_OB
+            and c0 >= bbu0 * (1 - bb_tol)
             and vol_ratio >= self._VOL_MULT
         )
 
@@ -268,6 +276,7 @@ class ScalperProStrategy(BaseStrategy):
             tp = round(entry * (1 - self.take_profit_pct / 100), 8)
 
         # ── Confidence ────────────────────────────────────────────────────
+        r1 = rsi_vals[1] if len(rsi_vals) > 1 else r0
         confidence = self._calc_confidence(r0, r1, vol_ratio, action)
         mtf_bonus = 0.0
         if h1_ctx["direction"] == action:
