@@ -191,7 +191,7 @@ class RiskManager:
         if self.open_positions_count >= pos_limit:
             return {
                 "allowed": False,
-                "reason": f"Достигнут лимит позиций ({self.max_open_positions})"
+                "reason": f"Достигнут лимит позиций ({pos_limit})"
             }
 
         # 6. Cooldown стратегии после убытка

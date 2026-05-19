@@ -148,7 +148,7 @@ class BaseStrategy(ABC):
             "tp": tp,
             "initial_sl": sl,  # хранится для корректного R-multiple после trailing/BE
             "be_moved": False,
-            "opened_at": pd.Timestamp.now(),
+            "opened_at": pd.Timestamp.utcnow(),
         }
 
     def close_position(self, exit_price: float, qty: float = 1.0, fees_pct: float = 0.06) -> Dict:

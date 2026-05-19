@@ -561,9 +561,10 @@ class DragonflyGoldStrategy(BaseStrategy):
         # ── Расчёт индикаторов ────────────────────────────────────────────────
 
         # Ichimoku
-        ichi = ta.ichimoku(df["high"], df["low"], df["close"],
-                           tenkan=9, kijun=26, senkou=52)
-        df   = df.join(ichi)
+        ichi_result = ta.ichimoku(df["high"], df["low"], df["close"],
+                                  tenkan=9, kijun=26, senkou=52)
+        ichi_df = ichi_result[0] if isinstance(ichi_result, tuple) else ichi_result
+        df = df.join(ichi_df)
 
         # Bollinger Bands
         bb   = ta.bbands(df["close"], length=20, std=2)

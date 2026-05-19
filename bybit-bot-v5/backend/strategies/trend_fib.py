@@ -389,7 +389,7 @@ class TrendFibonacciStrategy(BaseStrategy):
         return min(p for _, p in sl), max(p for _, p in sh)
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 60:
+        if len(df) < 220:
             return None
 
         # ── Индикаторы ──

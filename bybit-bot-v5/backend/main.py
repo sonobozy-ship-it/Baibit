@@ -512,7 +512,7 @@ async def _execute_fusion_signal(
         try:
             df = chart_df
             if df is not None and not df.empty:
-                orderbook   = state.bybit.get_orderbook(sym, limit=25)
+                orderbook   = state.bybit.get_orderbook(sym, limit=25) if state.bybit else {}
                 market_meta = state.bybit.get_market_meta(sym)
                 features = state.feature_extractor.extract(
                     df=df,
@@ -680,7 +680,7 @@ async def trading_loop():
                     await asyncio.sleep(2)
                     continue
 
-                balance = state.bybit.get_balance("USDT") if not state.paper_mode else state.paper.balance
+                balance = (state.bybit.get_balance("USDT") if state.bybit else 0) if not state.paper_mode else state.paper.balance
                 state.risk_manager.check_daily_reset(balance)
 
                 # Получаем актуальный sentiment с проверкой свежести (не старше 30 мин)
@@ -1210,6 +1210,7 @@ async def trading_loop():
                                     )
                                     # Drift monitor
                                     with state.db_pool.connection() as conn:
+                                        conn.row_factory = __import__("sqlite3").Row
                                         row = conn.execute(
                                             "SELECT ml_prediction FROM signal_snapshots WHERE id = ?",
                                             (snapshot_id,),
