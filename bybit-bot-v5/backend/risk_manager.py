@@ -104,18 +104,33 @@ class RiskManager:
         entry_price: float,
         stop_loss_price: float,
         leverage: int = 1,
-        min_notional: float = 5.0,  # минимальная стоимость позиции в USDT
+        min_notional: float = 5.0,
+        atr: float = 0.0,           # ATR от рынка (если 0 — не используется)
+        atr_multiplier: float = 1.5, # минимальный SL = ATR × multiplier
     ) -> float:
         """
-        Расчёт размера позиции по адаптивному риску.
+        Расчёт размера позиции по рыночной волатильности (ATR).
         При срабатывании SL теряем adaptive_risk_pct% от баланса.
+        ATR не даёт занизить дистанцию SL ниже реальной волатильности,
+        что предотвращает открытие слишком больших позиций на тихом рынке.
         """
         risk_pct = self.adaptive_risk_pct(balance)
         risk_usd = balance * (risk_pct / 100)
-        sl_distance = abs(entry_price - stop_loss_price) / entry_price
-        if sl_distance == 0:
+
+        signal_sl_dist = abs(entry_price - stop_loss_price) / entry_price if entry_price else 0
+
+        # Рыночная дистанция SL по ATR (минимальный порог волатильности)
+        if atr and atr > 0 and entry_price > 0:
+            atr_sl_dist = (atr * atr_multiplier) / entry_price
+            # Используем максимум — нельзя занижать риск ниже рыночной волатильности
+            effective_sl_dist = max(signal_sl_dist, atr_sl_dist)
+        else:
+            effective_sl_dist = signal_sl_dist
+
+        if effective_sl_dist == 0:
             return 0
-        qty = risk_usd / (sl_distance * entry_price)
+
+        qty = risk_usd / (effective_sl_dist * entry_price)
 
         # Ограничиваем маржу: не более 1% баланса на сделку
         # (при балансе 180 USDT → max маржа 1.8 USDT)
@@ -125,7 +140,6 @@ class RiskManager:
             qty = max_notional / entry_price
 
         qty = round(qty, 4)
-        # Проверяем минимальный порог
         if qty * entry_price < min_notional:
             return 0
         return qty

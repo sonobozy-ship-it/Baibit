@@ -1008,12 +1008,24 @@ async def trading_loop():
                             continue
                         logger.info(f"{sid}: 📐 Kelly size: qty={qty}, risk={kelly_res['risk_pct']}%")
                     else:
+                        # ATR из текущих свечей для рыночно-адаптивного размера позиции
+                        _atr_val = 0.0
+                        try:
+                            import pandas_ta as _ta
+                            _atr_s = _ta.atr(df["high"], df["low"], df["close"], length=14)
+                            if _atr_s is not None and len(_atr_s) > 0 and not _atr_s.iloc[-1] != _atr_s.iloc[-1]:
+                                _atr_val = float(_atr_s.iloc[-1])
+                        except Exception:
+                            pass
                         qty = state.risk_manager.calculate_position_size(
                             balance=balance,
                             entry_price=signal.entry_price,
                             stop_loss_price=signal.stop_loss,
                             leverage=effective_leverage,
+                            atr=_atr_val,
                         )
+                        if _atr_val:
+                            logger.debug(f"{sid}: ATR={_atr_val:.6f} → qty={qty}")
 
                     # ============== Открытие позиции ==============
                     if state.paper_mode:
