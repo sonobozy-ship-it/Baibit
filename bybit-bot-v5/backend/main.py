@@ -220,6 +220,24 @@ def init_strategies():
     # Восстановление открытых бумажных позиций после перезапуска
     _restore_paper_positions()
 
+    # Восстановление счётчиков стратегий из БД (чтобы не забывать сделки после рестарта)
+    try:
+        stats_list = state.journal.get_stats_by_strategy()
+        stats_map = {s["strategy_id"]: s for s in stats_list}
+        restored = []
+        for sid, strat in state.strategies.items():
+            if sid in stats_map:
+                st = stats_map[sid]
+                strat.trades = st["trades"]
+                strat.wins   = st["wins"]
+                strat.losses = st["losses"]
+                strat.pnl    = st["total_pnl"]
+                restored.append(f"{sid}:{st['trades']}сд")
+        if restored:
+            logger.info(f"[StatRestore] Восстановлено из БД: {', '.join(restored)}")
+    except Exception as e:
+        logger.warning(f"[StatRestore] Не удалось восстановить статистику: {e}")
+
 
 def _restore_paper_positions():
     """Восстанавливает current_position стратегий из сохранённого paper state."""
