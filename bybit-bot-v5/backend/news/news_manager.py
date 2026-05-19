@@ -56,7 +56,7 @@ class NewsManager:
                 bear_hits     INT,
                 item_type     TEXT,
                 extra_json    TEXT,
-                UNIQUE(source, url)
+                UNIQUE (source, url)
             )""",
             f"""CREATE TABLE IF NOT EXISTS sentiment_history (
                 id                   {ai},

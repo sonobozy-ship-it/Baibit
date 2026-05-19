@@ -243,11 +243,11 @@ class MLDataStore:
                     accuracy, precision_val, recall_val, f1_score, roc_auc,
                     feature_importance_json, hyperparams_json, file_path, active
                 ) VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?)
-                ON DUPLICATE KEY UPDATE
-                    trained_at=VALUES(trained_at), samples_count=VALUES(samples_count),
-                    accuracy=VALUES(accuracy), f1_score=VALUES(f1_score),
-                    roc_auc=VALUES(roc_auc), file_path=VALUES(file_path),
-                    active=VALUES(active)
+                AS new_vals ON DUPLICATE KEY UPDATE
+                    trained_at=new_vals.trained_at, samples_count=new_vals.samples_count,
+                    accuracy=new_vals.accuracy, f1_score=new_vals.f1_score,
+                    roc_auc=new_vals.roc_auc, file_path=new_vals.file_path,
+                    active=new_vals.active
             """) if self.pool.is_mysql else self.pool.adapt("""
                 INSERT OR REPLACE INTO ml_models (
                     version, strategy_id, model_type, trained_at, samples_count,
