@@ -81,15 +81,15 @@ open('$PAPER_STATE', 'w').write(json.dumps(d, indent=2))
 "
         echo "   ⚠️  Paper state сброшен (старый формат). Баланс: ${INIT_BAL} USDT"
     else
-        # 8b. Обновляем баланс до PAPER_INITIAL_BALANCE (сохраняем историю сделок)
+        # 8b. Сохраняем текущий баланс, обновляем только initial_balance если не задан
         python3 -c "
 import json
 data = json.load(open('$PAPER_STATE'))
-old_bal = data.get('balance', 0)
-data['balance'] = $INIT_BAL
-data['initial_balance'] = $INIT_BAL
+cur_bal = data.get('balance', $INIT_BAL)
+if 'initial_balance' not in data:
+    data['initial_balance'] = $INIT_BAL
 open('$PAPER_STATE', 'w').write(json.dumps(data, indent=2))
-print(f'   ✅ Paper баланс: {old_bal:.2f} → $INIT_BAL USDT (история сохранена)')
+print(f'   ✅ Paper баланс сохранён: {cur_bal:.2f} USDT (история сохранена)')
 " 2>/dev/null || true
     fi
 else
