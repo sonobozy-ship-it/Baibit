@@ -65,16 +65,24 @@ _SYSTEM_PROMPT = """
 {"cmd": "alert", "level": "info|warning|critical", "message": "..."}  — только оповещение
 {"cmd": "wait"}                               — ничего не делать в этом цикле
 
+== ВАЖНО: БАЛАНС В ФЬЮЧЕРСАХ ==
+- `balance_usdt` — свободные средства (не заблокированы)
+- `equity_usdt` — реальный капитал = balance + locked_margin (ЭТО НАСТОЯЩИЙ БАЛАНС)
+- `locked_margin` — маржа, заблокированная в открытых позициях
+- Если locked_margin > 0, balance будет маленьким — ЭТО НОРМАЛЬНО, не паникуй!
+- Оценивай просадку только по equity_usdt, НЕ по balance_usdt
+
 == ПРАВИЛА ПРИНЯТИЯ РЕШЕНИЙ ==
-1. Дневной PnL < -15% от начального баланса → stop + alert critical
+1. equity_usdt упал на > 15% от стартового баланса за день → stop + alert critical
 2. WR последних 20 сделок < 48% → set_ml_mode strict + alert warning
 3. WR последних 20 сделок > 70% → scalp_on (если не активен) + alert info
 4. Boost: просадка от пика > 20% → boost_stop + alert warning
 5. Boost: цель достигнута → boost_stop + alert info "🎉 Цель достигнута!"
 6. Нет сделок > 2 часов при запущенном боте → alert warning (возможна проблема)
 7. 5+ убытков подряд по одной стратегии → disable_strategy + alert warning
-8. Баланс < $2 → stop + alert critical (нельзя торговать)
-9. Если всё хорошо → wait (не вмешивайся без причины)
+8. equity_usdt < $2 → stop + alert critical (нельзя торговать)
+9. Если balance_usdt мал но equity_usdt нормальный — открыта позиция, всё ОК → wait
+10. Если всё хорошо → wait (не вмешивайся без причины)
 
 == ФОРМАТ ОТВЕТА (строго JSON) ==
 {
@@ -452,6 +460,9 @@ class ClaudeOrchestrator:
             "bot_running":      s.get("bot_running"),
             "paper_mode":       s.get("paper_mode"),
             "balance_usdt":     s.get("balance", {}).get("usdt"),
+            "equity_usdt":      s.get("balance", {}).get("equity_usdt"),
+            "locked_margin":    s.get("balance", {}).get("locked_margin", 0),
+            "balance_note":     s.get("balance", {}).get("note", ""),
             "open_positions":   s.get("open_count", 0),
             "positions_detail": [
                 {"strategy": p["strategy"], "symbol": p["symbol"], "side": p["side"]}

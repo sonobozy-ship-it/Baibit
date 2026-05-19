@@ -2492,11 +2492,20 @@ async def full_status():
             balance_info = {"error": str(e)}
     elif state.paper_mode:
         ps = state.paper.get_stats()
+        locked_margin = sum(
+            pos.get("margin", pos.get("qty", 0) * pos.get("entry_price", 0) / max(pos.get("leverage", 1), 1))
+            for pos in state.paper.positions.values()
+        )
+        avail = round(ps.get("balance", 0), 4)
+        equity = round(avail + locked_margin, 4)
         balance_info = {
-            "usdt":       round(ps.get("balance", 0), 4),
-            "source":     "paper",
-            "paper_pnl":  round(ps.get("total_pnl", 0), 4),
-            "paper_trades": ps.get("trades", 0),
+            "usdt":           avail,
+            "equity_usdt":    equity,
+            "locked_margin":  round(locked_margin, 4),
+            "note":           "usdt=свободные средства; equity=usdt+заблокированная_маржа (реальный баланс)",
+            "source":         "paper",
+            "paper_pnl":      round(ps.get("total_pnl", 0), 4),
+            "paper_trades":   ps.get("trades", 0),
         }
     else:
         balance_info = {"usdt": None, "source": "not_connected"}
