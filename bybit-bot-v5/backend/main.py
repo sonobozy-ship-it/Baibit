@@ -1564,6 +1564,16 @@ async def lifespan(app: FastAPI):
         state.paper_mode = True
         logger.info("📄 Paper Trading Mode активирован (PAPER_TRADING=true)")
 
+    # ── Read-only Bybit для рыночных данных (paper mode без API ключей) ───────
+    # Свечи, тикеры, ордербук — публичные эндпоинты, не требуют авторизации.
+    # Торговые операции в paper mode идут через PaperTrader, а не через Bybit.
+    if not state.bybit and state.paper_mode:
+        try:
+            state.bybit = BybitClient("", "", testnet=False)
+            logger.info("📡 Bybit read-only подключён для рыночных данных (paper mode)")
+        except Exception as _ro_e:
+            logger.warning(f"Bybit read-only init: {_ro_e}")
+
     # ── Scalp Mode по умолчанию ───────────────────────────────────────────────
     if os.getenv("SCALP_DEFAULT", "true").lower() != "false":
         activate_scalp_mode()

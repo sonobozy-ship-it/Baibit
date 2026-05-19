@@ -16,18 +16,24 @@ class BybitClient:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
         self.session = HTTP(
             testnet=testnet,
-            api_key=api_key,
-            api_secret=api_secret,
+            api_key=api_key or "",
+            api_secret=api_secret or "",
         )
         self.testnet = testnet
         self.ws_public = None
         self.ws_private = None
         self.price_callbacks = {}  # symbol -> callback
-        logger.info(f"Bybit клиент инициализирован ({'TESTNET' if testnet else 'MAINNET'})")
+        # Public-only mode: no credentials, only market data endpoints work
+        self.public_only = not (api_key and api_secret)
+        net = "TESTNET" if testnet else "MAINNET"
+        mode = "read-only" if self.public_only else "authenticated"
+        logger.info(f"Bybit клиент инициализирован ({net}, {mode})")
 
     # ========== БАЛАНС И АККАУНТ ==========
     def get_balance(self, coin: str = "USDT") -> float:
         """Получить баланс USDT."""
+        if self.public_only:
+            return 0.0
         try:
             res = self.session.get_wallet_balance(accountType="UNIFIED", coin=coin)
             if res["retCode"] == 0:
@@ -42,6 +48,8 @@ class BybitClient:
 
     def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
         """Получить открытые позиции."""
+        if self.public_only:
+            return []
         try:
             params = {"category": "linear", "settleCoin": "USDT"}
             if symbol:
@@ -68,6 +76,8 @@ class BybitClient:
         reduce_only: bool = False,
     ) -> Dict:
         """Открыть позицию."""
+        if self.public_only:
+            return {"success": False, "error": "Public-only mode: no API credentials"}
         try:
             # Установить плечо
             try:
