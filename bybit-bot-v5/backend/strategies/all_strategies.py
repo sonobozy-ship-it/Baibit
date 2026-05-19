@@ -840,5 +840,7 @@ ALL_STRATEGIES = {
     "S9": TrendFibonacciStrategy,   # тренд + уровни Фибоначчи (38.2/50/61.8%)
     "S10": ScalperProStrategy,      # 3m высокочастотный скальпер (до 8 сигналов/день/символ)
     "S11": DragonflyGoldStrategy,   # Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP
-    "S12": OverboughtShortStrategy, # RSI разворот + BB + MACD — специализирован на шортах
+    "S12": OverboughtShortStrategy, # RSI разворот + BB + MACD — SOLUSDT
+    "S13": OverboughtShortStrategy, # RSI разворот + BB + MACD — PEPEUSDT (мем, волатильность)
+    "S14": OverboughtShortStrategy, # RSI разворот + BB + MACD — WIFUSDT (мем, резкие откаты)
 }

@@ -78,7 +78,8 @@ _SYSTEM_PROMPT = """
 3. WR последних 20 сделок > 70% → scalp_on (если не активен) + alert info
 4. Boost: просадка от пика > 20% → boost_stop + alert warning
 5. Boost: цель достигнута → boost_stop + alert info "🎉 Цель достигнута!"
-6. Нет сделок > 2 часов при запущенном боте → alert warning (возможна проблема)
+6. Нет сделок > 8 часов при запущенном боте И нет открытых позиций → alert warning (возможна проблема)
+   Если есть открытые позиции — это нормально, бот ждёт TP/SL → wait
 7. 5+ убытков подряд по одной стратегии → disable_strategy + alert warning
 8. equity_usdt < $2 → stop + alert critical (нельзя торговать)
 9. Если balance_usdt мал но equity_usdt нормальный — открыта позиция, всё ОК → wait
