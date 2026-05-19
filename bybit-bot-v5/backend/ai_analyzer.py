@@ -306,58 +306,140 @@ class AIAnalyzer:
   "reasoning": "одно предложение почему trade_now"
 }}"""
 
-    # ── 3. Быстрая проверка сигнала ───────────────────────────────────────────
+    # ── 3. Быстрая проверка сигнала (синхронная, устаревшая) ─────────────────
 
     def quick_signal_check(
         self,
         signal_data: Dict,
         market_context: Optional[Dict] = None,
     ) -> Dict:
-        """
-        Оценка торгового сигнала перед входом.
-        Возвращает {"score": 0-10, "comment": "...", "approved": bool}
-        """
+        """Синхронная обёртка — использует _ask_sync."""
         if not self.enabled:
             return {"score": 5, "comment": "AI недоступен", "approved": True}
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(
+                self.analyze_signal_async(signal_data, df=None, sentiment=market_context)
+            )
+        except Exception:
+            return {"score": 5, "comment": "AI ошибка", "approved": True}
+
+    # ── 4. Полноценный async-анализ сигнала перед входом ──────────────────────
+
+    async def analyze_signal_async(
+        self,
+        signal_data: Dict,
+        df: Optional[pd.DataFrame] = None,
+        sentiment: Optional[Dict] = None,
+    ) -> Dict:
+        """
+        Async-анализ торгового сигнала с данными свечей.
+        Возвращает {"score": 0-10, "comment": "...", "approved": bool, "reasoning": "..."}
+        """
+        if not self.enabled:
+            return {"score": 5, "comment": "AI недоступен", "approved": True, "reasoning": ""}
 
         try:
-            ctx_str = ""
-            if market_context:
-                ctx_str = (
-                    f"\nКонтекст рынка: режим={market_context.get('regime','?')}, "
-                    f"риск={market_context.get('risk_level','?')}, "
-                    f"торговать={market_context.get('trade_now','?')}"
-                )
-
-            prompt = f"""Оцени торговый сигнал по шкале 0-10 (10 = идеальный сетап).
-
-Стратегия: {signal_data.get('strategy_name')} ({signal_data.get('strategy_id','?')})
-Символ: {signal_data.get('symbol')} | Направление: {signal_data.get('action')}
-Вход: {signal_data.get('entry_price')} | SL: {signal_data.get('stop_loss')} | TP: {signal_data.get('take_profit')}
-Уверенность стратегии: {signal_data.get('confidence', 0):.0%}
-Фильтры: {signal_data.get('filters_passed', {})}
-Причина сигнала: {signal_data.get('reason', '?')}
-{ctx_str}
-
-Ответь СТРОГО JSON:
-{{"score": число 0-10, "comment": "одно предложение", "approved": true/false}}
-
-approved=false только при score < 4."""
-
-            text = self._ask_sync(prompt, "signal")
+            prompt = self._build_full_signal_prompt(signal_data, df, sentiment)
+            text = await self._ask(prompt, "signal")
             if not text:
-                return {"score": 5, "comment": "Нет ответа AI", "approved": True}
+                return {"score": 5, "comment": "Нет ответа AI", "approved": True, "reasoning": ""}
 
             parsed = self._extract_json(text)
             if parsed and "score" in parsed:
-                parsed.setdefault("approved", parsed["score"] >= 4)
+                parsed.setdefault("approved", parsed["score"] >= 5)
+                parsed.setdefault("reasoning", parsed.get("comment", ""))
                 return parsed
 
-            return {"score": 5, "comment": text[:100], "approved": True}
+            return {"score": 5, "comment": text[:200], "approved": True, "reasoning": text[:200]}
 
         except Exception as e:
-            logger.error(f"[AIAnalyzer] quick_signal_check: {e}")
-            return {"score": 5, "comment": "AI ошибка", "approved": True}
+            logger.error(f"[AIAnalyzer] analyze_signal_async: {e}")
+            return {"score": 5, "comment": "AI ошибка", "approved": True, "reasoning": ""}
+
+    def _build_full_signal_prompt(
+        self,
+        signal_data: Dict,
+        df: Optional[pd.DataFrame],
+        sentiment: Optional[Dict],
+    ) -> str:
+        entry = signal_data.get("entry_price", 0)
+        sl    = signal_data.get("stop_loss",   0)
+        tp    = signal_data.get("take_profit", 0)
+        action = signal_data.get("action", "?")
+
+        # R:R ratio
+        try:
+            risk   = abs(entry - sl)
+            reward = abs(tp - entry)
+            rr = reward / risk if risk > 0 else 0
+        except Exception:
+            rr = 0
+
+        # Индикаторы из свечей
+        indicators_str = ""
+        if df is not None and len(df) >= 20:
+            try:
+                import sys, os
+                sys.path.insert(0, os.path.dirname(__file__))
+                import pandas_ta as ta
+                close = df["close"].astype(float)
+                high  = df["high"].astype(float)
+                low   = df["low"].astype(float)
+                vol   = df["volume"].astype(float)
+
+                rsi   = ta.rsi(close, 14).iloc[-1]
+                ema20 = ta.ema(close, 20).iloc[-1]
+                ema50 = ta.ema(close, 50).iloc[-1] if len(df) >= 50 else ema20
+                atr   = ta.atr(high, low, close, 14).iloc[-1]
+                vol_avg = vol.rolling(20).mean().iloc[-1]
+                vol_ratio = vol.iloc[-1] / vol_avg if vol_avg > 0 else 1.0
+
+                # Направление тренда
+                last_5 = close.iloc[-5:]
+                trend = "восходящий" if last_5.iloc[-1] > last_5.iloc[0] else "нисходящий"
+                price_vs_ema = "выше EMA20" if close.iloc[-1] > ema20 else "ниже EMA20"
+
+                indicators_str = (
+                    f"\n📊 Технические индикаторы:\n"
+                    f"  RSI(14): {rsi:.1f} "
+                    f"({'перекуплен' if rsi > 70 else 'перепродан' if rsi < 30 else 'нейтрал'})\n"
+                    f"  Тренд (5 свечей): {trend}\n"
+                    f"  Цена {price_vs_ema} | EMA50: {'выше' if close.iloc[-1] > ema50 else 'ниже'}\n"
+                    f"  ATR: {atr/close.iloc[-1]*100:.2f}% от цены\n"
+                    f"  Объём: {'высокий ×'+str(round(vol_ratio,1)) if vol_ratio > 1.5 else 'нормальный'}"
+                )
+            except Exception as _e:
+                indicators_str = f"  (индикаторы недоступны: {_e})"
+
+        # Сентимент
+        sent_str = ""
+        if sentiment:
+            score = sentiment.get("sentiment_score", 0)
+            news  = sentiment.get("news_count_24h", 0)
+            sent_str = f"\n📰 Сентимент: {score:+.2f} | Новостей 24ч: {news}"
+
+        return f"""Проанализируй торговый сигнал и реши — входить или нет.
+
+🔔 Сигнал:
+  Стратегия: {signal_data.get('strategy_name', '?')} ({signal_data.get('strategy_id', '?')})
+  Символ: {signal_data.get('symbol', '?')} | Направление: {action}
+  Вход: {entry} | SL: {sl} | TP: {tp}
+  R:R = {rr:.2f} (риск {abs(entry-sl):.4f} → прибыль {abs(tp-entry):.4f})
+  Уверенность стратегии: {signal_data.get('confidence', 0):.0%}
+  Причина: {signal_data.get('reason', '?')}
+{indicators_str}
+{sent_str}
+
+Критерии отказа (approved=false):
+- R:R < 1.5
+- RSI > 75 для BUY или RSI < 25 для SELL
+- Объём падающий при пробое
+- Цена против основного тренда без явного разворота
+
+Ответь СТРОГО JSON (без markdown):
+{{"score": число 0-10, "approved": true/false, "comment": "одно предложение итог", "reasoning": "2-3 причины решения"}}"""
 
     # ── Утилиты ───────────────────────────────────────────────────────────────
 

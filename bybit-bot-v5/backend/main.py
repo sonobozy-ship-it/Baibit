@@ -809,25 +809,38 @@ async def trading_loop():
                         logger.info(f"{sid}: ❌ {corr_check['reason']}")
                         continue
 
-                    # AI quick check
+                    # ============== AI-АНАЛИЗ сигнала ==============
                     ai_score = None
                     if state.ai.enabled:
-                        ai_result = state.ai.quick_signal_check({
-                            "strategy_name": strat.NAME,
-                            "symbol": strat.symbol,
-                            "action": signal.action,
-                            "entry_price": signal.entry_price,
-                            "stop_loss": signal.stop_loss,
-                            "take_profit": signal.take_profit,
-                            "filters_passed": signal.filters_passed,
-                            "market_context": (
-                                f"Sentiment={sentiment_features.get('sentiment_score', 0):+.2f}, "
-                                f"News={sentiment_features.get('news_count_24h', 0)}"
-                            ),
-                        })
+                        ai_result = await state.ai.analyze_signal_async(
+                            signal_data={
+                                "strategy_name": strat.NAME,
+                                "strategy_id": sid,
+                                "symbol": strat.symbol,
+                                "action": signal.action,
+                                "entry_price": signal.entry_price,
+                                "stop_loss": signal.stop_loss,
+                                "take_profit": signal.take_profit,
+                                "filters_passed": signal.filters_passed,
+                                "confidence": signal.confidence,
+                                "reason": signal.reason,
+                            },
+                            df=df,
+                            sentiment=sentiment_features,
+                        )
                         ai_score = ai_result.get("score", 5)
-                        if ai_score < 5:
-                            logger.info(f"{sid}: AI отверг (score={ai_score})")
+                        approved = ai_result.get("approved", True)
+                        reasoning = ai_result.get("reasoning", ai_result.get("comment", ""))
+                        # Telegram-превью с решением AI
+                        ai_emoji = "✅" if approved else "🚫"
+                        asyncio.create_task(state.telegram.send(
+                            f"🤖 <b>AI-анализ: {signal.action} {strat.symbol}</b>\n"
+                            f"{ai_emoji} Оценка: <b>{ai_score}/10</b>"
+                            + (" — ОДОБРЕНО" if approved else " — ОТКЛОНЕНО") + "\n"
+                            f"<i>{reasoning}</i>"
+                        ))
+                        if not approved:
+                            logger.info(f"{sid}: AI отверг (score={ai_score}) — {reasoning}")
                             continue
 
                     # ============== ML ФИЛЬТР v2 (с sentiment + orderbook) ==============
