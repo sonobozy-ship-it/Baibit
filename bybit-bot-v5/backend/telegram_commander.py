@@ -42,6 +42,8 @@ class TelegramCommander:
         self._paused    = False
         self._session: Optional[aiohttp.ClientSession] = None
         self.enabled    = bool(bot_token and allowed_chat_id)
+        # Ожидание ввода от пользователя: chat_id -> action
+        self._pending_input: Dict[str, str] = {}
 
     # ── HTTP ─────────────────────────────────────────────────────
 
@@ -97,14 +99,18 @@ class TelegramCommander:
 
     def _main_menu(self) -> Dict:
         s = self._get_state()
-        go_btn = _btn("🛑 Стоп", "stop") if s.bot_running else _btn("🚀 Старт", "go")
+        go_btn    = _btn("🛑 Стоп", "stop") if s.bot_running else _btn("🚀 Старт", "go")
         pause_btn = _btn("▶️ Возобновить", "resume") if self._paused else _btn("⏸ Пауза", "pause")
+        bal_str   = f"{s.paper.balance:.0f}" if s.paper_mode else "реал"
+        max_pos   = s.risk_manager.max_open_positions
         return _keyboard([
             [go_btn, pause_btn],
             [_btn("💰 Баланс", "balance"), _btn("📌 Позиции", "positions")],
             [_btn("📊 Сделки", "trades"), _btn("🏆 Лучшие модели", "best_models")],
             [_btn("📈 Стратегии", "strategies"), _btn("🛡 Риск", "risk")],
             [_btn("📰 Новости", "news"), _btn("🤖 AI", "ai")],
+            [_btn(f"💵 Баланс: {bal_str} USDT", "set_balance"),
+             _btn(f"📦 Макс сделок: {max_pos}", "set_max_pos")],
             [_btn("🔄 Обновить меню", "menu")],
         ])
 
@@ -147,6 +153,13 @@ class TelegramCommander:
             return
 
         text = (msg.get("text") or "").strip()
+
+        # Если ожидаем ввод от пользователя — обрабатываем любой текст
+        if chat_id in self._pending_input:
+            action = self._pending_input.pop(chat_id)
+            await self._handle_pending_input(upd, action, text)
+            return
+
         if not text.startswith("/"):
             return
 
@@ -217,6 +230,8 @@ class TelegramCommander:
             "risk":        self._cmd_risk,
             "ai":          self._cmd_ai,
             "news":        self._cmd_news,
+            "set_balance": self._cb_set_balance,
+            "set_max_pos": self._cb_set_max_pos,
         }
 
         # Закрытие отдельной позиции
@@ -280,6 +295,83 @@ class TelegramCommander:
 
     async def _cb_resume(self, upd, arg):
         await self._cmd_resume(upd, arg)
+
+    async def _cb_set_balance(self, upd, arg):
+        """Запрашивает новый paper-баланс."""
+        s = self._get_state()
+        if not s.paper_mode:
+            await self.reply(upd, "⚠️ Изменение баланса доступно только в Paper-режиме",
+                             reply_markup=self._main_menu())
+            return
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        chat_id = str(msg.get("chat", {}).get("id", self.allowed_id))
+        self._pending_input[chat_id] = "set_balance"
+        await self.reply(upd,
+            f"💵 <b>Изменение Paper-баланса</b>\n\n"
+            f"Текущий баланс: <b>{s.paper.balance:.2f} USDT</b>\n\n"
+            f"Введи новый баланс числом (например: <code>1000</code>):\n"
+            f"<i>Открытые позиции при этом сохранятся</i>",
+            reply_markup=_keyboard([[_btn("❌ Отмена", "menu")]])
+        )
+
+    async def _cb_set_max_pos(self, upd, arg):
+        """Запрашивает новый лимит одновременных позиций."""
+        s = self._get_state()
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        chat_id = str(msg.get("chat", {}).get("id", self.allowed_id))
+        self._pending_input[chat_id] = "set_max_pos"
+        await self.reply(upd,
+            f"📦 <b>Макс. одновременных сделок</b>\n\n"
+            f"Текущее значение: <b>{s.risk_manager.max_open_positions}</b>\n\n"
+            f"Введи новое число от 1 до 50 (например: <code>20</code>):",
+            reply_markup=_keyboard([[_btn("❌ Отмена", "menu")]])
+        )
+
+    async def _handle_pending_input(self, upd: Dict, action: str, text: str):
+        """Обрабатывает текстовый ввод после нажатия кнопки."""
+        s = self._get_state()
+        text = text.strip()
+
+        if action == "set_balance":
+            try:
+                new_bal = float(text.replace(",", "."))
+                if new_bal <= 0:
+                    raise ValueError("отрицательный")
+                old_bal = s.paper.balance
+                s.paper.balance = round(new_bal, 2)
+                s.paper._save_state()
+                await self.reply(upd,
+                    f"✅ <b>Баланс обновлён</b>\n\n"
+                    f"{old_bal:.2f} USDT → <b>{new_bal:.2f} USDT</b>",
+                    reply_markup=self._main_menu()
+                )
+            except (ValueError, TypeError):
+                await self.reply(upd,
+                    f"❌ Неверное значение: <code>{text}</code>\n"
+                    f"Введи число, например <code>1000</code>",
+                    reply_markup=self._main_menu()
+                )
+
+        elif action == "set_max_pos":
+            try:
+                new_max = int(text)
+                if not 1 <= new_max <= 50:
+                    raise ValueError("вне диапазона")
+                old_max = s.risk_manager.max_open_positions
+                s.risk_manager.max_open_positions = new_max
+                await self.reply(upd,
+                    f"✅ <b>Лимит позиций обновлён</b>\n\n"
+                    f"{old_max} → <b>{new_max}</b> одновременных сделок",
+                    reply_markup=self._main_menu()
+                )
+            except (ValueError, TypeError):
+                await self.reply(upd,
+                    f"❌ Неверное значение: <code>{text}</code>\n"
+                    f"Введи целое число от 1 до 50",
+                    reply_markup=self._main_menu()
+                )
+        else:
+            await self.reply(upd, "❓ Неизвестное действие", reply_markup=self._main_menu())
 
     # ── Команды ──────────────────────────────────────────────────
 
