@@ -269,45 +269,38 @@ def supertrend(
     multiplier: float = 3.0,
     **kwargs,
 ) -> pd.DataFrame:
-    atr_s = atr(high, low, close, length=length)
-    hl2 = (high + low) / 2
+    atr_s = atr(high, low, close, length=length).values
+    hl2   = ((high + low) / 2).values
+    cl    = close.values
+    n     = len(cl)
 
     upper_basic = hl2 + multiplier * atr_s
     lower_basic = hl2 - multiplier * atr_s
 
-    upper = upper_basic.copy()
-    lower = lower_basic.copy()
-    direction = pd.Series(1, index=close.index)
-    trend = close.copy()
+    upper     = upper_basic.copy()
+    lower     = lower_basic.copy()
+    direction = np.ones(n, dtype=np.int8)
+    trend     = cl.copy()
 
-    for i in range(1, len(close)):
-        # Upper band
-        if upper_basic.iloc[i] < upper.iloc[i - 1] or close.iloc[i - 1] > upper.iloc[i - 1]:
-            upper.iloc[i] = upper_basic.iloc[i]
+    for i in range(1, n):
+        upper[i] = upper_basic[i] if (upper_basic[i] < upper[i-1] or cl[i-1] > upper[i-1]) else upper[i-1]
+        lower[i] = lower_basic[i] if (lower_basic[i] > lower[i-1] or cl[i-1] < lower[i-1]) else lower[i-1]
+
+        if direction[i-1] == -1 and cl[i] > upper[i]:
+            direction[i] = 1
+        elif direction[i-1] == 1 and cl[i] < lower[i]:
+            direction[i] = -1
         else:
-            upper.iloc[i] = upper.iloc[i - 1]
+            direction[i] = direction[i-1]
 
-        # Lower band
-        if lower_basic.iloc[i] > lower.iloc[i - 1] or close.iloc[i - 1] < lower.iloc[i - 1]:
-            lower.iloc[i] = lower_basic.iloc[i]
-        else:
-            lower.iloc[i] = lower.iloc[i - 1]
+        trend[i] = lower[i] if direction[i] == 1 else upper[i]
 
-        # Direction
-        if direction.iloc[i - 1] == -1 and close.iloc[i] > upper.iloc[i]:
-            direction.iloc[i] = 1
-        elif direction.iloc[i - 1] == 1 and close.iloc[i] < lower.iloc[i]:
-            direction.iloc[i] = -1
-        else:
-            direction.iloc[i] = direction.iloc[i - 1]
-
-        trend.iloc[i] = lower.iloc[i] if direction.iloc[i] == 1 else upper.iloc[i]
-
+    idx = close.index
     col = f"SUPERT_{length}_{float(multiplier)}"
     return pd.DataFrame({
-        col: trend,
-        f"SUPERTd_{length}_{float(multiplier)}": direction,
-        f"SUPERTs_{length}_{float(multiplier)}": trend,
-        f"SUPERTl_{length}_{float(multiplier)}": lower,
-        f"SUPERTu_{length}_{float(multiplier)}": upper,
+        col:                              pd.Series(trend,     index=idx),
+        f"SUPERTd_{length}_{float(multiplier)}": pd.Series(direction.astype(float), index=idx),
+        f"SUPERTs_{length}_{float(multiplier)}": pd.Series(trend,     index=idx),
+        f"SUPERTl_{length}_{float(multiplier)}": pd.Series(lower,     index=idx),
+        f"SUPERTu_{length}_{float(multiplier)}": pd.Series(upper,     index=idx),
     })

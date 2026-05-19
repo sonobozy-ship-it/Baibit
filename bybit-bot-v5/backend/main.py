@@ -82,7 +82,9 @@ class BotState:
         self.journal = TradeJournal()
         self.correlation = CorrelationFilter()
         self.ai = AIAnalyzer()
-        self.paper = PaperTrader()
+        self.paper = PaperTrader(
+            initial_balance=float(os.getenv("PAPER_INITIAL_BALANCE", "1000")),
+        )
         _tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "") or os.getenv("TELEGRAM_TOKEN", "")
         _tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         self.telegram = TelegramNotifier(
@@ -705,8 +707,12 @@ async def trading_loop():
                     if not state.boost.strategy_allowed(sid):
                         continue
 
+                    # Нет подключения к бирже — нет рыночных данных
+                    if not state.bybit:
+                        continue
+
                     df = state.bybit.get_klines(strat.symbol, strat.timeframe, limit=250)
-                    if df.empty:
+                    if df is None or df.empty:
                         continue
                     klines_data[strat.symbol] = df
 
@@ -847,7 +853,7 @@ async def trading_loop():
                     ml_prediction = None
                     snapshot_id   = None   # явная инициализация — убираем 'in locals()' антипаттерн
                     features = {}
-                    if state.ml_enabled:
+                    if state.ml_enabled and state.bybit:
                         # Order book
                         orderbook = state.bybit.get_orderbook(strat.symbol, limit=25)
                         # Market meta (funding, OI)
