@@ -2,12 +2,16 @@
 Paper Trading — виртуальная торговля без реальных денег.
 Открывает виртуальные позиции, следит за SL/TP, считает PnL.
 """
+import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
 from strategies.base import TradingSignal
 
 logger = logging.getLogger(__name__)
+
+_STATE_FILE = Path("data/paper_state.json")
 
 
 class PaperTrader:
@@ -19,6 +23,38 @@ class PaperTrader:
         self.fee_pct = fee_pct
         self.positions: Dict[str, Dict] = {}   # symbol -> position
         self.trades_history: List[Dict] = []
+        self._load_state()
+
+    def _load_state(self):
+        """Загрузить состояние с диска (баланс, позиции, история)."""
+        try:
+            if _STATE_FILE.exists():
+                data = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+                self.balance = data.get("balance", self.initial_balance)
+                self.positions = data.get("positions", {})
+                self.trades_history = data.get("trades_history", [])
+                logger.info(
+                    f"[PaperTrader] Восстановлено: баланс={self.balance:.2f} USDT, "
+                    f"позиций={len(self.positions)}, сделок={len(self.trades_history)}"
+                )
+        except Exception as e:
+            logger.warning(f"[PaperTrader] Не удалось загрузить state: {e}")
+
+    def _save_state(self):
+        """Сохранить состояние на диск."""
+        try:
+            _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _STATE_FILE.write_text(
+                json.dumps({
+                    "balance": self.balance,
+                    "positions": self.positions,
+                    "trades_history": self.trades_history,
+                    "saved_at": datetime.utcnow().isoformat(),
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"[PaperTrader] Не удалось сохранить state: {e}")
 
     def open_position(self, signal: TradingSignal, strategy_id: str, qty: float, leverage: int = 1):
         """Виртуально открыть позицию."""
@@ -43,6 +79,7 @@ class PaperTrader:
             "opened_at": datetime.utcnow().isoformat(),
             "be_moved": False,
         }
+        self._save_state()
         logger.info(f"[PAPER] {strategy_id} OPEN {signal.action} {signal.symbol} @ {signal.entry_price}")
         return {"success": True, "position": self.positions[signal.symbol]}
 
@@ -94,6 +131,7 @@ class PaperTrader:
             "closed_at": datetime.utcnow().isoformat(),
         }
         self.trades_history.append(trade)
+        self._save_state()
         logger.info(f"[PAPER] CLOSE {symbol} @ {exit_price} → {pnl_usd:+.2f} USDT ({reason})")
         return trade
 

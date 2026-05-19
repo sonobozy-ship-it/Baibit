@@ -77,10 +77,11 @@ class TelegramNotifier:
         from datetime import datetime, timezone
         emoji = "🟢" if side in ("BUY", "Buy") else "🔴"
         notional = qty * entry if qty else 0
-        time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        now = datetime.now(timezone.utc)
+        time_str = now.strftime("%d.%m.%Y %H:%M:%S UTC")
         caption = (
             f"{emoji} <b>ВХОД: {side} {symbol}</b>\n"
-            f"⏰ {time_str}\n"
+            f"⏰ Открыт: <b>{time_str}</b>\n"
             f"📊 Стратегия: <code>{strategy_id}</code>\n"
             f"💰 Вход: <b>{entry:.4f}</b>"
             + (f" | Объём: <b>{notional:.1f} USDT</b>" if notional else "") +
@@ -106,15 +107,37 @@ class TelegramNotifier:
                                  leverage: int = 1,
                                  df=None, entry: Optional[float] = None,
                                  side: Optional[str] = None, sl: Optional[float] = None,
-                                 tp: Optional[float] = None, exit_price: Optional[float] = None):
-        from datetime import datetime, timezone
+                                 tp: Optional[float] = None, exit_price: Optional[float] = None,
+                                 opened_at: Optional[str] = None):
+        from datetime import datetime, timezone, timedelta
         emoji = "✅" if pnl > 0 else "❌"
-        time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        now = datetime.now(timezone.utc)
+        close_str = now.strftime("%d.%m.%Y %H:%M:%S UTC")
         pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
+
+        duration_str = ""
+        open_str = ""
+        if opened_at:
+            try:
+                if hasattr(opened_at, "isoformat"):
+                    opened_at = opened_at.isoformat()
+                dt_open = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+                if dt_open.tzinfo is None:
+                    dt_open = dt_open.replace(tzinfo=timezone.utc)
+                open_str = dt_open.strftime("%d.%m.%Y %H:%M:%S UTC")
+                delta = now - dt_open
+                total_min = int(delta.total_seconds() // 60)
+                h, m = divmod(total_min, 60)
+                duration_str = f"{h}ч {m}мин" if h else f"{m}мин"
+            except Exception:
+                pass
+
         caption = (
             f"{emoji} <b>ВЫХОД: {symbol}</b>\n"
-            f"⏰ {time_str}\n"
-            f"📊 Стратегия: <code>{strategy_id}</code>\n"
+            + (f"⏰ Открыт: <b>{open_str}</b>\n" if open_str else "")
+            + f"⏰ Закрыт: <b>{close_str}</b>\n"
+            + (f"⌛ Длительность: <i>{duration_str}</i>\n" if duration_str else "")
+            + f"📊 Стратегия: <code>{strategy_id}</code>\n"
             f"⚡ Плечо: <b>×{leverage}</b>\n"
             f"💵 PnL: <b>{pnl_str} USDT</b>\n"
             f"📌 Причина: <i>{reason}</i>"

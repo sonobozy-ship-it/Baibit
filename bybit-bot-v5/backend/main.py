@@ -195,6 +195,37 @@ def init_strategies():
         loaded = len(state.ml_predictor.models)
         if loaded:
             logger.info(f"🤖 Загружено {loaded} ML моделей")
+
+    # Восстановление открытых бумажных позиций после перезапуска
+    _restore_paper_positions()
+
+
+def _restore_paper_positions():
+    """Восстанавливает current_position стратегий из сохранённого paper state."""
+    if not state.paper.positions:
+        return
+    # Строим карту strategy_id -> symbol из paper позиций
+    sid_map = {pos["strategy_id"]: sym for sym, pos in state.paper.positions.items()}
+    for sid, strat in state.strategies.items():
+        if sid not in sid_map:
+            continue
+        sym = sid_map[sid]
+        pos = state.paper.positions.get(sym)
+        if not pos:
+            continue
+        strat.current_position = {
+            "side": pos["side"],
+            "entry": pos["entry_price"],
+            "sl": pos["stop_loss"],
+            "tp": pos["take_profit"],
+            "initial_sl": pos.get("stop_loss"),
+            "be_moved": pos.get("be_moved", False),
+            "qty": pos.get("qty", 0),
+            "leverage": pos.get("leverage", 1),
+            "opened_at": pos.get("opened_at"),
+        }
+        state.risk_manager.register_position_open(sid, pos.get("qty", 0) * pos.get("entry_price", 0))
+        logger.info(f"[PaperRestore] {sid} {pos['side']} {sym} @ {pos['entry_price']} восстановлен")
         else:
             logger.info("🤖 ML модели не найдены — будет собирать данные для будущего обучения")
 
@@ -1077,6 +1108,9 @@ async def trading_loop():
                         # Находим стратегию по символу и снимаем позицию
                         for _sid, _strat in state.strategies.items():
                             if _strat.symbol == c_sym and _strat.current_position:
+                                _opened_at = _strat.current_position.get("opened_at")
+                                if hasattr(_opened_at, "isoformat"):
+                                    _opened_at = _opened_at.isoformat()
                                 close_res = _strat.close_position(
                                     closed_pos.get("exit_price", 0),
                                     qty=_strat.current_position.get("qty", 0),
@@ -1093,6 +1127,7 @@ async def trading_loop():
                                     sl=closed_pos.get("stop_loss"),
                                     tp=closed_pos.get("take_profit"),
                                     exit_price=closed_pos.get("exit_price"),
+                                    opened_at=_opened_at,
                                 ))
                                 await broadcast_log(
                                     f"{'✅' if pnl > 0 else '❌'} [PAPER] {_sid} {c_sym} {reason} → {pnl:+.2f} USDT",
@@ -1173,6 +1208,7 @@ async def trading_loop():
                                     entry=pos["entry"], side=pos["side"],
                                     sl=pos["sl"], tp=pos["tp"],
                                     exit_price=exit_price,
+                                    opened_at=pos.get("opened_at"),
                                 ))
                                 # Boost: регистрируем результат, обновляем фазу
                                 new_balance = state.bybit.get_balance("USDT")
