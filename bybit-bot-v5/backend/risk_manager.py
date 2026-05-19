@@ -47,11 +47,13 @@ class RiskManager:
         self.strategy_cooldowns: Dict[str, datetime] = {}
         self.strategy_losses: Dict[str, int] = defaultdict(int)
         self.open_positions_count = 0
+        self.last_balance = 0.0
         self._open_notional: Dict[str, float] = {}  # strategy_id -> notional USDT
 
     def reset_daily(self, current_balance: float):
         """Сброс ежедневных счётчиков (вызывается раз в сутки)."""
         self.daily_start_balance = current_balance
+        self.last_balance = current_balance
         self.daily_pnl = 0.0
         self.daily_trades_count = 0
         self.daily_losses_count = 0
@@ -64,6 +66,7 @@ class RiskManager:
 
     def check_daily_reset(self, current_balance: float):
         """Проверяет, не нужно ли сделать дневной сброс."""
+        self.last_balance = current_balance
         if datetime.utcnow() >= self.daily_reset_at or self.daily_start_balance is None:
             self.reset_daily(current_balance)
 
@@ -250,6 +253,8 @@ class RiskManager:
 
     def get_status(self) -> Dict:
         """Текущий статус для отображения в UI."""
+        effective_balance = self.last_balance or self.daily_start_balance or 0.0
+        effective_max_positions = self.max_positions_for_balance(effective_balance) if effective_balance > 0 else self.max_open_positions
         return {
             "daily_start_balance": self.daily_start_balance,
             "daily_pnl": self.daily_pnl,
@@ -260,7 +265,9 @@ class RiskManager:
             "max_daily_losses": self.max_daily_losses,
             "max_daily_trades": self.max_daily_trades,
             "open_positions": self.open_positions_count,
-            "max_positions": self.max_open_positions,
+            "max_positions": effective_max_positions,
+            "max_positions_configured": self.max_open_positions,
+            "effective_balance": effective_balance,
             "kill_switch": self.kill_switch,
             "kill_switch_reason": self.kill_switch_reason,
             "cooldowns": {
