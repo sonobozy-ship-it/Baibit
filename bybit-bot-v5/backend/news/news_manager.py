@@ -44,17 +44,17 @@ class NewsManager:
         tables = [
             f"""CREATE TABLE IF NOT EXISTS news_items (
                 id            {ai},
-                source        TEXT NOT NULL,
+                source        VARCHAR(64)  NOT NULL,
                 title         TEXT,
                 text          TEXT,
-                url           TEXT,
-                published_at  TEXT,
-                fetched_at    TEXT,
+                url           VARCHAR(255),
+                published_at  VARCHAR(32),
+                fetched_at    VARCHAR(32),
                 sentiment_score    {real},
                 sentiment_magnitude {real},
                 bull_hits     INT,
                 bear_hits     INT,
-                item_type     TEXT,
+                item_type     VARCHAR(32),
                 extra_json    TEXT,
                 UNIQUE (source, url)
             )""",
