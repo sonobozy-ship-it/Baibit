@@ -46,7 +46,8 @@ class MLDataStore:
         ai = DBPool.ai_pk()
         real = DBPool.real_type()
         tjson = DBPool.text_json()
-        now = DBPool.now_default()
+        # VARCHAR не принимает CURRENT_TIMESTAMP в MySQL — используем пустую строку
+        now = "DEFAULT ''"
 
         tables = [
             f"""CREATE TABLE IF NOT EXISTS signal_snapshots (
