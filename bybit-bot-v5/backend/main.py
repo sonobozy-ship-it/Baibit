@@ -195,6 +195,8 @@ def init_strategies():
         loaded = len(state.ml_predictor.models)
         if loaded:
             logger.info(f"🤖 Загружено {loaded} ML моделей")
+        else:
+            logger.info("🤖 ML модели не найдены — будет собирать данные для будущего обучения")
 
     # Восстановление открытых бумажных позиций после перезапуска
     _restore_paper_positions()
@@ -226,8 +228,6 @@ def _restore_paper_positions():
         }
         state.risk_manager.register_position_open(sid, pos.get("qty", 0) * pos.get("entry_price", 0))
         logger.info(f"[PaperRestore] {sid} {pos['side']} {sym} @ {pos['entry_price']} восстановлен")
-        else:
-            logger.info("🤖 ML модели не найдены — будет собирать данные для будущего обучения")
 
     # Инициализация continuous trainer
     state.continuous_trainer = ContinuousTrainer(
