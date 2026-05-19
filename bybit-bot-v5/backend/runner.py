@@ -55,13 +55,18 @@ async def main():
     _key    = os.getenv("BYBIT_API_KEY", "").strip()
     _secret = os.getenv("BYBIT_API_SECRET", "").strip()
     _testnet = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
-    if _key and _secret:
-        try:
-            state.bybit = BybitClient(_key, _secret, _testnet)
+
+    # Всегда создаём клиент — публичные эндпоинты (klines, ticker, orderbook)
+    # работают без ключей. Ключи нужны только для реальных ордеров.
+    try:
+        state.bybit = BybitClient(_key or "x", _secret or "x", _testnet)
+        if _key and _secret:
             bal = state.bybit.get_balance("USDT")
             logger.info(f"✅ Bybit подключён | Баланс: {bal:.2f} USDT")
-        except Exception as e:
-            logger.error(f"❌ Bybit не подключён: {e}")
+        else:
+            logger.info("📡 Bybit: публичные данные (ключи не заданы — только paper mode)")
+    except Exception as e:
+        logger.error(f"❌ Bybit инициализация: {e}")
 
     # ── Paper mode ────────────────────────────────────────────
     if os.getenv("PAPER_TRADING", "false").lower() == "true":
