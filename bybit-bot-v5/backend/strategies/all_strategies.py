@@ -49,16 +49,13 @@ class EMACrossoverStrategy(BaseStrategy):
         # Фильтры
         ema_bull_cross = prev["ema_fast"] < prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
         ema_bear_cross = prev["ema_fast"] > prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
-        rsi_in_zone = 35 < last["rsi"] < 65
-        vol_confirm = last["volume"] > last["vol_ma"] * 1.5
-        candle_confirm_bull = last["close"] > last["open"]
-        candle_confirm_bear = last["close"] < last["open"]
+        rsi_in_zone = 30 < last["rsi"] < 70
+        vol_confirm = last["volume"] > last["vol_ma"] * 1.2
 
         filters = {
             "ema_cross": ema_bull_cross or ema_bear_cross,
             "rsi_zone": rsi_in_zone,
             "volume_spike": vol_confirm,
-            "candle_confirm": candle_confirm_bull if ema_bull_cross else candle_confirm_bear,
         }
 
         if not all(filters.values()):
@@ -119,14 +116,12 @@ class BollingerBandsStrategy(BaseStrategy):
 
         below_lower = last["close"] <= bb_lower * 1.001
         above_upper = last["close"] >= bb_upper * 0.999
-        rsi_oversold = last["rsi"] < 33
-        rsi_overbought = last["rsi"] > 65
-        vol_spike = last["volume"] > last["vol_ma"] * 1.5
-        ema_slope_up = last["ema50"] > df.iloc[-5]["ema50"]
-        ema_slope_down = last["ema50"] < df.iloc[-5]["ema50"]
+        rsi_oversold = last["rsi"] < 38
+        rsi_overbought = last["rsi"] > 60
+        vol_spike = last["volume"] > last["vol_ma"] * 1.2
 
-        long_setup = below_lower and rsi_oversold and vol_spike and ema_slope_up
-        short_setup = above_upper and rsi_overbought and vol_spike and ema_slope_down
+        long_setup = below_lower and rsi_oversold and vol_spike
+        short_setup = above_upper and rsi_overbought and vol_spike
 
         if not (long_setup or short_setup):
             return None
@@ -192,18 +187,21 @@ class RSIDivergenceStrategy(BaseStrategy):
         bull_div = (
             last_10["low"].iloc[-1] < last_10["low"].iloc[0]
             and rsi_at_low > last_10["rsi"].iloc[0]
-            and last["rsi"] < 40
+            and last["rsi"] < 48
         )
         bear_div = (
             last_10["high"].iloc[-1] > last_10["high"].iloc[0]
             and rsi_at_high < last_10["rsi"].iloc[0]
-            and last["rsi"] > 60
+            and last["rsi"] > 52
         )
 
         macd_bull_cross = prev["MACD_12_26_9"] < prev["MACDs_12_26_9"] and last["MACD_12_26_9"] > last["MACDs_12_26_9"]
         macd_bear_cross = prev["MACD_12_26_9"] > prev["MACDs_12_26_9"] and last["MACD_12_26_9"] < last["MACDs_12_26_9"]
+        # Дивергенция без MACD кросса тоже принимается (собираем данные для ML)
+        macd_ok = (macd_bull_cross or last["MACD_12_26_9"] > last["MACDs_12_26_9"]) if bull_div \
+             else (macd_bear_cross or last["MACD_12_26_9"] < last["MACDs_12_26_9"])
 
-        if not ((bull_div and macd_bull_cross) or (bear_div and macd_bear_cross)):
+        if not ((bull_div or bear_div) and macd_ok):
             return None
 
         side = "BUY" if bull_div else "SELL"
@@ -261,8 +259,8 @@ class BreakoutHunterStrategy(BaseStrategy):
         # Пробой
         break_up = prev["close"] < resistance and last["close"] > resistance * 1.001
         break_down = prev["close"] > support and last["close"] < support * 0.999
-        vol_confirm = last["volume"] > last["vol_ma"] * 2.0
-        atr_expand = last["atr"] > df.iloc[-10:]["atr"].mean() * 1.2
+        vol_confirm = last["volume"] > last["vol_ma"] * 1.5
+        atr_expand = last["atr"] > df.iloc[-10:]["atr"].mean() * 1.05
 
         if not ((break_up or break_down) and vol_confirm and atr_expand):
             return None
@@ -317,17 +315,17 @@ class ScalperGridStrategy(BaseStrategy):
 
         # Боковик: ATR низкий, EMA20 и EMA50 близко
         atr_pct = last["atr"] / last["close"] * 100
-        low_atr = atr_pct < 2.0  # расширен с 1.5% до 2.0% для больше сигналов
-        flat_ema = abs(last["ema_20"] - last["ema_50"]) / last["close"] * 100 < 0.8
+        low_atr = atr_pct < 2.5
+        flat_ema = abs(last["ema_20"] - last["ema_50"]) / last["close"] * 100 < 1.2
         bbw = (last["BBU_20_2.0"] - last["BBL_20_2.0"]) / last["close"]
-        narrow_bb = bbw < 0.05
+        narrow_bb = bbw < 0.08
 
         if not (low_atr and flat_ema and narrow_bb):
             return None
 
         # В боковике покупаем у нижней BB, продаём у верхней
-        near_lower = last["close"] < last["BBL_20_2.0"] * 1.003
-        near_upper = last["close"] > last["BBU_20_2.0"] * 0.997
+        near_lower = last["close"] < last["BBL_20_2.0"] * 1.006
+        near_upper = last["close"] > last["BBU_20_2.0"] * 0.994
 
         if not (near_lower or near_upper):
             return None
@@ -380,7 +378,7 @@ class TrendFollowerStrategy(BaseStrategy):
 
         last = df.iloc[-1]
 
-        adx_strong = last["ADX_14"] > 25
+        adx_strong = last["ADX_14"] > 18
         above_ema200 = last["close"] > last["ema_200"]
         below_ema200 = last["close"] < last["ema_200"]
         st_bull = last["SUPERTd_10_3.0"] == 1
@@ -447,12 +445,12 @@ class MultiConfirmStrategy(BaseStrategy):
         # 6 фильтров
         ema_bull = last["close"] > last["ema_21"] > last["ema_50"]
         ema_bear = last["close"] < last["ema_21"] < last["ema_50"]
-        rsi_bull = 40 < last["rsi"] < 60 and last["rsi"] > prev["rsi"]
-        rsi_bear = 40 < last["rsi"] < 60 and last["rsi"] < prev["rsi"]
+        rsi_bull = 35 < last["rsi"] < 65 and last["rsi"] > prev["rsi"]
+        rsi_bear = 35 < last["rsi"] < 65 and last["rsi"] < prev["rsi"]
         bb_mid = last["BBL_20_2.0"] < last["close"] < last["BBU_20_2.0"]
         macd_bull = last["MACD_12_26_9"] > last["MACDs_12_26_9"] and last["MACDh_12_26_9"] > prev["MACDh_12_26_9"]
         macd_bear = last["MACD_12_26_9"] < last["MACDs_12_26_9"] and last["MACDh_12_26_9"] < prev["MACDh_12_26_9"]
-        vol_spike = last["volume"] > last["vol_ma"] * 2.0
+        vol_spike = last["volume"] > last["vol_ma"] * 1.5
         htf_bull = last["close"] > df.iloc[-24]["close"]  # рост за 24ч
         htf_bear = last["close"] < df.iloc[-24]["close"]
 
@@ -473,8 +471,8 @@ class MultiConfirmStrategy(BaseStrategy):
             "htf_trend": htf_bear,
         }
 
-        # Требуем минимум 5 из 6 фильтров (вместо всех 6) — больше сигналов
-        REQUIRED_SCORE = 5
+        # Требуем минимум 4 из 6 фильтров — режим сбора данных для ML
+        REQUIRED_SCORE = 4
         long_score = sum(long_filters.values())
         short_score = sum(short_filters.values())
         long_setup = long_score >= REQUIRED_SCORE
@@ -535,9 +533,9 @@ class DragonflyGoldStrategy(BaseStrategy):
     DESCRIPTION = "Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP"
     REGIME_PREFERENCE = ["uptrend", "downtrend", "volatile"]
 
-    _MIN_RISK_PCT  = 0.30   # меньше — шум
-    _MAX_RISK_PCT  = 4.0    # больше — нет смысла открывать
-    _MIN_FILTERS   = 4      # минимум из 5 систем должны совпасть
+    _MIN_RISK_PCT  = 0.20   # меньше — шум
+    _MAX_RISK_PCT  = 5.0    # больше — нет смысла открывать
+    _MIN_FILTERS   = 3      # минимум из 5 систем должны совпасть
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -617,8 +615,8 @@ class DragonflyGoldStrategy(BaseStrategy):
         sk_prev = prev["STOCHk_14_3_3"]
         sd_prev = prev["STOCHd_14_3_3"]
 
-        stoch_bull = (sk_prev < sd_prev) and (sk > sd) and sk < 45   # пересечение вверх из зоны ≤45
-        stoch_bear = (sk_prev > sd_prev) and (sk < sd) and sk > 55   # пересечение вниз из зоны ≥55
+        stoch_bull = (sk_prev < sd_prev) and (sk > sd) and sk < 55   # пересечение вверх из зоны ≤55
+        stoch_bear = (sk_prev > sd_prev) and (sk < sd) and sk > 45   # пересечение вниз из зоны ≥45
 
         # ── OBV-фильтр ────────────────────────────────────────────────────────
         obv_bull = last["obv"] > last["obv_ma"]   # объём поддерживает рост
@@ -768,18 +766,16 @@ class OverboughtShortStrategy(BaseStrategy):
 
         # ── SELL: RSI разворачивается вниз от перегрева ────────────
         sell = (
-            rsi0 > 62 and rsi0 < rsi1          # RSI высокий и начинает падать
-            and c >= bbu * 0.998               # цена у верхней BB или выше
+            rsi0 > 58 and rsi0 < rsi1          # RSI высокий и начинает падать
+            and c >= bbu * 0.997               # цена у верхней BB или выше
             and last["MACDh_12_26_9"] < prev["MACDh_12_26_9"]  # MACD гистограмма падает
-            and c > last["ema50"]              # перегрев от средней
         )
 
         # ── BUY: зеркально — RSI разворачивается вверх от перепроданности ──
         buy = (
-            rsi0 < 38 and rsi0 > rsi1          # RSI низкий и начинает расти
-            and c <= bbl * 1.002               # цена у нижней BB или ниже
+            rsi0 < 42 and rsi0 > rsi1          # RSI низкий и начинает расти
+            and c <= bbl * 1.003               # цена у нижней BB или ниже
             and last["MACDh_12_26_9"] > prev["MACDh_12_26_9"]  # MACD гистограмма растёт
-            and c < last["ema50"]              # перепроданность
         )
 
         if not (sell or buy):

@@ -275,15 +275,15 @@ class TrendMomentumStrategy(BaseStrategy):
         ema_stack_bull = last["ema9"] > last["ema21"] > last["ema50"]
         ema_stack_bear = last["ema9"] < last["ema21"] < last["ema50"]
 
-        adx_ok = last["ADX_14"] >= 20
+        adx_ok = last["ADX_14"] >= 15
 
-        # Откат к EMA21 зоне (±0.8 ATR)
+        # Откат к EMA21 зоне (±1.5 ATR — шире для больше сигналов)
         atr = last["atr"]
-        near_ema21_bull = abs(last["close"] - last["ema21"]) < atr * 0.8 and last["close"] > last["ema50"]
-        near_ema21_bear = abs(last["close"] - last["ema21"]) < atr * 0.8 and last["close"] < last["ema50"]
+        near_ema21_bull = abs(last["close"] - last["ema21"]) < atr * 1.5 and last["close"] > last["ema50"]
+        near_ema21_bear = abs(last["close"] - last["ema21"]) < atr * 1.5 and last["close"] < last["ema50"]
 
-        rsi_ok_bull = 38 < last["rsi"] < 65
-        rsi_ok_bear = 35 < last["rsi"] < 62
+        rsi_ok_bull = 33 < last["rsi"] < 70
+        rsi_ok_bear = 30 < last["rsi"] < 67
         vol_ok = last["volume"] > last["vol_ma"] * 1.2
 
         long_filters = {
@@ -368,7 +368,7 @@ class TrendFibonacciStrategy(BaseStrategy):
     DESCRIPTION = "Тренд (HH/HL + EMA + ADX) + откат к уровням Фибоначчи 38.2/50/61.8%"
     REGIME_PREFERENCE = ["uptrend", "downtrend"]
 
-    FIB_TOLERANCE = 0.45   # % допуска для попадания в уровень
+    FIB_TOLERANCE = 0.80   # % допуска для попадания в уровень
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -431,7 +431,7 @@ class TrendFibonacciStrategy(BaseStrategy):
             return None
 
         # ── 3. ADX — сила тренда ──
-        if last["ADX_14"] < 20:
+        if last["ADX_14"] < 15:
             return None
 
         direction = "uptrend" if long_trend else "downtrend"
@@ -450,9 +450,9 @@ class TrendFibonacciStrategy(BaseStrategy):
 
         # ── 5. RSI разворот от экстремума ──
         if direction == "uptrend":
-            rsi_rev = prev["rsi"] < 44 and last["rsi"] > prev["rsi"]
+            rsi_rev = prev["rsi"] < 55 and last["rsi"] > prev["rsi"]
         else:
-            rsi_rev = prev["rsi"] > 56 and last["rsi"] < prev["rsi"]
+            rsi_rev = prev["rsi"] > 45 and last["rsi"] < prev["rsi"]
 
         # ── 6. MACD гистограмма ──
         macd_h = "MACDh_12_26_9"
@@ -462,7 +462,7 @@ class TrendFibonacciStrategy(BaseStrategy):
             macd_turn = True
 
         # ── 7. Объём ──
-        vol_ok = last["volume"] > last["vol_ma"] * 1.1
+        vol_ok = last["volume"] > last["vol_ma"] * 0.9
 
         filters = {
             "trend_structure": True,          # HH/HL или LH/LL

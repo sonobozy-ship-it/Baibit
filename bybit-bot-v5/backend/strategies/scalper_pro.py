@@ -115,8 +115,8 @@ class ScalperTrendContext:
         c   = close.iloc[-1]
         v8, v21, v50 = e8.iloc[-1], e21.iloc[-1], e50.iloc[-1]
 
-        bull = v8 > v21 > v50 and c > v8 and adx_val >= 20
-        bear = v8 < v21 < v50 and c < v8 and adx_val >= 20
+        bull = v8 > v21 > v50 and c > v8 and adx_val >= 15
+        bear = v8 < v21 < v50 and c < v8 and adx_val >= 15
 
         if bull:
             return {
@@ -176,9 +176,9 @@ class ScalperProStrategy(BaseStrategy):
     _RSI_PERIOD = 7
     _BB_PERIOD  = 20
     _BB_K       = 2.0
-    _VOL_MULT   = 1.2
-    _RSI_OS     = 38   # перепроданность → BUY
-    _RSI_OB     = 60   # перекупленность → SELL (было 65, снижено для больше шортов)
+    _VOL_MULT   = 1.0
+    _RSI_OS     = 42   # перепроданность → BUY
+    _RSI_OB     = 58   # перекупленность → SELL
     _MIN_BARS   = 60
 
     def __init__(self, symbol: str = "DOGEUSDT", **kwargs):
@@ -226,14 +226,14 @@ class ScalperProStrategy(BaseStrategy):
             ef0 > es0
             and c0 > es0
             and r1 < self._RSI_OS and r0 >= self._RSI_OS
-            and c0 <= bbl0 * 1.003
+            and c0 <= bbl0 * 1.006
             and vol_ratio >= self._VOL_MULT
         )
         sell = (
             ef0 < es0
             and c0 < es0
             and r1 > self._RSI_OB and r0 <= self._RSI_OB
-            and c0 >= bbu0 * 0.997
+            and c0 >= bbu0 * 0.994
             and vol_ratio >= self._VOL_MULT
         )
 
@@ -254,12 +254,7 @@ class ScalperProStrategy(BaseStrategy):
             )
             return None
 
-        # 15m: если есть и не совпадает — тоже пропускаем
-        if df_m15 is not None and not ScalperTrendContext.aligns(m15_ctx, action):
-            logger.debug(
-                f"[S10] {self.symbol}: 3m={action} ≠ {m15_ctx['reason']} → пропускаем"
-            )
-            return None
+        # 15m: не блокирует, только добавляет к confidence
 
         # ── SL / TP ───────────────────────────────────────────────────────
         if action == "BUY":
