@@ -70,10 +70,17 @@ class TelegramNotifier:
             logger.error(f"Telegram send_photo failed: {e}")
             return False
 
+    @staticmethod
+    def _fmt_timeframe(tf: str) -> str:
+        mapping = {"1": "1м", "3": "3м", "5": "5м", "15": "15м", "30": "30м",
+                   "60": "1ч", "120": "2ч", "240": "4ч", "360": "6ч", "720": "12ч",
+                   "D": "1д", "W": "1н"}
+        return mapping.get(str(tf), f"{tf}м")
+
     async def notify_trade_open(self, strategy_id: str, symbol: str, side: str,
                                 entry: float, sl: float, tp: float, reason: str,
                                 qty: float = 0.0, leverage: int = 1,
-                                df=None):
+                                df=None, timeframe: str = ""):
         from datetime import datetime, timezone
         emoji = "🟢" if side in ("BUY", "Buy") else "🔴"
         notional = round(qty * entry, 2) if qty else 0
@@ -82,14 +89,16 @@ class TelegramNotifier:
         deducted = round(margin + fee_est, 2)
         now = datetime.now(timezone.utc)
         time_str = now.strftime("%d.%m.%Y %H:%M:%S UTC")
+        tf_str = self._fmt_timeframe(timeframe) if timeframe else ""
         caption = (
             f"{emoji} <b>ВХОД: {side} {symbol}</b>\n"
             f"⏰ Открыт: <b>{time_str}</b>\n"
-            f"📊 Стратегия: <code>{strategy_id}</code>\n"
-            f"💰 Вход: <b>{entry:.4f}</b>\n"
+            f"📊 Стратегия: <code>{strategy_id}</code>"
+            + (f" | ⏱ <b>{tf_str}</b>" if tf_str else "") + "\n"
+            f"💰 Вход: <b>{entry:.4f}</b> | Плечо: <b>×{leverage}</b>\n"
             + (
-                f"📦 Объём: <b>{notional:.2f} USDT</b> (плечо ×{leverage})\n"
-                f"🔒 Списано с баланса: <b>{deducted:.2f} USDT</b> (маржа {margin:.2f} + комиссия ~{fee_est:.4f})\n"
+                f"📦 Объём: <b>{notional:.2f} USDT</b>\n"
+                f"🔒 Списано: <b>{deducted:.2f} USDT</b> (маржа {margin:.2f} + комиссия ~{fee_est:.4f})\n"
                 if notional else ""
             ) +
             f"🛑 SL: <code>{sl:.4f}</code>\n"

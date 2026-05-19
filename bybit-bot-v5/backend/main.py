@@ -575,11 +575,13 @@ async def _execute_fusion_signal(
     )
 
     if state.paper_mode:
-        state.paper.open_position(fused, sid, qty, 3)
+        _fusion_lev = min(3, state.risk_manager.max_leverage_cap)
+        state.paper.open_position(fused, sid, qty, _fusion_lev)
         asyncio.create_task(state.telegram.notify_trade_open(
             sid, sym, fused.action,
             fused.entry_price, fused.stop_loss, fused.take_profit,
-            fused.reason, qty=qty, leverage=3, df=chart_df,
+            fused.reason, qty=qty, leverage=_fusion_lev, df=chart_df,
+            timeframe="15",
         ))
         await broadcast_log(f"📄 FUSION {fused.action} {sym} (paper) {log_msg}")
     else:
@@ -639,6 +641,7 @@ async def _execute_fusion_signal(
                 fused.entry_price, fused.stop_loss, fused.take_profit,
                 fused.reason,
                 qty=qty, leverage=lev_check["effective_leverage"], df=chart_df,
+                timeframe="15",
             ))
             await broadcast_log(
                 f"🔥 FUSION {fused.action} {sym} @ {fused.entry_price} "
@@ -1006,12 +1009,12 @@ async def trading_loop():
                             balance=balance,
                             entry_price=signal.entry_price,
                             stop_loss_price=signal.stop_loss,
-                            leverage=strat.leverage,
+                            leverage=effective_leverage,
                         )
 
                     # ============== Открытие позиции ==============
                     if state.paper_mode:
-                        paper_result = state.paper.open_position(signal, sid, qty, strat.leverage)
+                        paper_result = state.paper.open_position(signal, sid, qty, effective_leverage)
                         if not paper_result.get("success"):
                             logger.warning(f"[PAPER] {sid} отказ: {paper_result.get('reason')}")
                             continue
@@ -1020,7 +1023,7 @@ async def trading_loop():
                             signal.entry_price, signal.stop_loss, signal.take_profit,
                         )
                         strat.current_position["qty"] = qty
-                        strat.current_position["leverage"] = strat.leverage
+                        strat.current_position["leverage"] = effective_leverage
                         strat.current_position["opened_at"] = state.paper.positions[signal.symbol]["opened_at"]
                         notional = qty * signal.entry_price
                         state.risk_manager.register_position_open(sid, notional)
@@ -1028,7 +1031,8 @@ async def trading_loop():
                             sid, signal.symbol, signal.action,
                             signal.entry_price, signal.stop_loss, signal.take_profit,
                             signal.reason,
-                            qty=qty, leverage=strat.leverage, df=df,
+                            qty=qty, leverage=effective_leverage, df=df,
+                            timeframe=strat.timeframe,
                         ))
                     else:
                         result = state.bybit.place_order(
@@ -1080,6 +1084,7 @@ async def trading_loop():
                                 signal.entry_price, signal.stop_loss, signal.take_profit,
                                 signal.reason,
                                 qty=qty, leverage=effective_leverage, df=df,
+                                timeframe=strat.timeframe,
                             ))
                             await broadcast_log(f"🟢 {sid} {signal.action} {signal.symbol} @ {signal.entry_price}")
 
