@@ -45,6 +45,29 @@ mkdir -p "$APP_DIR/bybit-bot-v5/backend/data/features"
 mkdir -p "$APP_DIR/bybit-bot-v5/backend/data/models"
 mkdir -p "$APP_DIR/bybit-bot-v5/backend/logs"
 
+# Сброс кривого paper state (баланс без учёта маржи).
+# Удаляем только если версия стейта не содержит поля margin (старый формат).
+PAPER_STATE="$APP_DIR/bybit-bot-v5/backend/data/paper_state.json"
+if [ -f "$PAPER_STATE" ]; then
+    if ! python3 -c "
+import json, sys
+d = json.load(open('$PAPER_STATE'))
+positions = d.get('positions', {})
+# Если есть хоть одна позиция без поля margin — стейт старый, сбрасываем
+if any('margin' not in p for p in positions.values()):
+    sys.exit(1)
+sys.exit(0)
+" 2>/dev/null; then
+        INIT_BAL=$(grep -oP '(?<=PAPER_INITIAL_BALANCE=)\S+' "$ENV_FILE" 2>/dev/null || echo "200")
+        python3 -c "
+import json
+d = {'balance': $INIT_BAL, 'positions': {}, 'trades_history': [], 'saved_at': ''}
+open('$PAPER_STATE', 'w').write(json.dumps(d, indent=2))
+"
+        echo "   ⚠️  Paper state сброшен (старый формат без маржи). Баланс: ${INIT_BAL} USDT"
+    fi
+fi
+
 systemctl restart baibit
 sleep 3
 
