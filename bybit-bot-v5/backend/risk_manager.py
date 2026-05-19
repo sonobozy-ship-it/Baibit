@@ -117,8 +117,15 @@ class RiskManager:
             return 0
         qty = risk_usd / (sl_distance * entry_price)
 
-        # Ограничиваем по доступной марже: notional ≤ balance * leverage * 0.9
-        max_notional = balance * leverage * 0.9
+        # Ограничиваем маржу: не более 20% баланса (малый депозит), 15% (средний), 10% (крупный)
+        if balance < 300:
+            max_margin_pct = 0.20
+        elif balance < 1000:
+            max_margin_pct = 0.15
+        else:
+            max_margin_pct = 0.10
+        max_margin = balance * max_margin_pct
+        max_notional = max_margin * leverage
         if qty * entry_price > max_notional:
             qty = max_notional / entry_price
 

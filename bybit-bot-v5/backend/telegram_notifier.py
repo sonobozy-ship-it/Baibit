@@ -76,17 +76,22 @@ class TelegramNotifier:
                                 df=None):
         from datetime import datetime, timezone
         emoji = "🟢" if side in ("BUY", "Buy") else "🔴"
-        notional = qty * entry if qty else 0
+        notional = round(qty * entry, 2) if qty else 0
         margin = round(notional / leverage, 2) if leverage and leverage > 0 else notional
+        fee_est = round(notional * 0.0006, 4)
+        deducted = round(margin + fee_est, 2)
         now = datetime.now(timezone.utc)
         time_str = now.strftime("%d.%m.%Y %H:%M:%S UTC")
         caption = (
             f"{emoji} <b>ВХОД: {side} {symbol}</b>\n"
             f"⏰ Открыт: <b>{time_str}</b>\n"
             f"📊 Стратегия: <code>{strategy_id}</code>\n"
-            f"💰 Вход: <b>{entry:.4f}</b>"
-            + (f"\n💵 Маржа: <b>{margin:.2f} USDT</b> (×{leverage} = {notional:.1f} USDT)" if notional else "") +
-            f"\n⚡ Плечо: <b>×{leverage}</b>\n"
+            f"💰 Вход: <b>{entry:.4f}</b>\n"
+            + (
+                f"📦 Объём: <b>{notional:.2f} USDT</b> (плечо ×{leverage})\n"
+                f"🔒 Списано с баланса: <b>{deducted:.2f} USDT</b> (маржа {margin:.2f} + комиссия ~{fee_est:.4f})\n"
+                if notional else ""
+            ) +
             f"🛑 SL: <code>{sl:.4f}</code>\n"
             f"🎯 TP: <code>{tp:.4f}</code>"
         )
