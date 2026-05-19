@@ -85,6 +85,8 @@ class BotState:
         self.journal = TradeJournal()
         self.correlation = CorrelationFilter()
         self.ai = AIAnalyzer()
+        # Ранний TP: закрыть когда цена прошла X% пути к TP (0 = выключено)
+        self.early_tp_pct = float(os.getenv("EARLY_TP_PCT", "85"))
         self.paper = PaperTrader(
             initial_balance=float(os.getenv("PAPER_INITIAL_BALANCE", "1000")),
         )
@@ -487,6 +489,82 @@ async def _auto_ai_improve(sid: str, strat_name: str, strat_symbol: str, trades_
 
 
 # ============================================================
+# Ранний выход из позиции (Early TP)
+# ============================================================
+async def _close_position_early(
+    sid: str,
+    strat,
+    exit_price: float,
+    klines_data: dict,
+):
+    """Закрывает позицию до TP, когда цена прошла EARLY_TP_PCT% пути."""
+    pos = strat.current_position
+    if not pos:
+        return
+
+    qty       = pos.get("qty", 1.0)
+    side      = pos["side"]
+    entry     = pos["entry"]
+    tp        = pos["tp"]
+    opened_at = pos.get("opened_at")
+    if hasattr(opened_at, "isoformat"):
+        opened_at = opened_at.isoformat()
+
+    tp_dist     = (tp - entry) if side == "Buy" else (entry - tp)
+    progress    = ((exit_price - entry) / tp_dist * 100) if (side == "Buy" and tp_dist > 0) \
+                  else ((entry - exit_price) / tp_dist * 100) if tp_dist > 0 else 0
+    reason_str  = f"EarlyTP {progress:.0f}%"
+
+    if state.paper_mode:
+        closed      = state.paper._close_position(strat.symbol, exit_price, reason_str)
+        pnl         = closed.get("pnl_usd", 0)
+        close_res   = strat.close_position(exit_price, qty=qty)
+    elif state.bybit:
+        close_side  = "Sell" if side == "Buy" else "Buy"
+        result      = state.bybit.place_order(
+            symbol=strat.symbol,
+            side=close_side,
+            qty=qty,
+            reduce_only=True,
+        )
+        if not result.get("success"):
+            logger.warning(f"[EarlyTP] {sid} place_order failed: {result}")
+            return
+        close_res   = strat.close_position(exit_price, qty=qty)
+        pnl         = close_res.get("pnl_usd", 0)
+    else:
+        return
+
+    state.risk_manager.register_trade_result(sid, pnl)
+    state.risk_manager.register_position_close(sid)
+    state.adaptive.record(sid, close_res.get("r_multiple", 0))
+
+    if strat.trades > 0 and strat.trades % 10 == 0:
+        asyncio.create_task(_auto_ai_improve(sid, strat.NAME, strat.symbol, strat.trades))
+
+    asyncio.create_task(state.telegram.notify_trade_close(
+        sid, strat.symbol, pnl, reason_str,
+        leverage=pos.get("leverage", 1),
+        df=klines_data.get(strat.symbol),
+        entry=entry,
+        side=side,
+        sl=pos.get("sl"),
+        tp=tp,
+        exit_price=exit_price,
+        opened_at=opened_at,
+    ))
+    asyncio.create_task(state.telegram.send(
+        f"💰 <b>Ранний TP: {sid} {strat.symbol}</b>\n"
+        f"Закрыт на <b>{progress:.0f}%</b> пути к TP\n"
+        f"Выход: {exit_price:.6f} | PnL: <b>{pnl:+.2f} USDT</b>"
+    ))
+    await broadcast_log(
+        f"💰 EarlyTP {sid} {strat.symbol} {progress:.0f}% → {pnl:+.2f} USDT",
+        "ok" if pnl > 0 else "warn",
+    )
+
+
+# ============================================================
 # Fusion — исполнение объединённого сигнала
 # ============================================================
 async def _execute_fusion_signal(
@@ -808,17 +886,26 @@ async def trading_loop():
                         )
                         continue
 
-                    # Если позиция уже открыта — проверка breakeven/trailing
+                    # Если позиция уже открыта — проверка breakeven/trailing/early_tp
                     if strat.current_position:
                         current_price = float(df.iloc[-1]["close"])
+
+                        # Breakeven
                         new_sl = strat.check_breakeven(current_price)
                         if new_sl and not state.paper_mode:
                             state.bybit.update_stop_loss(strat.symbol, new_sl)
                             await broadcast_log(f"🛡 {sid} перенос SL в безубыток @ {new_sl:.4f}")
 
+                        # Trailing stop
                         trail_sl = strat.check_trailing_stop(current_price)
                         if trail_sl and not state.paper_mode:
                             state.bybit.update_stop_loss(strat.symbol, trail_sl)
+
+                        # Ранний TP — закрыть если цена прошла early_tp_pct% пути к TP
+                        early_exit = strat.check_early_tp(current_price, state.early_tp_pct)
+                        if early_exit:
+                            await _close_position_early(sid, strat, current_price, klines_data)
+
                         continue
 
                     # Поиск сигнала

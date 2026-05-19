@@ -139,6 +139,34 @@ class BaseStrategy(ABC):
                 return new_sl
         return None
 
+    def check_early_tp(self, current_price: float, threshold_pct: float = 85.0) -> Optional[float]:
+        """
+        Ранний выход: если цена прошла >= threshold_pct% пути от входа до TP —
+        возвращает текущую цену (сигнал закрыть прямо сейчас).
+        0 или отрицательный порог — отключает функцию.
+        """
+        if not self.current_position or threshold_pct <= 0:
+            return None
+
+        entry = self.current_position["entry"]
+        tp    = self.current_position["tp"]
+        side  = self.current_position["side"]
+
+        if side == "Buy":
+            tp_dist = tp - entry
+            progress = (current_price - entry) / tp_dist * 100 if tp_dist > 0 else 0
+        else:
+            tp_dist = entry - tp
+            progress = (entry - current_price) / tp_dist * 100 if tp_dist > 0 else 0
+
+        if progress >= threshold_pct:
+            logger.info(
+                f"{self.ID} {self.symbol}: 💰 Ранний TP @ {current_price:.6f} "
+                f"({progress:.0f}% от TP)"
+            )
+            return current_price
+        return None
+
     def register_position(self, side: str, entry: float, sl: float, tp: float):
         """Регистрация открытой позиции."""
         self.current_position = {
