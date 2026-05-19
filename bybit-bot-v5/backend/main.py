@@ -1564,6 +1564,11 @@ async def lifespan(app: FastAPI):
         state.paper_mode = True
         logger.info("📄 Paper Trading Mode активирован (PAPER_TRADING=true)")
 
+    # ── Scalp Mode по умолчанию ───────────────────────────────────────────────
+    if os.getenv("SCALP_DEFAULT", "true").lower() != "false":
+        activate_scalp_mode()
+        logger.info("⚡ ScalperPro активирован автоматически (SCALP_DEFAULT=true)")
+
     # ── Автостарт бота ────────────────────────────────────────────────────────
     if os.getenv("AUTO_START", "false").lower() == "true":
         if state.bybit or state.paper_mode:

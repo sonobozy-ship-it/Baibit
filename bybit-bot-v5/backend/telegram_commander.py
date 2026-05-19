@@ -103,6 +103,7 @@ class TelegramCommander:
         pause_btn = _btn("▶️ Возобновить", "resume") if self._paused else _btn("⏸ Пауза", "pause")
         bal_str   = f"{s.paper.balance:.0f}" if s.paper_mode else "реал"
         max_pos   = s.risk_manager.max_open_positions
+        scalp_btn = _btn("⚡ Скальп: ВКЛ", "scalp_off") if s.scalp_active else _btn("⚡ Скальп: ВЫКЛ", "scalp_on")
         return _keyboard([
             [go_btn, pause_btn],
             [_btn("💰 Баланс", "balance"), _btn("📌 Позиции", "positions")],
@@ -111,7 +112,7 @@ class TelegramCommander:
             [_btn("📰 Новости", "news"), _btn("🤖 AI", "ai")],
             [_btn(f"💵 Баланс: {bal_str} USDT", "set_balance"),
              _btn(f"📦 Макс сделок: {max_pos}", "set_max_pos")],
-            [_btn("🔄 Обновить меню", "menu")],
+            [scalp_btn, _btn("🔄 Обновить меню", "menu")],
         ])
 
     # ── Polling ───────────────────────────────────────────────────
@@ -232,6 +233,8 @@ class TelegramCommander:
             "news":        self._cmd_news,
             "set_balance": self._cb_set_balance,
             "set_max_pos": self._cb_set_max_pos,
+            "scalp_on":   self._cb_scalp_on,
+            "scalp_off":  self._cb_scalp_off,
         }
 
         # Закрытие отдельной позиции
@@ -295,6 +298,25 @@ class TelegramCommander:
 
     async def _cb_resume(self, upd, arg):
         await self._cmd_resume(upd, arg)
+
+    async def _cb_scalp_on(self, upd, arg):
+        from main import activate_scalp_mode
+        added = activate_scalp_mode()
+        s = self._get_state()
+        count = len([sid for sid in s.strategies if sid.startswith("SC_")])
+        await self.reply(upd,
+            f"⚡ <b>ScalperPro включён</b>\n"
+            f"Активных скальперов: <b>{count}</b> символов\n"
+            f"Добавлено: {', '.join(added) if added else 'уже были активны'}",
+            reply_markup=self._main_menu())
+
+    async def _cb_scalp_off(self, upd, arg):
+        from main import deactivate_scalp_mode
+        deactivate_scalp_mode()
+        await self.reply(upd,
+            "⚡ <b>ScalperPro отключён</b>\n"
+            "SC_* стратегии приостановлены",
+            reply_markup=self._main_menu())
 
     async def _cb_set_balance(self, upd, arg):
         """Запрашивает новый paper-баланс."""

@@ -75,7 +75,7 @@ _SYSTEM_PROMPT = """
 == ПРАВИЛА ПРИНЯТИЯ РЕШЕНИЙ ==
 1. equity_usdt упал на > 15% от стартового баланса за день → stop + alert critical
 2. WR последних 20 сделок < 48% → set_ml_mode strict + alert warning
-3. WR последних 20 сделок > 70% → scalp_on (если не активен) + alert info
+3. scalp_on всегда активен по умолчанию — НЕ отключай без явной причины (drawdown > 15% или kill_switch)
 4. Boost: просадка от пика > 20% → boost_stop + alert warning
 5. Boost: цель достигнута → boost_stop + alert info "🎉 Цель достигнута!"
 6. Нет сделок > 8 часов при запущенном боте И нет открытых позиций → alert warning (возможна проблема)
