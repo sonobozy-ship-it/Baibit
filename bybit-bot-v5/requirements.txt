@@ -23,4 +23,6 @@ xgboost==2.0.3
 lightgbm==4.3.0
 optuna==3.5.0
 pyarrow==15.0.0
+mplfinance==0.12.10b0
+matplotlib==3.8.3
 

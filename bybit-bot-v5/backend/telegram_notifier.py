@@ -7,6 +7,13 @@ import logging
 import aiohttp
 from typing import Optional
 
+try:
+    import pandas as pd
+    from chart_generator import generate_trade_chart
+    _CHART_OK = True
+except Exception:
+    _CHART_OK = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,28 +48,92 @@ class TelegramNotifier:
             logger.error(f"Telegram send failed: {e}")
             return False
 
-    async def notify_trade_open(self, strategy_id: str, symbol: str, side: str,
-                                 entry: float, sl: float, tp: float, reason: str):
-        emoji = "🟢" if side == "BUY" else "🔴"
-        text = (
-            f"{emoji} <b>{side} {symbol}</b>\n"
-            f"Стратегия: <code>{strategy_id}</code>\n"
-            f"Вход: <b>{entry:.4f}</b>\n"
-            f"SL: <code>{sl:.4f}</code>\n"
-            f"TP: <code>{tp:.4f}</code>\n"
-            f"Причина: <i>{reason}</i>"
-        )
-        await self.send(text)
+    async def send_photo(self, photo_bytes: bytes, caption: str = "", parse_mode: str = "HTML") -> bool:
+        """Отправить PNG-график."""
+        if not self.enabled or not photo_bytes:
+            return False
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+            async with aiohttp.ClientSession() as session:
+                form = aiohttp.FormData()
+                form.add_field("chat_id", self.chat_id)
+                form.add_field("caption", caption[:1024])
+                form.add_field("parse_mode", parse_mode)
+                form.add_field("photo", photo_bytes, filename="chart.png", content_type="image/png")
+                async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        return True
+                    body = await resp.text()
+                    logger.warning(f"Telegram photo error {resp.status}: {body[:200]}")
+                    return False
+        except Exception as e:
+            logger.error(f"Telegram send_photo failed: {e}")
+            return False
 
-    async def notify_trade_close(self, strategy_id: str, symbol: str, pnl: float, reason: str):
-        emoji = "✅" if pnl > 0 else "❌"
-        text = (
-            f"{emoji} <b>Закрыта {symbol}</b>\n"
-            f"Стратегия: <code>{strategy_id}</code>\n"
-            f"PnL: <b>{'+' if pnl > 0 else ''}{pnl:.2f} USDT</b>\n"
-            f"Причина: <i>{reason}</i>"
+    async def notify_trade_open(self, strategy_id: str, symbol: str, side: str,
+                                entry: float, sl: float, tp: float, reason: str,
+                                qty: float = 0.0, leverage: int = 1,
+                                df=None):
+        from datetime import datetime, timezone
+        emoji = "🟢" if side in ("BUY", "Buy") else "🔴"
+        notional = qty * entry if qty else 0
+        time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        caption = (
+            f"{emoji} <b>ВХОД: {side} {symbol}</b>\n"
+            f"⏰ {time_str}\n"
+            f"📊 Стратегия: <code>{strategy_id}</code>\n"
+            f"💰 Вход: <b>{entry:.4f}</b>"
+            + (f" | Объём: <b>{notional:.1f} USDT</b>" if notional else "") +
+            f"\n⚡ Плечо: <b>×{leverage}</b>\n"
+            f"🛑 SL: <code>{sl:.4f}</code>\n"
+            f"🎯 TP: <code>{tp:.4f}</code>"
         )
-        await self.send(text)
+        if _CHART_OK and df is not None:
+            try:
+                chart = generate_trade_chart(
+                    df=df, symbol=symbol, side=side,
+                    entry=entry, sl=sl, tp=tp,
+                    strategy_id=strategy_id,
+                )
+                if chart:
+                    await self.send_photo(chart, caption=caption)
+                    return
+            except Exception as e:
+                logger.warning(f"[Chart] notify_trade_open: {e}")
+        await self.send(caption)
+
+    async def notify_trade_close(self, strategy_id: str, symbol: str, pnl: float, reason: str,
+                                 leverage: int = 1,
+                                 df=None, entry: Optional[float] = None,
+                                 side: Optional[str] = None, sl: Optional[float] = None,
+                                 tp: Optional[float] = None, exit_price: Optional[float] = None):
+        from datetime import datetime, timezone
+        emoji = "✅" if pnl > 0 else "❌"
+        time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        pnl_str = f"+{pnl:.2f}" if pnl > 0 else f"{pnl:.2f}"
+        caption = (
+            f"{emoji} <b>ВЫХОД: {symbol}</b>\n"
+            f"⏰ {time_str}\n"
+            f"📊 Стратегия: <code>{strategy_id}</code>\n"
+            f"⚡ Плечо: <b>×{leverage}</b>\n"
+            f"💵 PnL: <b>{pnl_str} USDT</b>\n"
+            f"📌 Причина: <i>{reason}</i>"
+        )
+        if _CHART_OK and df is not None and entry and side and sl and tp:
+            try:
+                norm_side = side.upper() if side else side
+                chart = generate_trade_chart(
+                    df=df, symbol=symbol, side=norm_side,
+                    entry=entry, sl=sl, tp=tp,
+                    exit_price=exit_price,
+                    strategy_id=strategy_id,
+                )
+                if chart:
+                    await self.send_photo(chart, caption=caption)
+                    return
+            except Exception as e:
+                logger.warning(f"[Chart] notify_trade_close: {e}")
+        await self.send(caption)
 
     async def notify_kill_switch(self, reason: str, balance: float):
         text = (

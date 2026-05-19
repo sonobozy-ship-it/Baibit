@@ -456,12 +456,22 @@ async def _execute_fusion_signal(
         logger.info(f"[Fusion] ❌ {corr['reason']}")
         return
 
+    # Свечи для ML и графика
+    chart_df = None
+    if state.bybit:
+        try:
+            _cdf = state.bybit.get_klines(sym, "60", limit=250)
+            if _cdf is not None and not _cdf.empty:
+                chart_df = _cdf
+        except Exception:
+            pass
+
     # ML snapshot + prediction
     ml_prediction = None
     fusion_snapshot_id = None
     if state.ml_enabled:
         try:
-            df = state.bybit.get_klines(sym, "60", limit=250) if state.bybit else None
+            df = chart_df
             if df is not None and not df.empty:
                 orderbook   = state.bybit.get_orderbook(sym, limit=25)
                 market_meta = state.bybit.get_market_meta(sym)
@@ -533,6 +543,11 @@ async def _execute_fusion_signal(
 
     if state.paper_mode:
         state.paper.open_position(fused, sid, qty, 3)
+        asyncio.create_task(state.telegram.notify_trade_open(
+            sid, sym, fused.action,
+            fused.entry_price, fused.stop_loss, fused.take_profit,
+            fused.reason, qty=qty, leverage=3, df=chart_df,
+        ))
         await broadcast_log(f"📄 FUSION {fused.action} {sym} (paper) {log_msg}")
     else:
         if not state.bybit:
@@ -590,6 +605,7 @@ async def _execute_fusion_signal(
                 sid, sym, fused.action,
                 fused.entry_price, fused.stop_loss, fused.take_profit,
                 fused.reason,
+                qty=qty, leverage=lev_check["effective_leverage"], df=chart_df,
             ))
             await broadcast_log(
                 f"🔥 FUSION {fused.action} {sym} @ {fused.entry_price} "
@@ -945,8 +961,15 @@ async def trading_loop():
                             signal.entry_price, signal.stop_loss, signal.take_profit,
                         )
                         strat.current_position["qty"] = qty
+                        strat.current_position["leverage"] = strat.leverage
                         notional = qty * signal.entry_price
                         state.risk_manager.register_position_open(sid, notional)
+                        asyncio.create_task(state.telegram.notify_trade_open(
+                            sid, signal.symbol, signal.action,
+                            signal.entry_price, signal.stop_loss, signal.take_profit,
+                            signal.reason,
+                            qty=qty, leverage=strat.leverage, df=df,
+                        ))
                     else:
                         result = state.bybit.place_order(
                             symbol=signal.symbol,
@@ -962,6 +985,7 @@ async def trading_loop():
                                 signal.entry_price, signal.stop_loss, signal.take_profit,
                             )
                             strat.current_position["qty"] = qty
+                            strat.current_position["leverage"] = effective_leverage
                             notional = qty * signal.entry_price
                             state.risk_manager.register_position_open(sid, notional)
 
@@ -995,6 +1019,7 @@ async def trading_loop():
                                 sid, signal.symbol, signal.action,
                                 signal.entry_price, signal.stop_loss, signal.take_profit,
                                 signal.reason,
+                                qty=qty, leverage=effective_leverage, df=df,
                             ))
                             await broadcast_log(f"🟢 {sid} {signal.action} {signal.symbol} @ {signal.entry_price}")
 
@@ -1036,6 +1061,16 @@ async def trading_loop():
                                 state.risk_manager.register_trade_result(_sid, pnl)
                                 state.risk_manager.register_position_close(_sid)
                                 state.adaptive.record(_sid, close_res.get("r_multiple", 0))
+                                asyncio.create_task(state.telegram.notify_trade_close(
+                                    _sid, c_sym, pnl, reason,
+                                    leverage=closed_pos.get("leverage", 1),
+                                    df=klines_data.get(c_sym),
+                                    entry=closed_pos.get("entry_price"),
+                                    side=closed_pos.get("side"),
+                                    sl=closed_pos.get("stop_loss"),
+                                    tp=closed_pos.get("take_profit"),
+                                    exit_price=closed_pos.get("exit_price"),
+                                ))
                                 await broadcast_log(
                                     f"{'✅' if pnl > 0 else '❌'} [PAPER] {_sid} {c_sym} {reason} → {pnl:+.2f} USDT",
                                     "ok" if pnl > 0 else "warn",
@@ -1109,7 +1144,12 @@ async def trading_loop():
                                     )
 
                                 asyncio.create_task(state.telegram.notify_trade_close(
-                                    sid, strat.symbol, pnl_usd, exit_reason
+                                    sid, strat.symbol, pnl_usd, exit_reason,
+                                    leverage=pos.get("leverage", 1),
+                                    df=klines_data.get(strat.symbol),
+                                    entry=pos["entry"], side=pos["side"],
+                                    sl=pos["sl"], tp=pos["tp"],
+                                    exit_price=exit_price,
                                 ))
                                 # Boost: регистрируем результат, обновляем фазу
                                 new_balance = state.bybit.get_balance("USDT")
