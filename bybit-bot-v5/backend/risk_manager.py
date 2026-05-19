@@ -88,27 +88,21 @@ class RiskManager:
         return {"allowed": True, "effective_leverage": effective_lev, "capped": capped}
 
     def adaptive_risk_pct(self, balance: float) -> float:
-        """
-        Адаптивный % риска на сделку в зависимости от размера баланса.
-        Малый депозит торгует агрессивнее чтобы расти, крупный — консервативнее.
-        """
-        if balance < 300:
-            return 2.0    # 200 USDT → 4 USDT риска / сделку
-        elif balance < 1000:
-            return 1.5    # 500 USDT → 7.5 USDT риска
-        elif balance < 5000:
-            return 1.0    # 2000 USDT → 20 USDT риска
-        else:
-            return 0.75   # 10000 USDT → 75 USDT риска
+        """Риск на сделку: не более 1% от депозита при любом балансе."""
+        return 1.0
 
     def max_positions_for_balance(self, balance: float) -> int:
-        """Лимит одновременных позиций по размеру депозита."""
-        if balance < 300:
-            return 2
-        elif balance < 1000:
+        """Лимит одновременных позиций — растёт с балансом, потолок max_open_positions."""
+        if balance < 100:
+            return 1
+        elif balance < 300:
             return 3
+        elif balance < 600:
+            return 6
+        elif balance < 1000:
+            return 10
         else:
-            return self.max_open_positions
+            return self.max_open_positions   # 20 при 1000+ USDT
 
     def calculate_position_size(
         self,

@@ -62,23 +62,44 @@ fi
 mkdir -p "$DATA_DIR/candles" "$DATA_DIR/features" "$DATA_DIR/models"
 mkdir -p "$BACKEND/logs"
 
-# ── 8. Проверка paper_state: сброс только если старый формат ─────────────────
+# ── 8. Paper state: синхронизация баланса и проверка формата ─────────────────
 PAPER_STATE="$DATA_DIR/paper_state.json"
+INIT_BAL=$(grep -oP '(?<=PAPER_INITIAL_BALANCE=)\S+' "$ENV_FILE" 2>/dev/null || echo "1000")
+
 if [ -f "$PAPER_STATE" ]; then
+    # 8a. Сброс если старый формат (без поля margin у позиций)
     if ! python3 -c "
 import json, sys
 d = json.load(open('$PAPER_STATE'))
 if any('margin' not in p for p in d.get('positions', {}).values()):
     sys.exit(1)
 " 2>/dev/null; then
-        INIT_BAL=$(grep -oP '(?<=PAPER_INITIAL_BALANCE=)\S+' "$ENV_FILE" 2>/dev/null || echo "200")
         python3 -c "
 import json
 d = {'balance': $INIT_BAL, 'positions': {}, 'trades_history': [], 'saved_at': ''}
 open('$PAPER_STATE', 'w').write(json.dumps(d, indent=2))
 "
         echo "   ⚠️  Paper state сброшен (старый формат). Баланс: ${INIT_BAL} USDT"
+    else
+        # 8b. Обновляем баланс до PAPER_INITIAL_BALANCE (сохраняем историю сделок)
+        python3 -c "
+import json
+data = json.load(open('$PAPER_STATE'))
+old_bal = data.get('balance', 0)
+data['balance'] = $INIT_BAL
+data['initial_balance'] = $INIT_BAL
+open('$PAPER_STATE', 'w').write(json.dumps(data, indent=2))
+print(f'   ✅ Paper баланс: {old_bal:.2f} → $INIT_BAL USDT (история сохранена)')
+" 2>/dev/null || true
     fi
+else
+    # 8c. Создаём новый state
+    python3 -c "
+import json
+d = {'balance': $INIT_BAL, 'initial_balance': $INIT_BAL, 'positions': {}, 'trades_history': [], 'saved_at': ''}
+open('$PAPER_STATE', 'w').write(json.dumps(d, indent=2))
+"
+    echo "   ✅ Paper state создан. Баланс: ${INIT_BAL} USDT"
 fi
 
 # ── 9. Обновление Python-зависимостей ────────────────────────────────────────
