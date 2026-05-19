@@ -1,71 +1,49 @@
 """
-Telegram Commander — двусторонний интерфейс управления ботом.
-
-Polling-режим через aiohttp (без python-telegram-bot, без вебхуков).
-Запускается как asyncio-таск внутри FastAPI event loop.
-
-Команды:
-  /start      — приветствие + меню
-  /help       — список команд
-  /status     — статус бота (запущен/остановлен, режим, позиции)
-  /balance    — баланс USDT
-  /report     — дневной отчёт (сделки, PnL, WR)
-  /positions  — открытые позиции
-  /go         — запустить торговый цикл
-  /stop       — остановить торговый цикл
-  /paper_on   — включить paper mode
-  /paper_off  — выключить paper mode
-  /strategies — статус всех стратегий
-  /enable S1  — включить стратегию
-  /disable S1 — отключить стратегию
-  /risk       — статус риск-менеджера
-  /ai         — AI рекомендации (последние)
-  /news       — последние новости (сентимент)
-  /pause      — приостановить (не открывать новые сделки)
-  /resume     — возобновить
+Telegram Commander — двусторонний интерфейс с инлайн-кнопками.
+Polling через aiohttp. Кнопки: Старт/Стоп, Баланс, Сделки, Лучшая модель, Позиции.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime
-from typing import Any, Callable, Coroutine, Dict, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
-
-# Timeout для long-polling (getUpdates)
 _POLL_TIMEOUT = 30
 
 
-class TelegramCommander:
-    """
-    Long-polling commander.
-    Работает в одном event loop с FastAPI — запускать через asyncio.create_task(commander.run()).
-    """
+# ── Хелперы для кнопок ────────────────────────────────────────
+def _btn(text: str, data: str) -> Dict:
+    return {"text": text, "callback_data": data}
 
+def _keyboard(rows: List[List[Dict]]) -> Dict:
+    return {"inline_keyboard": rows}
+
+
+class TelegramCommander:
     def __init__(
         self,
         bot_token: str,
         allowed_chat_id: str,
-        state_getter: Callable[[], Any],        # возвращает BotState
-        start_fn: Callable[[], Coroutine],      # запустить торговый цикл
-        stop_fn: Callable[[], Coroutine],       # остановить торговый цикл
+        state_getter: Callable[[], Any],
+        start_fn: Callable[[], Coroutine],
+        stop_fn: Callable[[], Coroutine],
     ):
-        self.token         = bot_token
-        self.allowed_id    = str(allowed_chat_id).strip()
-        self._get_state    = state_getter
-        self._start_fn     = start_fn
-        self._stop_fn      = stop_fn
-        self._base_url     = f"https://api.telegram.org/bot{bot_token}"
-        self._offset       = 0
-        self._paused       = False
+        self.token      = bot_token
+        self.allowed_id = str(allowed_chat_id).strip()
+        self._get_state = state_getter
+        self._start_fn  = start_fn
+        self._stop_fn   = stop_fn
+        self._base_url  = f"https://api.telegram.org/bot{bot_token}"
+        self._offset    = 0
+        self._paused    = False
         self._session: Optional[aiohttp.ClientSession] = None
-        self.enabled       = bool(bot_token and allowed_chat_id)
+        self.enabled    = bool(bot_token and allowed_chat_id)
 
-    # ── HTTP helpers ─────────────────────────────────────────────────────────
+    # ── HTTP ─────────────────────────────────────────────────────
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -80,36 +58,61 @@ class TelegramCommander:
             async with session.post(f"{self._base_url}/{method}", json=kwargs) as resp:
                 data = await resp.json()
                 if not data.get("ok"):
-                    logger.debug(f"Telegram API {method}: {data.get('description')}")
+                    logger.debug(f"Telegram {method}: {data.get('description')}")
                     return None
                 return data.get("result")
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug(f"Telegram API error ({method}): {e}")
+            logger.debug(f"Telegram error ({method}): {e}")
             return None
 
-    async def send(self, chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
-        result = await self._api(
-            "sendMessage",
-            chat_id=chat_id,
-            text=text,
-            parse_mode=parse_mode,
-            disable_web_page_preview=True,
-        )
-        return result is not None
+    async def send(self, chat_id: str, text: str,
+                   parse_mode: str = "HTML",
+                   reply_markup: Optional[Dict] = None) -> Optional[Dict]:
+        kwargs = dict(chat_id=chat_id, text=text,
+                      parse_mode=parse_mode, disable_web_page_preview=True)
+        if reply_markup:
+            kwargs["reply_markup"] = reply_markup
+        return await self._api("sendMessage", **kwargs)
 
-    async def reply(self, update: Dict, text: str):
-        chat_id = str(update["message"]["chat"]["id"])
-        await self.send(chat_id, text)
+    async def edit(self, chat_id: str, message_id: int, text: str,
+                   reply_markup: Optional[Dict] = None):
+        kwargs = dict(chat_id=chat_id, message_id=message_id,
+                      text=text, parse_mode="HTML", disable_web_page_preview=True)
+        if reply_markup:
+            kwargs["reply_markup"] = reply_markup
+        await self._api("editMessageText", **kwargs)
 
-    # ── Polling loop ─────────────────────────────────────────────────────────
+    async def answer_callback(self, callback_id: str, text: str = ""):
+        await self._api("answerCallbackQuery", callback_query_id=callback_id, text=text)
+
+    async def reply(self, upd: Dict, text: str, reply_markup: Optional[Dict] = None):
+        msg = upd.get("message") or upd.get("edited_message")
+        if msg:
+            chat_id = str(msg["chat"]["id"])
+            await self.send(chat_id, text, reply_markup=reply_markup)
+
+    # ── Главное меню ─────────────────────────────────────────────
+
+    def _main_menu(self) -> Dict:
+        s = self._get_state()
+        go_btn = _btn("🛑 Стоп", "stop") if s.bot_running else _btn("🚀 Старт", "go")
+        pause_btn = _btn("▶️ Возобновить", "resume") if self._paused else _btn("⏸ Пауза", "pause")
+        return _keyboard([
+            [go_btn, pause_btn],
+            [_btn("💰 Баланс", "balance"), _btn("📌 Позиции", "positions")],
+            [_btn("📊 Сделки", "trades"), _btn("🏆 Лучшие модели", "best_models")],
+            [_btn("📈 Стратегии", "strategies"), _btn("🛡 Риск", "risk")],
+            [_btn("📰 Новости", "news"), _btn("🤖 AI", "ai")],
+            [_btn("🔄 Обновить меню", "menu")],
+        ])
+
+    # ── Polling ───────────────────────────────────────────────────
 
     async def run(self):
         if not self.enabled:
-            logger.info("[TgCommander] Отключён — задайте TELEGRAM_TOKEN + TELEGRAM_CHAT_ID")
             return
-
         logger.info("[TgCommander] Запущен (long-polling)")
         while True:
             try:
@@ -117,42 +120,44 @@ class TelegramCommander:
                     "getUpdates",
                     offset=self._offset,
                     timeout=_POLL_TIMEOUT,
-                    allowed_updates=["message"],
+                    allowed_updates=["message", "callback_query"],
                 )
                 if updates:
                     for upd in updates:
                         self._offset = upd["update_id"] + 1
                         await self._handle(upd)
             except asyncio.CancelledError:
-                logger.info("[TgCommander] Остановлен")
                 break
             except Exception as e:
-                logger.warning(f"[TgCommander] Ошибка polling: {e}")
+                logger.warning(f"[TgCommander] Polling error: {e}")
                 await asyncio.sleep(5)
 
     async def _handle(self, upd: Dict):
+        # Callback от кнопки
+        if "callback_query" in upd:
+            await self._handle_callback(upd["callback_query"])
+            return
+
         msg = upd.get("message") or upd.get("edited_message")
         if not msg:
             return
 
         chat_id = str(msg["chat"]["id"])
-        text = (msg.get("text") or "").strip()
-
-        # Авторизация — только разрешённый chat_id
         if chat_id != self.allowed_id:
-            logger.warning(f"[TgCommander] Отклонён chat_id={chat_id}")
             return
 
+        text = (msg.get("text") or "").strip()
         if not text.startswith("/"):
             return
 
         parts = text.split(maxsplit=1)
-        cmd   = parts[0].lower().split("@")[0]   # убираем @botname
+        cmd   = parts[0].lower().split("@")[0]
         arg   = parts[1].strip() if len(parts) > 1 else ""
 
         handlers = {
             "/start":      self._cmd_start,
             "/help":       self._cmd_help,
+            "/menu":       self._cmd_menu,
             "/status":     self._cmd_status,
             "/balance":    self._cmd_balance,
             "/report":     self._cmd_report,
@@ -169,6 +174,8 @@ class TelegramCommander:
             "/news":       self._cmd_news,
             "/pause":      self._cmd_pause,
             "/resume":     self._cmd_resume,
+            "/trades":     self._cmd_trades,
+            "/best":       self._cmd_best_models,
         }
 
         handler = handlers.get(cmd)
@@ -176,198 +183,307 @@ class TelegramCommander:
             try:
                 await handler(upd, arg)
             except Exception as e:
-                logger.error(f"[TgCommander] Ошибка команды {cmd}: {e}")
+                logger.error(f"[TgCommander] {cmd}: {e}")
                 await self.reply(upd, f"❌ Ошибка: {e}")
         else:
-            await self.reply(upd, f"❓ Неизвестная команда: <code>{cmd}</code>\nНапишите /help")
+            await self.reply(upd, f"❓ Неизвестная команда. Напишите /menu")
 
-    # ── Команды ──────────────────────────────────────────────────────────────
+    async def _handle_callback(self, cb: Dict):
+        chat_id = str(cb["from"]["id"])
+        if chat_id != self.allowed_id:
+            return
+
+        data       = cb.get("data", "")
+        msg_id     = cb["message"]["message_id"]
+        cb_id      = cb["id"]
+
+        await self.answer_callback(cb_id)
+
+        # Формируем псевдо-upd для совместимости с reply()
+        fake_upd = {"message": {"chat": {"id": chat_id}}}
+
+        action_map = {
+            "menu":        self._show_menu_edit,
+            "go":          self._cb_go,
+            "stop":        self._cb_stop,
+            "pause":       self._cb_pause,
+            "resume":      self._cb_resume,
+            "balance":     self._cmd_balance,
+            "positions":   self._cmd_positions,
+            "trades":      self._cmd_trades,
+            "best_models": self._cmd_best_models,
+            "strategies":  self._cmd_strategies,
+            "risk":        self._cmd_risk,
+            "ai":          self._cmd_ai,
+            "news":        self._cmd_news,
+        }
+
+        fn = action_map.get(data)
+        if fn:
+            if data in ("menu",):
+                await fn(chat_id, msg_id)
+            else:
+                await fn(fake_upd, "")
+
+    async def _show_menu_edit(self, chat_id: str, msg_id: int):
+        s = self._get_state()
+        mode    = "📄 Paper" if s.paper_mode else "💰 Real"
+        status  = "🟢 Работает" if s.bot_running else "🔴 Остановлен"
+        balance = s.paper.balance if s.paper_mode else 0
+        pnl     = sum(st.pnl for st in s.strategies.values())
+        trades  = sum(st.trades for st in s.strategies.values())
+
+        text = (
+            f"🤖 <b>Baibit Trading Bot</b>\n\n"
+            f"{status} | {mode}\n"
+            f"Баланс: <b>{balance:.2f} USDT</b>\n"
+            f"PnL сессии: <b>{pnl:+.2f} USDT</b>\n"
+            f"Сделок: <b>{trades}</b>\n"
+            f"<i>{datetime.utcnow().strftime('%H:%M UTC')}</i>"
+        )
+        await self.edit(chat_id, msg_id, text, reply_markup=self._main_menu())
+
+    # ── Callback-версии Старт/Стоп/Пауза ────────────────────────
+
+    async def _cb_go(self, upd, arg):
+        s = self._get_state()
+        if s.bot_running:
+            await self.reply(upd, "ℹ️ Бот уже запущен", reply_markup=self._main_menu())
+            return
+        self._paused = False
+        await self._start_fn()
+        await self.reply(upd, "🚀 Торговый цикл запущен", reply_markup=self._main_menu())
+
+    async def _cb_stop(self, upd, arg):
+        s = self._get_state()
+        if not s.bot_running:
+            await self.reply(upd, "ℹ️ Бот уже остановлен", reply_markup=self._main_menu())
+            return
+        await self._stop_fn()
+        await self.reply(upd, "🛑 Торговый цикл остановлен", reply_markup=self._main_menu())
+
+    async def _cb_pause(self, upd, arg):
+        await self._cmd_pause(upd, arg)
+
+    async def _cb_resume(self, upd, arg):
+        await self._cmd_resume(upd, arg)
+
+    # ── Команды ──────────────────────────────────────────────────
 
     async def _cmd_start(self, upd, arg):
-        await self.reply(upd,
-            "👋 <b>Baibit Trading Bot</b>\n\n"
-            "Управление ботом через Telegram.\n"
-            "Напишите /help для списка команд."
+        s = self._get_state()
+        mode    = "📄 Paper" if s.paper_mode else "💰 Real"
+        status  = "🟢 Работает" if s.bot_running else "🔴 Остановлен"
+        balance = s.paper.balance if s.paper_mode else 0
+        pnl     = sum(st.pnl for st in s.strategies.values())
+        trades  = sum(st.trades for st in s.strategies.values())
+
+        text = (
+            f"🤖 <b>Baibit Trading Bot</b>\n\n"
+            f"{status} | {mode}\n"
+            f"Баланс: <b>{balance:.2f} USDT</b>\n"
+            f"PnL сессии: <b>{pnl:+.2f} USDT</b>\n"
+            f"Сделок: <b>{trades}</b>\n"
+            f"<i>{datetime.utcnow().strftime('%H:%M UTC')}</i>"
         )
+        await self.reply(upd, text, reply_markup=self._main_menu())
+
+    async def _cmd_menu(self, upd, arg):
+        await self._cmd_start(upd, arg)
 
     async def _cmd_help(self, upd, arg):
         await self.reply(upd,
-            "📋 <b>Команды бота</b>\n\n"
-            "<b>Информация:</b>\n"
-            "  /status — состояние бота\n"
-            "  /balance — баланс USDT\n"
-            "  /report — дневной отчёт\n"
-            "  /positions — открытые позиции\n"
-            "  /risk — риск-менеджер\n"
-            "  /ai — AI рекомендации\n"
-            "  /news — сентимент новостей\n"
-            "  /strategies — статус стратегий\n\n"
-            "<b>Управление:</b>\n"
-            "  /go — запустить торговлю\n"
-            "  /stop — остановить\n"
-            "  /pause — пауза (не открывать новые)\n"
-            "  /resume — возобновить\n"
-            "  /paper_on / /paper_off — paper mode\n"
-            "  /enable S1 — включить стратегию\n"
-            "  /disable S1 — отключить стратегию"
+            "📋 <b>Команды</b>\n\n"
+            "/menu — главное меню с кнопками\n"
+            "/balance — баланс\n"
+            "/positions — открытые позиции\n"
+            "/trades — последние сделки по стратегиям\n"
+            "/best — лучшие стратегии\n"
+            "/strategies — все стратегии\n"
+            "/risk — риск-менеджер\n"
+            "/go — запустить  |  /stop — стоп\n"
+            "/pause — пауза  |  /resume — продолжить\n"
+            "/paper_on  |  /paper_off\n"
+            "/enable S1  |  /disable S1\n"
+            "/ai — AI рекомендации\n"
+            "/news — новостной сентимент"
         )
 
     async def _cmd_status(self, upd, arg):
-        s = self._get_state()
-        mode = "📄 Paper" if s.paper_mode else "💰 Real"
-        paused = " ⏸ ПАУЗА" if self._paused else ""
-        running = "🟢 Запущен" if s.bot_running else "🔴 Остановлен"
-        open_pos = sum(1 for st in s.strategies.values() if st.current_position)
-        enabled  = sum(1 for st in s.strategies.values() if st.enabled and not st.auto_disabled)
-
-        bybit_ok = "✅" if s.bybit else "❌"
-        ai_ok    = "✅" if s.ai.enabled else "❌"
-        news_ok  = "✅" if s.news_enabled else "❌"
-        ml_ok    = "✅" if s.ml_enabled else "❌"
-
-        await self.reply(upd,
-            f"<b>Статус бота</b>\n\n"
-            f"{running} | {mode}{paused}\n\n"
-            f"Открытых позиций: <b>{open_pos}</b>\n"
-            f"Активных стратегий: <b>{enabled}</b> / {len(s.strategies)}\n\n"
-            f"Bybit API: {bybit_ok}  |  AI: {ai_ok}\n"
-            f"Новости: {news_ok}  |  ML: {ml_ok}\n"
-            f"<i>{datetime.utcnow().strftime('%H:%M:%S UTC')}</i>"
-        )
+        await self._cmd_start(upd, arg)
 
     async def _cmd_balance(self, upd, arg):
         s = self._get_state()
         if s.paper_mode:
-            ps = s.paper.get_stats()
+            ps  = s.paper.get_stats()
             bal = ps.get("balance", 0)
             pnl = ps.get("total_pnl", 0)
+            wins   = ps.get("wins", 0)
+            trades = ps.get("trades", 0)
+            wr = wins / trades * 100 if trades else 0
             await self.reply(upd,
-                f"💵 <b>Paper Balance</b>\n\n"
+                f"💰 <b>Paper Balance</b>\n\n"
                 f"Баланс: <b>{bal:.2f} USDT</b>\n"
                 f"PnL: <b>{pnl:+.2f} USDT</b>\n"
-                f"Сделок: {ps.get('trades', 0)}"
+                f"Сделок: {trades} | WR: {wr:.1f}%",
+                reply_markup=self._main_menu()
             )
         elif s.bybit:
             try:
                 bal = s.bybit.get_balance("USDT")
                 rm  = s.risk_manager.get_status()
                 await self.reply(upd,
-                    f"💵 <b>Баланс</b>\n\n"
-                    f"USDT: <b>{bal:.4f}</b>\n"
+                    f"💰 <b>Баланс</b>\n\n"
+                    f"USDT: <b>{bal:.2f}</b>\n"
                     f"Дневной PnL: <b>{rm.get('daily_pnl', 0):+.2f} USDT</b>\n"
-                    f"Использование риска: {rm.get('open_positions', 0)}/{rm.get('max_positions', 5)} поз."
+                    f"Позиций: {rm.get('open_positions', 0)}/{rm.get('max_positions', 4)}",
+                    reply_markup=self._main_menu()
                 )
             except Exception as e:
-                await self.reply(upd, f"❌ Ошибка получения баланса: {e}")
+                await self.reply(upd, f"❌ {e}")
         else:
-            await self.reply(upd, "❌ Bybit API не подключён")
+            await self.reply(upd, "❌ Нет подключения к Bybit")
+
+    async def _cmd_trades(self, upd, arg):
+        """Последние сделки по каждой стратегии."""
+        s = self._get_state()
+        lines = ["📊 <b>Сделки по стратегиям</b>\n"]
+        has_data = False
+        for sid, st in sorted(s.strategies.items()):
+            if st.trades == 0:
+                continue
+            has_data = True
+            wr    = st.wins / st.trades * 100 if st.trades else 0
+            emoji = "🟢" if st.pnl >= 0 else "🔴"
+            lines.append(
+                f"{emoji} <b>{sid}</b> {st.symbol}\n"
+                f"   Сделок: {st.trades} | WR: {wr:.0f}% | PnL: {st.pnl:+.2f}$"
+            )
+        if not has_data:
+            await self.reply(upd, "📭 Сделок пока нет — бот только запустился")
+            return
+        await self.reply(upd, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_best_models(self, upd, arg):
+        """Рейтинг стратегий по win rate и PnL."""
+        s = self._get_state()
+        rated = []
+        for sid, st in s.strategies.items():
+            if st.trades < 3:
+                continue
+            wr = st.wins / st.trades * 100 if st.trades else 0
+            rated.append((sid, st, wr))
+
+        if not rated:
+            await self.reply(upd, "📭 Недостаточно данных — нужно минимум 3 сделки на стратегию")
+            return
+
+        # Сортируем по PnL
+        by_pnl = sorted(rated, key=lambda x: x[1].pnl, reverse=True)
+        # Сортируем по WR
+        by_wr  = sorted(rated, key=lambda x: x[2], reverse=True)
+
+        lines = ["🏆 <b>Лучшие стратегии</b>\n"]
+        lines.append("<b>По прибыли (PnL):</b>")
+        for i, (sid, st, wr) in enumerate(by_pnl[:5], 1):
+            medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][i-1]
+            lines.append(f"{medal} {sid} {st.symbol}: <b>{st.pnl:+.2f}$</b> ({st.trades} сделок)")
+
+        lines.append("\n<b>По Win Rate:</b>")
+        for i, (sid, st, wr) in enumerate(by_wr[:5], 1):
+            medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][i-1]
+            lines.append(f"{medal} {sid} {st.symbol}: <b>{wr:.0f}%</b> WR ({st.trades} сделок)")
+
+        await self.reply(upd, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_report(self, upd, arg):
         s = self._get_state()
         try:
-            today = datetime.utcnow().date().isoformat()
+            today  = datetime.utcnow().date().isoformat()
             trades = s.journal.get_trades(start_date=today, limit=500)
             total  = len(trades)
             wins   = sum(1 for t in trades if (t.get("pnl_usd") or 0) > 0)
-            losses = total - wins
             pnl    = sum(t.get("pnl_usd") or 0 for t in trades)
             wr     = wins / total * 100 if total else 0
             best   = max((t.get("pnl_usd") or 0 for t in trades), default=0)
             worst  = min((t.get("pnl_usd") or 0 for t in trades), default=0)
-
             await self.reply(upd,
-                f"📊 <b>Дневной отчёт</b>\n"
-                f"<i>{today}</i>\n\n"
-                f"Сделок: <b>{total}</b> ({wins}W / {losses}L)\n"
+                f"📊 <b>Дневной отчёт</b> <i>{today}</i>\n\n"
+                f"Сделок: <b>{total}</b> ({wins}W/{total-wins}L)\n"
                 f"Win Rate: <b>{wr:.1f}%</b>\n"
                 f"PnL: <b>{pnl:+.2f} USDT</b>\n"
-                f"Лучшая: <code>{best:+.2f}</code>\n"
-                f"Худшая: <code>{worst:+.2f}</code>"
+                f"Лучшая: <code>{best:+.2f}</code> | Худшая: <code>{worst:+.2f}</code>",
+                reply_markup=self._main_menu()
             )
         except Exception as e:
-            await self.reply(upd, f"❌ Ошибка: {e}")
+            await self.reply(upd, f"❌ {e}")
 
     async def _cmd_positions(self, upd, arg):
         s = self._get_state()
-        open_pos = [
-            (sid, st) for sid, st in s.strategies.items() if st.current_position
-        ]
+        open_pos = [(sid, st) for sid, st in s.strategies.items() if st.current_position]
         if not open_pos:
-            await self.reply(upd, "📭 Нет открытых позиций")
+            await self.reply(upd, "📭 Нет открытых позиций", reply_markup=self._main_menu())
             return
-
         lines = ["<b>Открытые позиции</b>\n"]
         for sid, st in open_pos:
-            pos  = st.current_position
-            side = pos.get("side", "?")
-            e    = pos.get("entry", 0)
-            sl   = pos.get("sl", 0)
-            tp   = pos.get("tp", 0)
+            pos   = st.current_position
+            side  = pos.get("side", "?")
+            e, sl, tp = pos.get("entry",0), pos.get("sl",0), pos.get("tp",0)
             emoji = "🟢" if side == "Buy" else "🔴"
-            lines.append(
-                f"{emoji} <b>{sid}</b> {st.symbol}\n"
-                f"  Вход: {e:.4f} | SL: {sl:.4f} | TP: {tp:.4f}"
-            )
-        await self.reply(upd, "\n".join(lines))
+            lines.append(f"{emoji} <b>{sid}</b> {st.symbol} {side}\n   Вход: {e:.4f} | SL: {sl:.4f} | TP: {tp:.4f}")
+        await self.reply(upd, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_go(self, upd, arg):
         s = self._get_state()
         if s.bot_running:
-            await self.reply(upd, "ℹ️ Бот уже запущен")
+            await self.reply(upd, "ℹ️ Уже запущен", reply_markup=self._main_menu())
             return
         if not s.bybit and not s.paper_mode:
-            await self.reply(upd, "❌ Нет Bybit API и не включён Paper Mode")
+            await self.reply(upd, "❌ Нет Bybit API и Paper Mode не включён")
             return
         self._paused = False
         await self._start_fn()
-        await self.reply(upd, "🚀 Торговый цикл запущен")
+        await self.reply(upd, "🚀 Торговый цикл запущен", reply_markup=self._main_menu())
 
     async def _cmd_stop(self, upd, arg):
         s = self._get_state()
         if not s.bot_running:
-            await self.reply(upd, "ℹ️ Бот уже остановлен")
+            await self.reply(upd, "ℹ️ Уже остановлен", reply_markup=self._main_menu())
             return
         await self._stop_fn()
-        await self.reply(upd, "🛑 Торговый цикл остановлен")
+        await self.reply(upd, "🛑 Остановлен", reply_markup=self._main_menu())
 
     async def _cmd_paper_on(self, upd, arg):
-        s = self._get_state()
-        s.paper_mode = True
-        await self.reply(upd, "📄 Paper Mode включён")
+        self._get_state().paper_mode = True
+        await self.reply(upd, "📄 Paper Mode включён", reply_markup=self._main_menu())
 
     async def _cmd_paper_off(self, upd, arg):
-        s = self._get_state()
-        s.paper_mode = False
-        await self.reply(upd, "💰 Paper Mode выключен — торговля реальная")
+        self._get_state().paper_mode = False
+        await self.reply(upd, "💰 Real Mode — реальная торговля!", reply_markup=self._main_menu())
 
     async def _cmd_strategies(self, upd, arg):
         s = self._get_state()
         lines = ["<b>Стратегии</b>\n"]
         for sid, st in s.strategies.items():
-            if st.auto_disabled:
-                icon = "🚫"
-            elif st.enabled:
-                icon = "✅"
-            else:
-                icon = "⏹"
-            pos = "📌" if st.current_position else "  "
-            stats = st.get_rolling_stats()
-            wr = stats.get("win_rate", 0)
-            lines.append(f"{icon}{pos} <code>{sid}</code> {st.symbol} WR={wr:.0f}%")
-        await self.reply(upd, "\n".join(lines))
+            icon = "🚫" if st.auto_disabled else ("✅" if st.enabled else "⏹")
+            pos  = "📌" if st.current_position else "  "
+            wr   = st.wins / st.trades * 100 if st.trades else 0
+            pnl_str = f"{st.pnl:+.1f}$" if st.trades else "—"
+            lines.append(f"{icon}{pos} <code>{sid}</code> WR={wr:.0f}% PnL={pnl_str}")
+        await self.reply(upd, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_enable(self, upd, arg):
-        s = self._get_state()
+        s   = self._get_state()
         sid = arg.upper().strip()
         if sid not in s.strategies:
             await self.reply(upd, f"❌ Стратегия <code>{sid}</code> не найдена")
             return
-        s.strategies[sid].enabled = True
+        s.strategies[sid].enabled      = True
         s.strategies[sid].auto_disabled = False
         await self.reply(upd, f"✅ {sid} включена")
 
     async def _cmd_disable(self, upd, arg):
-        s = self._get_state()
+        s   = self._get_state()
         sid = arg.upper().strip()
         if sid not in s.strategies:
             await self.reply(upd, f"❌ Стратегия <code>{sid}</code> не найдена")
@@ -376,20 +492,20 @@ class TelegramCommander:
         await self.reply(upd, f"⏹ {sid} отключена")
 
     async def _cmd_risk(self, upd, arg):
-        s = self._get_state()
+        s  = self._get_state()
         rm = s.risk_manager.get_status()
         kill = "🛑 KILL SWITCH" if rm.get("kill_switch") else "✅ Активен"
         await self.reply(upd,
             f"🛡 <b>Риск-менеджер</b>\n\n"
             f"Статус: {kill}\n"
-            f"Позиции: {rm.get('open_positions', 0)} / {rm.get('max_positions', 5)}\n"
-            f"Дневной PnL: <b>{rm.get('daily_pnl', 0):+.2f} USDT</b>\n"
-            f"Дневной лимит убытка: {rm.get('daily_max_loss_pct', 0):.0f}%\n"
-            f"Серия убытков: {rm.get('consecutive_losses', 0)}"
+            f"Позиций: {rm.get('open_positions',0)}/{rm.get('max_positions',4)}\n"
+            f"Дневной PnL: <b>{rm.get('daily_pnl',0):+.2f} USDT</b>\n"
+            f"Лимит убытка: {rm.get('daily_max_loss_pct',0):.0f}%",
+            reply_markup=self._main_menu()
         )
 
     async def _cmd_ai(self, upd, arg):
-        s = self._get_state()
+        s   = self._get_state()
         rec = getattr(s, "_cached_ai_rec", None)
         if not rec or not rec.get("available"):
             await self.reply(upd, "ℹ️ AI рекомендации ещё не получены (обновляются каждые 30 мин)")
@@ -398,14 +514,15 @@ class TelegramCommander:
         risk   = rec.get("risk_level", "?")
         reason = rec.get("reasoning", "")[:300]
         fg     = rec.get("fear_greed", {})
-        fg_val = fg.get("value", "?") if fg else "?"
-        fg_lbl = fg.get("label", "") if fg else ""
+        fg_val = fg.get("value","?") if fg else "?"
+        fg_lbl = fg.get("label","") if fg else ""
         await self.reply(upd,
             f"🧠 <b>AI Рекомендация</b>\n\n"
             f"Действие: <b>{action}</b>\n"
             f"Риск: <b>{risk}</b>\n"
             f"Fear &amp; Greed: <b>{fg_val}</b> {fg_lbl}\n\n"
-            f"<i>{reason}</i>"
+            f"<i>{reason}</i>",
+            reply_markup=self._main_menu()
         )
 
     async def _cmd_news(self, upd, arg):
@@ -414,20 +531,21 @@ class TelegramCommander:
             await self.reply(upd, "ℹ️ Новостной модуль отключён")
             return
         try:
-            feat = s.news_manager.get_sentiment_features()
-            score  = feat.get("sentiment_score", 0)
-            count  = feat.get("news_count_24h", 0)
-            bull   = feat.get("bull_count", 0)
-            bear   = feat.get("bear_count", 0)
-            emoji  = "🟢" if score > 0.1 else ("🔴" if score < -0.1 else "⚪")
+            feat  = s.news_manager.get_sentiment_features()
+            score = feat.get("sentiment_score", 0)
+            count = feat.get("news_count_24h", 0)
+            bull  = feat.get("bull_count", 0)
+            bear  = feat.get("bear_count", 0)
+            emoji = "🟢" if score > 0.1 else ("🔴" if score < -0.1 else "⚪")
             await self.reply(upd,
                 f"📰 <b>Новостной сентимент</b>\n\n"
                 f"{emoji} Score: <b>{score:+.3f}</b>\n"
-                f"Новостей за 24ч: <b>{count}</b>\n"
-                f"Бычьих: {bull} | Медвежьих: {bear}"
+                f"Новостей 24ч: <b>{count}</b>\n"
+                f"Бычьих: {bull} | Медвежьих: {bear}",
+                reply_markup=self._main_menu()
             )
         except Exception as e:
-            await self.reply(upd, f"❌ Ошибка: {e}")
+            await self.reply(upd, f"❌ {e}")
 
     async def _cmd_pause(self, upd, arg):
         self._paused = True
@@ -440,7 +558,7 @@ class TelegramCommander:
                 await asyncio.wait_for(asyncio.shield(task), timeout=3)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
-        await self.reply(upd, "⏸ Бот приостановлен — новые сделки не открываются")
+        await self.reply(upd, "⏸ Пауза — новые сделки не открываются", reply_markup=self._main_menu())
 
     async def _cmd_resume(self, upd, arg):
         if not self._paused:
@@ -450,7 +568,7 @@ class TelegramCommander:
         s = self._get_state()
         s.bot_running = True
         await self._start_fn()
-        await self.reply(upd, "▶️ Бот возобновлён")
+        await self.reply(upd, "▶️ Возобновлён", reply_markup=self._main_menu())
 
     async def close(self):
         if self._session and not self._session.closed:
