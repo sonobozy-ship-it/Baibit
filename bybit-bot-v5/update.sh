@@ -67,31 +67,44 @@ PAPER_STATE="$DATA_DIR/paper_state.json"
 INIT_BAL=$(grep -oP '(?<=PAPER_INITIAL_BALANCE=)\S+' "$ENV_FILE" 2>/dev/null || echo "1000")
 
 if [ -f "$PAPER_STATE" ]; then
-    # 8a. Сброс если старый формат (без поля margin у позиций)
-    if ! python3 -c "
+    # 8a/8b. Мигрируем формат БЕЗ сброса баланса.
+    # Старый формат (позиции без поля margin) — добавляем margin=0, не уничтожаем данные.
+    python3 -c "
 import json, sys
-d = json.load(open('$PAPER_STATE'))
-if any('margin' not in p for p in d.get('positions', {}).values()):
-    sys.exit(1)
-" 2>/dev/null; then
-        python3 -c "
-import json
-d = {'balance': $INIT_BAL, 'positions': {}, 'trades_history': [], 'saved_at': ''}
-open('$PAPER_STATE', 'w').write(json.dumps(d, indent=2))
-"
-        echo "   ⚠️  Paper state сброшен (старый формат). Баланс: ${INIT_BAL} USDT"
-    else
-        # 8b. Сохраняем текущий баланс, обновляем только initial_balance если не задан
-        python3 -c "
-import json
-data = json.load(open('$PAPER_STATE'))
-cur_bal = data.get('balance', $INIT_BAL)
+try:
+    data = json.load(open('$PAPER_STATE'))
+except Exception as e:
+    print(f'   ⚠️  paper_state.json повреждён ({e}), создаём новый')
+    data = {}
+
+cur_bal = data.get('balance')
+if cur_bal is None or not isinstance(cur_bal, (int, float)) or cur_bal <= 0:
+    cur_bal = $INIT_BAL
+    print(f'   ⚠️  Баланс не найден в state, используем PAPER_INITIAL_BALANCE={cur_bal}')
+
+# Миграция позиций: добавляем отсутствующие поля
+positions = data.get('positions', {})
+migrated = 0
+for sym, pos in positions.items():
+    if 'margin' not in pos:
+        pos['margin'] = 0.0
+        migrated += 1
+    if 'strategy_id' not in pos:
+        pos['strategy_id'] = 'unknown'
+
+# Обновляем только служебные поля, баланс НЕ трогаем
+data['balance'] = cur_bal
 if 'initial_balance' not in data:
     data['initial_balance'] = $INIT_BAL
+if 'positions' not in data:
+    data['positions'] = {}
+if 'trades_history' not in data:
+    data['trades_history'] = []
+
 open('$PAPER_STATE', 'w').write(json.dumps(data, indent=2))
-print(f'   ✅ Paper баланс сохранён: {cur_bal:.2f} USDT (история сохранена)')
-" 2>/dev/null || true
-    fi
+mig_msg = f', мигрировано позиций: {migrated}' if migrated else ''
+print(f'   ✅ Paper баланс сохранён: {cur_bal:.2f} USDT (история сохранена{mig_msg})')
+" 2>&1 || echo "   ⚠️  Ошибка обработки paper_state, файл не изменён"
 else
     # 8c. Создаём новый state
     python3 -c "
