@@ -89,12 +89,25 @@ class BacktestResult:
 
 
 class Backtester:
-    def __init__(self, initial_balance: float = 1000.0, fee_pct: float = 0.06):
+    def __init__(
+        self,
+        initial_balance: float = 1000.0,
+        fee_pct: float = 0.06,
+        conservative: bool = True,
+        slippage_pct: float = 0.05,
+        funding_pct: float = 0.01,
+    ):
         """
-        fee_pct — комиссия в % (Bybit taker = 0.06%)
+        fee_pct       — комиссия в % (Bybit taker = 0.06%)
+        conservative  — при SL+TP на одной свече берём худший (SL) исход
+        slippage_pct  — % от notional при входе
+        funding_pct   — % от notional каждые 8ч (funding)
         """
         self.initial_balance = initial_balance
         self.fee_pct = fee_pct
+        self.conservative = conservative
+        self.slippage_pct = slippage_pct
+        self.funding_pct = funding_pct
 
     def run(
         self,
@@ -114,6 +127,7 @@ class Backtester:
         balance = self.initial_balance
         result.equity_curve.append(balance)
 
+        strategy.timeframe_minutes = getattr(strategy, 'timeframe_minutes', 15)
         logger.info(f"🔬 Backtest {strategy.ID} {strategy.NAME} на {len(df)} свечей")
 
         for i in range(warmup_candles, len(df) - 1):  # -1 чтобы был next_candle для исполнения
@@ -135,6 +149,10 @@ class Backtester:
                 strategy.check_breakeven(next_open)
                 strategy.check_trailing_stop(next_open)
 
+                # Conservative mode: если SL и TP задеты на одной свече — берём худший сценарий
+                if self.conservative and hit_sl and hit_tp:
+                    hit_tp = False  # считаем что сначала hit SL
+
                 if hit_sl or hit_tp:
                     exit_price = pos["tp"] if hit_tp else pos["sl"]
                     entry = pos["entry"]
@@ -151,9 +169,14 @@ class Backtester:
                     fees = (notional_in + notional_out) * (self.fee_pct / 100)
                     pnl_usd = gross - fees
 
-                    # Slippage симуляция (0.05% дефолт)
-                    slippage = notional_in * 0.0005
+                    slippage = notional_in * (self.slippage_pct / 100)
                     pnl_usd -= slippage
+
+                    # Funding: примерно 1 раз за 8 часов на удерживаемую позицию
+                    candles_held = i - strategy.current_position.get("open_bar", i)
+                    funding_periods = candles_held * (strategy.timeframe_minutes / 480)
+                    funding_cost = notional_in * (self.funding_pct / 100) * max(0, funding_periods)
+                    pnl_usd -= funding_cost
 
                     balance += pnl_usd
 
@@ -204,6 +227,7 @@ class Backtester:
                     tp=signal.take_profit,
                 )
                 strategy.current_position["qty"] = qty
+                strategy.current_position["open_bar"] = i
 
         result.end_balance = balance
         logger.info(f"✅ Backtest завершён. Trades: {len(result.trades)}, Balance: {balance:.2f}")

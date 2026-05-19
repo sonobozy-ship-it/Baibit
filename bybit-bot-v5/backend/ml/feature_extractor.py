@@ -12,6 +12,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════════════════════════
+# LEAKAGE PREVENTION NOTES:
+# strategy_recent_wr / recent_pnl / recent_losses — должны быть
+# snapshot ДО начала текущей сделки (не включая её результат).
+# Признаки вычисляются на закрытых свечах ДО сигнала.
+# Текущий результат сделки НИКОГДА не должен попадать в признаки.
+# ML strict mode разрешён только после MIN_TRADES_FOR_STRICT сделок.
+# ═══════════════════════════════════════════════════════════════
+MIN_TRADES_FOR_STRICT = 50   # минимум сделок для strict ML-режима
+MIN_OOS_METRIC = 0.55        # минимальный out-of-sample win rate для активации
+
+
+def is_strict_mode_ready(trades_count: int, oos_win_rate: float) -> bool:
+    """ML strict mode разрешён только при достаточной статистике."""
+    return trades_count >= MIN_TRADES_FOR_STRICT and oos_win_rate >= MIN_OOS_METRIC
+
 
 class FeatureExtractor:
     """Извлекает 50+ фич из DataFrame со свечами."""

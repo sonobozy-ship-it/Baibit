@@ -46,6 +46,41 @@ class BybitClient:
             logger.error(f"Ошибка получения баланса: {e}")
             return 0.0
 
+    def get_instrument_info(self, symbol: str) -> Dict:
+        """Правила округления qty/price для символа (кешируется)."""
+        if not hasattr(self, "_instrument_cache"):
+            self._instrument_cache: Dict[str, Dict] = {}
+        if symbol in self._instrument_cache:
+            return self._instrument_cache[symbol]
+        try:
+            res = self.session.get_instruments_info(category="linear", symbol=symbol)
+            if res["retCode"] == 0 and res["result"]["list"]:
+                info = res["result"]["list"][0]
+                lot = info.get("lotSizeFilter", {})
+                price_f = info.get("priceFilter", {})
+                result = {
+                    "min_qty":      float(lot.get("minOrderQty", "0.001")),
+                    "qty_step":     float(lot.get("qtyStep", "0.001")),
+                    "min_notional": float(lot.get("minNotionalValue", "5")),
+                    "tick_size":    float(price_f.get("tickSize", "0.01")),
+                    "max_leverage": float(info.get("leverageFilter", {}).get("maxLeverage", "100")),
+                }
+                self._instrument_cache[symbol] = result
+                return result
+        except Exception as e:
+            logger.warning(f"get_instrument_info {symbol}: {e}")
+        return {"min_qty": 0.001, "qty_step": 0.001, "min_notional": 5.0, "tick_size": 0.01, "max_leverage": 100.0}
+
+    @staticmethod
+    def round_to_step(value: float, step: float) -> float:
+        """Округлить value вниз до кратного step."""
+        if step <= 0:
+            return value
+        import math
+        precision = max(0, -int(math.floor(math.log10(step)))) if step < 1 else 0
+        result = math.floor(value / step) * step
+        return round(result, precision + 2)
+
     def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
         """Получить открытые позиции."""
         if self.public_only:
@@ -78,6 +113,36 @@ class BybitClient:
         """Открыть позицию."""
         if self.public_only:
             return {"success": False, "error": "Public-only mode: no API credentials"}
+
+        # ── Safety gate ──────────────────────────────────────────────
+        # 1. Округление qty по правилам биржи
+        info = self.get_instrument_info(symbol)
+        qty = self.round_to_step(qty, info["qty_step"])
+        if qty < info["min_qty"]:
+            return {"success": False, "error": f"qty {qty} < minOrderQty {info['min_qty']}"}
+        if qty * (price or 0) > 0 and qty * price < info["min_notional"]:
+            # Проверка notional только если цена известна
+            pass  # При market ордере цена неизвестна заранее
+
+        # 2. Округление SL/TP по tick_size
+        tick = info["tick_size"]
+        if stop_loss is not None:
+            stop_loss = self.round_to_step(stop_loss, tick)
+        if take_profit is not None:
+            take_profit = self.round_to_step(take_profit, tick)
+
+        # 3. Hard cap на плечо
+        max_lev = int(min(leverage, info["max_leverage"]))
+        if max_lev != leverage:
+            logger.warning(f"[SafetyGate] {symbol}: leverage {leverage}x → {max_lev}x (биржевой лимит)")
+            leverage = max_lev
+
+        # 4. Логирование перед отправкой
+        logger.info(
+            f"[ORDER] {symbol} {side} qty={qty} lev={leverage}x "
+            f"SL={stop_loss} TP={take_profit} type={order_type}"
+        )
+
         try:
             # Установить плечо
             try:

@@ -34,6 +34,7 @@ class RiskManager:
         self.max_daily_trades = max_daily_trades
         self.max_daily_losses = max_daily_losses
         self.max_strategy_daily_losses = max_strategy_daily_losses
+        self.risk_hard_cap_pct = min(risk_per_trade_pct, 1.0)  # не более 1% абсолютный hard cap
 
         # Состояние
         self.daily_start_balance: Optional[float] = None
@@ -91,8 +92,8 @@ class RiskManager:
         return {"allowed": True, "effective_leverage": effective_lev, "capped": capped}
 
     def adaptive_risk_pct(self, balance: float) -> float:
-        """Риск на сделку: не более 1% от депозита при любом балансе."""
-        return 1.0
+        """Риск на сделку: не более hard_cap_pct от депозита при любом балансе."""
+        return min(self.risk_per_trade_pct, self.risk_hard_cap_pct)
 
     def max_positions_for_balance(self, balance: float) -> int:
         """Лимит одновременных позиций — растёт с балансом, потолок max_open_positions."""
@@ -151,6 +152,13 @@ class RiskManager:
         qty = round(qty, 4)
         if qty * entry_price < min_notional:
             return 0
+
+        # Hard cap: риск в $ не превышает risk_hard_cap_pct от баланса
+        hard_cap_usd = balance * (self.risk_hard_cap_pct / 100)
+        if sl_dist > 0 and qty * entry_price * effective_sl_dist > hard_cap_usd * 1.1:
+            qty = hard_cap_usd / (effective_sl_dist * entry_price)
+            qty = round(qty, 4)
+
         return qty
 
     def can_open_trade(self, strategy_id: str, balance: float) -> Dict:

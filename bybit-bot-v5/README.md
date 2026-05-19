@@ -1,10 +1,15 @@
+> ⚠️ **EXPERIMENTAL** — This is an experimental trading bot for research and paper trading.
+> It is **NOT experimental** and **NOT financial advice**.
+> Start with paper mode only. Real-money trading is at your own risk.
+> Minimum 2 weeks of paper trading before considering live mode.
+
 # 🤖 BYBIT AUTOTRADER PRO v5.0 — INTELLIGENCE EDITION
 
 Самообучающийся бот для Bybit с 7 стратегиями, ML-фильтром, **новостями/Twitter/AI-sentiment**, ансамблевыми моделями, concept drift detection, anomaly detection и полным набором юнит-тестов.
 
 ## 🆕 Что нового в v5.0
 
-### 🔴 Критичные фиксы (production-ready)
+### 🔴 Критичные фиксы (experimental)
 - ✅ **Корректный PnL расчёт** (`position_calc.py`) — реальный `qty × (exit - entry)` минус комиссии
 - ✅ **No look-ahead bias** в бэктестере — сигнал на свече `i`, исполнение на `open` свечи `i+1`
 - ✅ **ML data leakage fix** — rolling-окно (20 сделок) вместо глобальных счётчиков
@@ -227,7 +232,7 @@ USE_KELLY=true   # если ML стабилен
 
 ## ❤️ Финальные заметки
 
-Этот код — production-ready foundation. Для реальной торговли:
+Этот код — experimental foundation. Для реальной торговли:
 1. Прогоните на testnet **минимум 2 недели**
 2. Сравните метрики бэктеста с paper trading
 3. Начинайте с `RISK_PER_TRADE_PCT=0.5` (не 1.0)
