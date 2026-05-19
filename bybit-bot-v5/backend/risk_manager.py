@@ -19,7 +19,8 @@ class RiskManager:
         cooldown_after_loss_min: int = 15,
         max_consecutive_losses: int = 3,
         max_leverage_cap: int = 5,
-        max_total_notional_pct: float = 300.0,  # макс суммарная notional как % от баланса
+        max_total_notional_pct: float = 300.0,
+        max_daily_trades: int = 10,             # лимит сделок в день
     ):
         self.daily_max_loss_pct = daily_max_loss_pct
         self.max_open_positions = max_open_positions
@@ -28,10 +29,12 @@ class RiskManager:
         self.max_consecutive_losses = max_consecutive_losses
         self.max_leverage_cap = max_leverage_cap
         self.max_total_notional_pct = max_total_notional_pct
+        self.max_daily_trades = max_daily_trades
 
         # Состояние
         self.daily_start_balance: Optional[float] = None
         self.daily_pnl = 0.0
+        self.daily_trades_count = 0             # сколько сделок открыто сегодня
         self.daily_reset_at = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         self.kill_switch = False                # глобальный стоп
         self.kill_switch_reason = ""
@@ -44,6 +47,7 @@ class RiskManager:
         """Сброс ежедневных счётчиков (вызывается раз в сутки)."""
         self.daily_start_balance = current_balance
         self.daily_pnl = 0.0
+        self.daily_trades_count = 0
         self.kill_switch = False
         self.kill_switch_reason = ""
         self.strategy_losses.clear()
@@ -164,7 +168,14 @@ class RiskManager:
                 logger.critical(self.kill_switch_reason)
                 return {"allowed": False, "reason": self.kill_switch_reason}
 
-        # 3. Лимит открытых позиций (адаптивный по балансу)
+        # 3. Лимит сделок в день
+        if self.daily_trades_count >= self.max_daily_trades:
+            return {
+                "allowed": False,
+                "reason": f"Дневной лимит сделок {self.max_daily_trades} достигнут"
+            }
+
+        # 4. Лимит открытых позиций (адаптивный по балансу)
         pos_limit = self.max_positions_for_balance(balance)
         if self.open_positions_count >= pos_limit:
             return {
@@ -172,7 +183,7 @@ class RiskManager:
                 "reason": f"Достигнут лимит позиций ({self.max_open_positions})"
             }
 
-        # 4. Cooldown стратегии после убытка
+        # 5. Cooldown стратегии после убытка
         if strategy_id in self.strategy_cooldowns:
             if datetime.utcnow() < self.strategy_cooldowns[strategy_id]:
                 remaining = (self.strategy_cooldowns[strategy_id] - datetime.utcnow()).total_seconds() / 60
@@ -181,7 +192,7 @@ class RiskManager:
                     "reason": f"Cooldown {remaining:.1f} мин"
                 }
 
-        # 5. Серия убытков
+        # 6. Серия убытков
         if self.strategy_losses[strategy_id] >= self.max_consecutive_losses:
             return {
                 "allowed": False,
@@ -204,6 +215,7 @@ class RiskManager:
 
     def register_position_open(self, strategy_id: str = "", notional_usd: float = 0.0):
         self.open_positions_count += 1
+        self.daily_trades_count += 1
         if strategy_id and notional_usd > 0:
             self._open_notional[strategy_id] = notional_usd
 
@@ -218,6 +230,8 @@ class RiskManager:
             "daily_pnl": self.daily_pnl,
             "daily_pnl_pct": (self.daily_pnl / self.daily_start_balance * 100) if self.daily_start_balance else 0,
             "daily_max_loss_pct": self.daily_max_loss_pct,
+            "daily_trades_count": self.daily_trades_count,
+            "max_daily_trades": self.max_daily_trades,
             "open_positions": self.open_positions_count,
             "max_positions": self.max_open_positions,
             "kill_switch": self.kill_switch,

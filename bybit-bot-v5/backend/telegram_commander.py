@@ -643,6 +643,7 @@ class TelegramCommander:
             f"🛡 <b>Риск-менеджер</b>\n\n"
             f"Статус: {kill}\n"
             f"Позиций: {rm.get('open_positions',0)}/{rm.get('max_positions',4)}\n"
+            f"Сделок сегодня: <b>{rm.get('daily_trades_count',0)}/{rm.get('max_daily_trades',10)}</b>\n"
             f"Дневной PnL: <b>{rm.get('daily_pnl',0):+.2f} USDT</b>\n"
             f"Лимит убытка: {rm.get('daily_max_loss_pct',0):.0f}%",
             reply_markup=self._main_menu()
