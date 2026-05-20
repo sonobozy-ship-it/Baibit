@@ -291,7 +291,10 @@ class TradeJournal:
             import sqlite3 as _sq3
             conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
             try:
-                df = pd.read_sql(sql, conn)
+                cur = conn.cursor()
+                cur.execute(sql)
+                cols = [d[0] for d in cur.description]
+                df = pd.DataFrame(cur.fetchall(), columns=cols)
             finally:
                 conn.close()
         if df.empty:
@@ -365,11 +368,13 @@ class TradeJournal:
             with self.pool.connection() as conn:
                 return pd.read_sql(sql, conn, params=params)
         else:
-            # Свежее соединение БЕЗ row_factory — pd.read_sql несовместим с sqlite3.Row
             import sqlite3 as _sq3
             conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
             try:
-                df = pd.read_sql(sql, conn, params=params)
+                cur = conn.cursor()
+                cur.execute(sql, params)
+                cols = [d[0] for d in cur.description]
+                df = pd.DataFrame(cur.fetchall(), columns=cols)
             finally:
                 conn.close()
             return df
@@ -442,8 +447,20 @@ class TradeJournal:
             " AND ".join(where)
         )
         try:
-            with self.pool.connection() as conn:
-                df = pd.read_sql(self.pool.adapt(sql), conn, params=params)
+            adapted_sql = self.pool.adapt(sql)
+            if self.pool.is_mysql:
+                with self.pool.connection() as conn:
+                    df = pd.read_sql(adapted_sql, conn, params=params)
+            else:
+                import sqlite3 as _sq3
+                conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
+                try:
+                    cur = conn.cursor()
+                    cur.execute(adapted_sql, params)
+                    cols = [d[0] for d in cur.description]
+                    df = pd.DataFrame(cur.fetchall(), columns=cols)
+                finally:
+                    conn.close()
         except Exception:
             df = pd.DataFrame()
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -465,10 +482,20 @@ class TradeJournal:
         return df[["timestamp", "strategy_id", "symbol", "pnl_usd", "cumulative_pnl"]].to_dict(orient="records")
 
     def get_heatmap_data(self) -> Dict:
-        with self.pool.connection() as conn:
-            df = pd.read_sql(
-                "SELECT * FROM trades WHERE exit_price IS NOT NULL", conn
-            )
+        sql = "SELECT * FROM trades WHERE exit_price IS NOT NULL"
+        if self.pool.is_mysql:
+            with self.pool.connection() as conn:
+                df = pd.read_sql(sql, conn)
+        else:
+            import sqlite3 as _sq3
+            conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
+            try:
+                cur = conn.cursor()
+                cur.execute(sql)
+                cols = [d[0] for d in cur.description]
+                df = pd.DataFrame(cur.fetchall(), columns=cols)
+            finally:
+                conn.close()
         if df.empty:
             return {}
         df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
