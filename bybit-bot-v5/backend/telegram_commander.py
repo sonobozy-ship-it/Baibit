@@ -197,6 +197,7 @@ class TelegramCommander:
             "/improve":    self._cmd_improve,
             "/advisor":    self._cmd_advisor,
             "/exportdb":   self._cmd_exportdb,
+            "/scalp":      self._cmd_scalp,
         }
 
         handler = handlers.get(cmd)
@@ -1005,6 +1006,36 @@ class TelegramCommander:
         except Exception as e:
             logger.error(f"[TgCommander] advisor run: {e}")
             await self.reply(upd, f"❌ Ошибка: {e}", reply_markup=self._main_menu())
+
+    async def _cmd_scalp(self, upd, arg):
+        """
+        /scalp        — статус скальпинга
+        /scalp on     — включить
+        /scalp off    — выключить
+        """
+        from main import activate_scalp_mode, deactivate_scalp_mode
+        s = self._get_state()
+        a = arg.lower().strip()
+        if a in ("on", "вкл", "1"):
+            added = activate_scalp_mode()
+            count = len([sid for sid in s.strategies if sid.startswith("SC_")])
+            await self.reply(upd, f"⚡ Скальпинг включён\nСтратегий: <b>{count}</b>\nДобавлено: {added}")
+        elif a in ("off", "выкл", "0"):
+            deactivate_scalp_mode()
+            await self.reply(upd, "⏹ Скальпинг выключен, SC_* стратегии приостановлены")
+        else:
+            sc_strats = [(sid, st) for sid, st in s.strategies.items() if sid.startswith("SC_")]
+            active = s.scalp_active
+            status = "🟢 ВКЛ" if active else "🔴 ВЫКЛ"
+            lines = [f"⚡ <b>Скальпинг:</b> {status}",
+                     f"Скальперов: <b>{len(sc_strats)}</b>", ""]
+            for sid, st in sc_strats[:15]:
+                pos = "📌" if st.current_position else "—"
+                wr = f"{st.win_rate:.0f}%" if st.trades else "—"
+                pnl = f"{st.pnl:+.2f}$" if st.trades else "—"
+                lines.append(f"{pos} <code>{sid}</code>  WR:{wr}  PnL:{pnl}  ({st.symbol})")
+            lines.append("\n<i>/scalp on — включить, /scalp off — выключить</i>")
+            await self.reply(upd, "\n".join(lines))
 
     async def _cmd_enable(self, upd, arg):
         s   = self._get_state()
