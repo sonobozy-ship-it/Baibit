@@ -190,23 +190,22 @@ class RiskManager:
 
         qty = risk_usd / (effective_sl_dist * entry_price)
 
-        # Ограничиваем маржу: не более 1% баланса на сделку
-        # (при балансе 180 USDT → max маржа 1.8 USDT)
-        max_margin = balance * 0.01
-        max_notional = max_margin * leverage
-        if qty * entry_price > max_notional:
-            qty = max_notional / entry_price
-
-        qty = round(qty, 4)
-        if qty * entry_price < min_notional:
-            return 0
-
         # Лимит размера позиции: margin ≤ max_position_size_pct % от баланса
         max_margin_usd  = balance * (self.max_position_size_pct / 100)
         max_qty_by_size = (max_margin_usd * leverage) / entry_price if entry_price > 0 else qty
         if qty > max_qty_by_size:
             qty = max_qty_by_size
-            qty = round(qty, 4)
+
+        qty = round(qty, 4)
+
+        # min_notional — МИНИМАЛЬНЫЙ размер позиции (не отвержение, а масштабирование вверх)
+        if qty * entry_price < min_notional:
+            scaled_qty = min_notional / entry_price
+            # Проверяем что масштабированный объём не превышает лимит по марже
+            scaled_margin = (scaled_qty * entry_price) / leverage if leverage > 0 else scaled_qty * entry_price
+            if scaled_margin > max_margin_usd:
+                return 0  # min_notional требует больше маржи чем разрешено — пропускаем
+            qty = round(scaled_qty, 4)
 
         # Hard cap: риск в $ не превышает risk_hard_cap_pct от баланса
         hard_cap_usd = balance * (self.risk_hard_cap_pct / 100)

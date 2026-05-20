@@ -91,7 +91,8 @@ class BotState:
         self.correlation = CorrelationFilter()
         self.ai = AIAnalyzer()
         # Ранний TP: закрыть когда цена прошла X% пути к TP (0 = выключено)
-        self.early_tp_pct = float(os.getenv("EARLY_TP_PCT", "85"))
+        # Пол 50% — EARLY_TP_PCT=0 или любое маленькое значение не должно закрывать сделку у входа
+        self.early_tp_pct = max(50.0, float(os.getenv("EARLY_TP_PCT", "85")))
         self.paper = PaperTrader(
             initial_balance=float(os.getenv("PAPER_INITIAL_BALANCE", "1000")),
         )
@@ -1268,36 +1269,39 @@ async def trading_loop():
                         except Exception as e:
                             logger.debug(f"Adaptive SL skip: {e}")
 
+                    # Скальперы SC_* торгуют независимо — не ограничиваем общим лимитом позиций
+                    _is_scalper = sid.startswith("SC_")
+
                     # Проверка риск-менеджера
-                    if not state.training_mode:
+                    if not state.training_mode and not _is_scalper:
                         check = state.risk_manager.can_open_trade(sid, balance)
                         if not check["allowed"]:
                             logger.info(f"{sid}: ❌ {check['reason']}")
                             continue
 
                     # Boost-режим: дополнительные проверки фазы
-                    if state.boost.is_active and not state.training_mode:
+                    if state.boost.is_active and not state.training_mode and not _is_scalper:
                         boost_check = state.boost.can_open_trade(balance)
                         if not boost_check["allowed"]:
                             logger.info(f"{sid}: 🚫 Boost: {boost_check['reason']}")
                             continue
 
-                    # Проверка плеча и notional экспозиции (пропускается в режиме обучения)
+                    # Проверка плеча и notional экспозиции (пропускается в режиме обучения и для скальперов)
                     if not state.training_mode:
                         lev_check = state.risk_manager.check_leverage(sid, strat.leverage, balance)
-                        if not lev_check["allowed"]:
+                        if not lev_check["allowed"] and not _is_scalper:
                             logger.info(f"{sid}: ❌ {lev_check['reason']}")
                             continue
                         effective_leverage = lev_check["effective_leverage"]
                     else:
                         effective_leverage = strat.leverage
 
-                    # Корреляция (пропускается в режиме обучения)
+                    # Корреляция (пропускается в режиме обучения и для скальперов)
                     open_positions = [
                         {"symbol": s.symbol, "side": s.current_position["side"]}
                         for s in state.strategies.values() if s.current_position
                     ]
-                    if not state.training_mode:
+                    if not state.training_mode and not _is_scalper:
                         corr_check = state.correlation.can_open(strat.symbol, signal.action, open_positions)
                         if not corr_check["allowed"]:
                             logger.info(f"{sid}: ❌ {corr_check['reason']}")

@@ -95,6 +95,12 @@ class TelegramNotifier:
         if ai_score is not None:
             ai_bar = "🟢" if ai_score >= 7 else ("🟡" if ai_score >= 5 else "🔴")
             ai_line = f"\n{ai_bar} <b>AI-оценка: {ai_score}/10</b>" + (f" — <i>{ai_reasoning[:120]}</i>" if ai_reasoning else "")
+        # R:R ratio
+        risk_dist   = abs(entry - sl) if sl else 0.0
+        reward_dist = abs(tp - entry) if tp else 0.0
+        rr          = reward_dist / risk_dist if risk_dist > 0 else 0.0
+        rr_line = f"\n📐 R:R: <b>{rr:.2f}</b> (риск {risk_dist:.4f} → прибыль {reward_dist:.4f})"
+
         caption = (
             f"{emoji} <b>ВХОД: {side} {symbol}</b>\n"
             f"⏰ Открыт: <b>{time_str}</b>\n"
@@ -108,6 +114,7 @@ class TelegramNotifier:
             ) +
             f"🛑 SL: <code>{sl:.4f}</code>\n"
             f"🎯 TP: <code>{tp:.4f}</code>"
+            + rr_line
             + ai_line
         )
         if _CHART_OK and df is not None:

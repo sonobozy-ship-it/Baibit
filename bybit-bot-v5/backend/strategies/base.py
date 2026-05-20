@@ -143,9 +143,10 @@ class BaseStrategy(ABC):
 
     def check_early_tp(self, current_price: float, threshold_pct: float = 85.0) -> Optional[float]:
         """
-        Ранний выход: если цена прошла >= threshold_pct% пути от входа до TP —
-        возвращает текущую цену (сигнал закрыть прямо сейчас).
+        Ранний выход: если цена прошла >= threshold_pct% пути от входа до TP
+        И чистая прибыль после комиссий > 0.
         0 или отрицательный порог — отключает функцию.
+        Минимальный эффективный порог: 50% (нельзя закрывать у входа).
         """
         if not self.current_position or threshold_pct <= 0:
             return None
@@ -153,21 +154,32 @@ class BaseStrategy(ABC):
         entry = self.current_position["entry"]
         tp    = self.current_position["tp"]
         side  = self.current_position["side"]
+        qty   = self.current_position.get("qty", 1.0)
 
         if side == "Buy":
-            tp_dist = tp - entry
-            progress = (current_price - entry) / tp_dist * 100 if tp_dist > 0 else 0
+            tp_dist   = tp - entry
+            progress  = (current_price - entry) / tp_dist * 100 if tp_dist > 0 else 0
+            gross_pnl = (current_price - entry) * qty
         else:
-            tp_dist = entry - tp
-            progress = (entry - current_price) / tp_dist * 100 if tp_dist > 0 else 0
+            tp_dist   = entry - tp
+            progress  = (entry - current_price) / tp_dist * 100 if tp_dist > 0 else 0
+            gross_pnl = (entry - current_price) * qty
 
-        if progress >= threshold_pct:
-            logger.info(
-                f"{self.ID} {self.symbol}: 💰 Ранний TP @ {current_price:.6f} "
-                f"({progress:.0f}% от TP)"
-            )
-            return current_price
-        return None
+        # Нельзя закрывать раньше 50% пути к TP — защита от срабатывания у входа
+        effective_threshold = max(50.0, threshold_pct)
+        if progress < effective_threshold:
+            return None
+
+        # Не закрывать если чистая прибыль (после комиссий ~0.12% round-trip) <= 0
+        fees = entry * qty * 0.0012
+        if gross_pnl <= fees:
+            return None
+
+        logger.info(
+            f"{self.ID} {self.symbol}: 💰 Ранний TP @ {current_price:.6f} "
+            f"({progress:.0f}% от TP, net_pnl≈{gross_pnl - fees:.4f})"
+        )
+        return current_price
 
     def check_max_hold(self) -> bool:
         """
