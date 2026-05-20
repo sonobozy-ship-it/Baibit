@@ -1,23 +1,32 @@
 #!/bin/bash
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  db_sync.sh — полная синхронизация Baibit: VPS ↔ PC             ║
+# ║  db_sync.sh — синхронизация Baibit: VPS ↔ Mac                   ║
 # ║                                                                  ║
-# ║  ./db_sync.sh pull     — скачать всё с VPS на PC                ║
-# ║  ./db_sync.sh push     — залить всё с PC на VPS                 ║
-# ║  ./db_sync.sh pull db  — только база данных                     ║
-# ║  ./db_sync.sh pull data— только data/ (paper, модели)           ║
-# ║  ./db_sync.sh list     — список локальных бэкапов               ║
+# ║  ./db_sync.sh pull   — скачать с VPS в LOCAL_DEST               ║
+# ║  ./db_sync.sh push   — залить с LOCAL_DEST на VPS               ║
+# ║  ./db_sync.sh pull db    — только база данных                    ║
+# ║  ./db_sync.sh pull data  — только data/ (paper, модели)         ║
+# ║  ./db_sync.sh pull code  — только код                           ║
+# ║  ./db_sync.sh list   — список локальных бэкапов                 ║
 # ╚══════════════════════════════════════════════════════════════════╝
 set -e
 
-# ── Настройки ────────────────────────────────────────────────────────
-VPS_HOST="root@31.172.77.105"
-VPS_APP="/opt/baibit"
+# ════════════════════════════════════════════════════════════════════
+# ⚙️  НАСТРОЙКИ — измените под себя
+# ════════════════════════════════════════════════════════════════════
+VPS_HOST="root@31.172.77.105"          # SSH адрес сервера
+VPS_APP="/opt/baibit"                   # папка бота на VPS
 VPS_BACKEND="$VPS_APP/bybit-bot-v5/backend"
 VPS_ENV="$VPS_BACKEND/.env"
 
-# Локальный репозиторий (папка где лежит этот скрипт)
-LOCAL_REPO="$(cd "$(dirname "$0")" && pwd)"
+# Локальная папка на Mac — куда pull скачивает и откуда push берёт файлы
+LOCAL_DEST="$HOME/Documents/New project 3"
+
+# Папка бэкапов БД (вне репо, не попадает в git)
+LOCAL_BACKUP_ROOT="$HOME/baibit_backups"
+# ════════════════════════════════════════════════════════════════════
+
+
 LOCAL_BACKUP_ROOT="$HOME/baibit_backups"
 
 GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'
@@ -46,7 +55,7 @@ get_mysql_creds_vps() {
 
 # ── Получение MySQL-реквизитов из локального .env ────────────────────
 get_mysql_creds_local() {
-    LOCAL_ENV="$LOCAL_REPO/bybit-bot-v5/backend/.env"
+    LOCAL_ENV="$LOCAL_DEST/bybit-bot-v5/backend/.env"
     if [ ! -f "$LOCAL_ENV" ] && [ -f "$1/.env" ]; then
         LOCAL_ENV="$1/.env"
     fi
@@ -108,7 +117,7 @@ cmd_pull() {
     # ── 4. Код репозитория (VPS → локальный репо) ─────────────────────
     if [ -z "$TARGET" ] || [ "$TARGET" = "code" ]; then
         step "Синхронизация кода VPS → локальный репозиторий..."
-        info "Источник: $VPS_APP/ → $LOCAL_REPO/"
+        info "Источник: $VPS_APP/ → $LOCAL_DEST/"
         rsync -az --info=progress2 \
             --exclude='.git/' \
             --exclude='__pycache__/' \
@@ -119,9 +128,9 @@ cmd_pull() {
             --exclude='data/' \
             --exclude='.env' \
             "$VPS_HOST:$VPS_APP/" \
-            "$LOCAL_REPO/" 2>/dev/null || \
+            "$LOCAL_DEST/" 2>/dev/null || \
             warn "rsync недоступен, используем scp"
-        ok "Код синхронизирован в $LOCAL_REPO/"
+        ok "Код синхронизирован в $LOCAL_DEST/"
     fi
 
     # ── Мета-файл ────────────────────────────────────────────────────
@@ -216,7 +225,7 @@ cmd_push() {
     # ── 3. Код (локальный репо → VPS, с заменой) ─────────────────────
     if [ -z "$TARGET" ] || [ "$TARGET" = "code" ]; then
         step "Синхронизация кода локальный репо → VPS (с заменой)..."
-        info "Источник: $LOCAL_REPO/ → $VPS_APP/"
+        info "Источник: $LOCAL_DEST/ → $VPS_APP/"
         rsync -az --delete --info=progress2 \
             --exclude='.git/' \
             --exclude='__pycache__/' \
@@ -226,7 +235,7 @@ cmd_push() {
             --exclude='*.log' \
             --exclude='data/' \
             --exclude='.env' \
-            "$LOCAL_REPO/" \
+            "$LOCAL_DEST/" \
             "$VPS_HOST:$VPS_APP/" 2>/dev/null || \
             warn "rsync недоступен, файлы не синхронизированы"
         ok "Код синхронизирован на VPS"
