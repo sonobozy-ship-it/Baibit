@@ -83,7 +83,7 @@ class CorrelationFilter:
 
             if self.is_correlated(pos_symbol, new_symbol):
                 # Если коррелированы и направление одинаковое — блокируем
-                if pos_side == new_side:
+                if pos_side.upper() == new_side.upper():
                     corr = self._get_corr(pos_symbol, new_symbol)
                     return {
                         "allowed": False,
