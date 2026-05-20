@@ -54,6 +54,7 @@ class BaseStrategy(ABC):
         breakeven_pct: float = 1.0,         # % движения для переноса стопа в безубыток
         trailing_stop_pct: float = 0.5,     # шаг трейлинг-стопа
         edge_wr_target: float = 0.55,       # ожидаемый WR после фильтров
+        max_hold_minutes: float = 0.0,      # принудительное закрытие через N минут (0 = выкл.)
         **kwargs,
     ):
         self.symbol = symbol
@@ -64,6 +65,7 @@ class BaseStrategy(ABC):
         self.breakeven_pct = breakeven_pct
         self.trailing_stop_pct = trailing_stop_pct
         self.edge_wr_target = edge_wr_target
+        self.max_hold_minutes = max_hold_minutes
 
         # Состояние
         self.enabled = True
@@ -166,6 +168,21 @@ class BaseStrategy(ABC):
             )
             return current_price
         return None
+
+    def check_max_hold(self) -> bool:
+        """
+        True если позиция превысила max_hold_minutes (принудительное закрытие по таймауту).
+        Возвращает False если max_hold_minutes == 0 или позиции нет.
+        """
+        if not self.current_position or self.max_hold_minutes <= 0:
+            return False
+        opened_at = self.current_position.get("opened_at")
+        if opened_at is None:
+            return False
+        if isinstance(opened_at, str):
+            opened_at = pd.Timestamp(opened_at)
+        elapsed = (pd.Timestamp.utcnow() - opened_at).total_seconds() / 60.0
+        return elapsed >= self.max_hold_minutes
 
     def register_position(self, side: str, entry: float, sl: float, tp: float):
         """Регистрация открытой позиции."""

@@ -1,6 +1,14 @@
 """
 Risk Manager — защита депозита.
-Контролирует дневные лимиты, количество позиций, паузы после убытков.
+Контролирует дневные/недельные лимиты, количество позиций, паузы после убытков.
+
+Дефолты по quant-требованиям:
+  risk_per_trade   = 0.5%
+  daily_max_loss   = 2.0%
+  weekly_max_loss  = 5.0%
+  max_position_size = 5% баланса (margin)
+  max_leverage     = 5
+  3 убытка подряд  = 12ч пауза стратегии (не permanent disable)
 """
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -13,63 +21,96 @@ logger = logging.getLogger(__name__)
 class RiskManager:
     def __init__(
         self,
-        daily_max_loss_pct: float = 5.0,
+        daily_max_loss_pct: float = 2.0,        # 2% дневной лимит
+        weekly_max_loss_pct: float = 5.0,        # 5% недельный лимит
         max_open_positions: int = 4,
-        risk_per_trade_pct: float = 1.0,
+        risk_per_trade_pct: float = 0.5,         # 0.5% риска на сделку
         cooldown_after_loss_min: int = 15,
+        consecutive_loss_pause_hours: float = 12.0,  # пауза после серии (было disable)
         max_consecutive_losses: int = 3,
         max_leverage_cap: int = 5,
+        max_position_size_pct: float = 5.0,      # макс маржа = 5% баланса
         max_total_notional_pct: float = 300.0,
-        max_daily_trades: int = 0,              # 0 = без лимита по количеству
-        max_daily_losses: int = 3,              # глобальный стоп после N убытков за день
-        max_strategy_daily_losses: int = 10,    # лимит убытков в день на каждую стратегию
+        max_daily_trades: int = 0,
+        max_daily_losses: int = 3,
+        max_strategy_daily_losses: int = 10,
     ):
-        self.daily_max_loss_pct = daily_max_loss_pct
-        self.max_open_positions = max_open_positions
-        self.risk_per_trade_pct = risk_per_trade_pct
-        self.cooldown_min = cooldown_after_loss_min
-        self.max_consecutive_losses = max_consecutive_losses
-        self.max_leverage_cap = max_leverage_cap
-        self.max_total_notional_pct = max_total_notional_pct
-        self.max_daily_trades = max_daily_trades
-        self.max_daily_losses = max_daily_losses
+        self.daily_max_loss_pct        = daily_max_loss_pct
+        self.weekly_max_loss_pct       = weekly_max_loss_pct
+        self.max_open_positions        = max_open_positions
+        self.risk_per_trade_pct        = risk_per_trade_pct
+        self.cooldown_min              = cooldown_after_loss_min
+        self.consecutive_loss_pause_h  = consecutive_loss_pause_hours
+        self.max_consecutive_losses    = max_consecutive_losses
+        self.max_leverage_cap          = max_leverage_cap
+        self.max_position_size_pct     = max_position_size_pct
+        self.max_total_notional_pct    = max_total_notional_pct
+        self.max_daily_trades          = max_daily_trades
+        self.max_daily_losses          = max_daily_losses
         self.max_strategy_daily_losses = max_strategy_daily_losses
-        self.risk_hard_cap_pct = min(risk_per_trade_pct, 1.0)  # не более 1% абсолютный hard cap
+        self.risk_hard_cap_pct         = min(risk_per_trade_pct, 1.0)
 
-        # Состояние
+        # Дневное состояние
         self.daily_start_balance: Optional[float] = None
-        self.daily_pnl = 0.0
-        self.daily_trades_count = 0
-        self.daily_losses_count = 0             # сколько убыточных сделок сегодня
-        self.strategy_daily_losses: Dict[str, int] = defaultdict(int)  # убытков на стратегию
-        self.daily_reset_at = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        self.kill_switch = False                # глобальный стоп
+        self.daily_pnl           = 0.0
+        self.daily_trades_count  = 0
+        self.daily_losses_count  = 0
+        self.strategy_daily_losses: Dict[str, int] = defaultdict(int)
+        self.daily_reset_at = (
+            datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(days=1)
+        )
+
+        # Недельное состояние
+        self.weekly_start_balance: Optional[float] = None
+        self.weekly_pnl       = 0.0
+        self.weekly_reset_at  = self._next_monday()
+
+        # Общее состояние
+        self.kill_switch        = False
         self.kill_switch_reason = ""
         self.strategy_cooldowns: Dict[str, datetime] = {}
-        self.strategy_losses: Dict[str, int] = defaultdict(int)
+        self.strategy_losses:    Dict[str, int] = defaultdict(int)
         self.open_positions_count = 0
-        self.last_balance = 0.0
-        self._open_notional: Dict[str, float] = {}  # strategy_id -> notional USDT
+        self.last_balance         = 0.0
+        self._open_notional:     Dict[str, float] = {}
+
+    @staticmethod
+    def _next_monday() -> datetime:
+        now  = datetime.utcnow()
+        days = (7 - now.weekday()) % 7 or 7
+        return (now + timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
 
     def reset_daily(self, current_balance: float):
         """Сброс ежедневных счётчиков (вызывается раз в сутки)."""
         self.daily_start_balance = current_balance
-        self.last_balance = current_balance
-        self.daily_pnl = 0.0
-        self.daily_trades_count = 0
-        self.daily_losses_count = 0
-        self.kill_switch = False
-        self.kill_switch_reason = ""
+        self.last_balance        = current_balance
+        self.daily_pnl           = 0.0
+        self.daily_trades_count  = 0
+        self.daily_losses_count  = 0
+        self.kill_switch         = False
+        self.kill_switch_reason  = ""
         self.strategy_losses.clear()
         self.strategy_daily_losses.clear()
-        self.daily_reset_at = datetime.utcnow().replace(hour=0, minute=0, second=0) + timedelta(days=1)
+        self.daily_reset_at = (
+            datetime.utcnow().replace(hour=0, minute=0, second=0) + timedelta(days=1)
+        )
         logger.info(f"💚 Дневной сброс. Старт баланс: {current_balance} USDT")
 
+    def reset_weekly(self, current_balance: float):
+        """Сброс недельных счётчиков (раз в неделю, понедельник UTC)."""
+        self.weekly_start_balance = current_balance
+        self.weekly_pnl           = 0.0
+        self.weekly_reset_at      = self._next_monday()
+        logger.info(f"📅 Недельный сброс. Старт баланс: {current_balance} USDT")
+
     def check_daily_reset(self, current_balance: float):
-        """Проверяет, не нужно ли сделать дневной сброс."""
+        """Проверяет, не нужно ли сделать дневной/недельный сброс."""
         self.last_balance = current_balance
         if datetime.utcnow() >= self.daily_reset_at or self.daily_start_balance is None:
             self.reset_daily(current_balance)
+        if datetime.utcnow() >= self.weekly_reset_at or self.weekly_start_balance is None:
+            self.reset_weekly(current_balance)
 
     def check_leverage(self, strategy_id: str, leverage: int, balance: float) -> Dict:
         """Проверяет плечо на превышение лимита и суммарную notional экспозицию."""
@@ -107,6 +148,11 @@ class RiskManager:
             return 10
         else:
             return self.max_open_positions   # 20 при 1000+ USDT
+
+    def _weekly_drawdown_pct(self, balance: float) -> float:
+        if self.weekly_start_balance and self.weekly_start_balance > 0:
+            return (balance - self.weekly_start_balance) / self.weekly_start_balance * 100
+        return 0.0
 
     def calculate_position_size(
         self,
@@ -153,12 +199,21 @@ class RiskManager:
         if qty * entry_price < min_notional:
             return 0
 
+        # Лимит размера позиции: margin ≤ max_position_size_pct % от баланса
+        max_margin_usd  = balance * (self.max_position_size_pct / 100)
+        max_qty_by_size = (max_margin_usd * leverage) / entry_price if entry_price > 0 else qty
+        if qty > max_qty_by_size:
+            qty = max_qty_by_size
+            qty = round(qty, 4)
+
         # Hard cap: риск в $ не превышает risk_hard_cap_pct от баланса
         hard_cap_usd = balance * (self.risk_hard_cap_pct / 100)
         if effective_sl_dist > 0 and qty * entry_price * effective_sl_dist > hard_cap_usd * 1.1:
             qty = hard_cap_usd / (effective_sl_dist * entry_price)
             qty = round(qty, 4)
 
+        if qty * entry_price < min_notional:
+            return 0
         return qty
 
     def can_open_trade(self, strategy_id: str, balance: float) -> Dict:
@@ -172,19 +227,33 @@ class RiskManager:
         if self.kill_switch:
             return {"allowed": False, "reason": f"🛑 KILL SWITCH: {self.kill_switch_reason}"}
 
-        # 2. Дневной лимит убытков
+        # 2. Дневной лимит убытков 2%
         if self.daily_start_balance is not None and self.daily_start_balance > 0:
-            current_drawdown_pct = ((balance - self.daily_start_balance) / self.daily_start_balance) * 100
-            if current_drawdown_pct <= -self.daily_max_loss_pct:
+            dd_pct = (balance - self.daily_start_balance) / self.daily_start_balance * 100
+            if dd_pct <= -self.daily_max_loss_pct:
                 self.kill_switch = True
-                self.kill_switch_reason = f"Дневной убыток {current_drawdown_pct:.2f}% > лимит {self.daily_max_loss_pct}%"
+                self.kill_switch_reason = (
+                    f"Дневной убыток {dd_pct:.2f}% > лимит {self.daily_max_loss_pct}%"
+                )
                 logger.critical(self.kill_switch_reason)
                 return {"allowed": False, "reason": self.kill_switch_reason}
+
+        # 2b. Недельный лимит убытков 5%
+        weekly_dd = self._weekly_drawdown_pct(balance)
+        if weekly_dd <= -self.weekly_max_loss_pct:
+            self.kill_switch = True
+            self.kill_switch_reason = (
+                f"Недельный убыток {weekly_dd:.2f}% > лимит {self.weekly_max_loss_pct}%"
+            )
+            logger.critical(self.kill_switch_reason)
+            return {"allowed": False, "reason": self.kill_switch_reason}
 
         # 3. Стоп по дневным убыткам (0 = отключено)
         if self.max_daily_losses > 0 and self.daily_losses_count >= self.max_daily_losses:
             self.kill_switch = True
-            self.kill_switch_reason = f"Достигнут лимит убытков за день: {self.daily_losses_count}/{self.max_daily_losses}"
+            self.kill_switch_reason = (
+                f"Достигнут лимит убытков за день: {self.daily_losses_count}/{self.max_daily_losses}"
+            )
             logger.critical(self.kill_switch_reason)
             return {"allowed": False, "reason": self.kill_switch_reason}
 
@@ -212,12 +281,31 @@ class RiskManager:
                     "reason": f"Cooldown {remaining:.1f} мин"
                 }
 
-        # 7. Серия убытков одной стратегии (подряд)
+        # 7. Серия убытков подряд → 12-часовая пауза (не permanent disable)
         if self.strategy_losses[strategy_id] >= self.max_consecutive_losses:
-            return {
-                "allowed": False,
-                "reason": f"Серия {self.max_consecutive_losses} убытков — пауза"
-            }
+            pause_key = f"__consec__{strategy_id}"
+            if pause_key not in self.strategy_cooldowns or \
+                    self.strategy_cooldowns[pause_key] <= datetime.utcnow():
+                # Устанавливаем 12ч cooldown при первом срабатывании
+                pause_until = datetime.utcnow() + timedelta(hours=self.consecutive_loss_pause_h)
+                self.strategy_cooldowns[pause_key] = pause_until
+                logger.warning(
+                    f"⏸ {strategy_id}: {self.max_consecutive_losses} убытка подряд → "
+                    f"пауза {self.consecutive_loss_pause_h:.0f}ч до {pause_until.strftime('%H:%M UTC')}"
+                )
+            if datetime.utcnow() < self.strategy_cooldowns[pause_key]:
+                remaining_h = (
+                    self.strategy_cooldowns[pause_key] - datetime.utcnow()
+                ).total_seconds() / 3600
+                return {
+                    "allowed": False,
+                    "reason": (
+                        f"⏸ Серия {self.max_consecutive_losses} убытков → "
+                        f"пауза ещё {remaining_h:.1f}ч"
+                    ),
+                }
+            # Cooldown истёк — сбрасываем серию
+            self.strategy_losses[strategy_id] = 0
 
         # 8. Дневной лимит убытков на стратегию
         if self.strategy_daily_losses[strategy_id] >= self.max_strategy_daily_losses:
@@ -233,7 +321,8 @@ class RiskManager:
 
     def register_trade_result(self, strategy_id: str, pnl: float):
         """Записать результат сделки."""
-        self.daily_pnl += pnl
+        self.daily_pnl  += pnl
+        self.weekly_pnl += pnl
         if pnl < 0:
             self.daily_losses_count += 1
             self.strategy_losses[strategy_id] += 1

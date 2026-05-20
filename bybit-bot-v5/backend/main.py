@@ -624,8 +624,9 @@ async def _close_position_early(
     strat,
     exit_price: float,
     klines_data: dict,
+    reason: str = "",
 ):
-    """Закрывает позицию до TP, когда цена прошла EARLY_TP_PCT% пути."""
+    """Закрывает позицию досрочно: по EarlyTP или по таймауту MaxHold."""
     pos = strat.current_position
     if not pos:
         return
@@ -638,28 +639,49 @@ async def _close_position_early(
     if hasattr(opened_at, "isoformat"):
         opened_at = opened_at.isoformat()
 
-    tp_dist     = (tp - entry) if side == "Buy" else (entry - tp)
-    progress    = ((exit_price - entry) / tp_dist * 100) if (side == "Buy" and tp_dist > 0) \
-                  else ((entry - exit_price) / tp_dist * 100) if tp_dist > 0 else 0
-    reason_str  = f"EarlyTP {progress:.0f}%"
+    if reason == "MaxHold":
+        held_min = 0.0
+        if opened_at:
+            try:
+                import pandas as _pd
+                oa = _pd.Timestamp(opened_at)
+                held_min = (_pd.Timestamp.utcnow() - oa).total_seconds() / 60.0
+            except Exception:
+                pass
+        reason_str = f"MaxHold {held_min:.0f}m"
+        tg_msg = (
+            f"⏱ <b>Таймаут скальпа: {sid} {strat.symbol}</b>\n"
+            f"Позиция {held_min:.0f} мин → принудительное закрытие\n"
+            f"Выход: {exit_price:.6f} | PnL: <b>{{pnl:+.2f}} USDT</b>"
+        )
+    else:
+        tp_dist  = (tp - entry) if side == "Buy" else (entry - tp)
+        progress = ((exit_price - entry) / tp_dist * 100) if (side == "Buy" and tp_dist > 0) \
+                   else ((entry - exit_price) / tp_dist * 100) if tp_dist > 0 else 0
+        reason_str = f"EarlyTP {progress:.0f}%"
+        tg_msg = (
+            f"💰 <b>Ранний TP: {sid} {strat.symbol}</b>\n"
+            f"Закрыт на <b>{progress:.0f}%</b> пути к TP\n"
+            f"Выход: {exit_price:.6f} | PnL: <b>{{pnl:+.2f}} USDT</b>"
+        )
 
     if state.paper_mode:
-        closed      = state.paper._close_position(strat.symbol, exit_price, reason_str)
-        pnl         = closed.get("pnl_usd", 0)
-        close_res   = strat.close_position(exit_price, qty=qty)
+        closed    = state.paper._close_position(strat.symbol, exit_price, reason_str)
+        pnl       = closed.get("pnl_usd", 0)
+        close_res = strat.close_position(exit_price, qty=qty)
     elif state.bybit:
-        close_side  = "Sell" if side == "Buy" else "Buy"
-        result      = state.bybit.place_order(
+        close_side = "Sell" if side == "Buy" else "Buy"
+        result     = state.bybit.place_order(
             symbol=strat.symbol,
             side=close_side,
             qty=qty,
             reduce_only=True,
         )
         if not result.get("success"):
-            logger.warning(f"[EarlyTP] {sid} place_order failed: {result}")
+            logger.warning(f"[{reason_str}] {sid} place_order failed: {result}")
             return
-        close_res   = strat.close_position(exit_price, qty=qty)
-        pnl         = close_res.get("pnl_usd", 0)
+        close_res = strat.close_position(exit_price, qty=qty)
+        pnl       = close_res.get("pnl_usd", 0)
     else:
         return
 
@@ -681,13 +703,9 @@ async def _close_position_early(
         exit_price=exit_price,
         opened_at=opened_at,
     ))
-    asyncio.create_task(state.telegram.send(
-        f"💰 <b>Ранний TP: {sid} {strat.symbol}</b>\n"
-        f"Закрыт на <b>{progress:.0f}%</b> пути к TP\n"
-        f"Выход: {exit_price:.6f} | PnL: <b>{pnl:+.2f} USDT</b>"
-    ))
+    asyncio.create_task(state.telegram.send(tg_msg.format(pnl=pnl)))
     await broadcast_log(
-        f"💰 EarlyTP {sid} {strat.symbol} {progress:.0f}% → {pnl:+.2f} USDT",
+        f"{'⏱' if reason == 'MaxHold' else '💰'} {reason_str} {sid} {strat.symbol} → {pnl:+.2f} USDT",
         "ok" if pnl > 0 else "warn",
     )
 
@@ -1067,6 +1085,10 @@ async def trading_loop():
                         early_exit = strat.check_early_tp(current_price, state.early_tp_pct)
                         if early_exit:
                             await _close_position_early(sid, strat, current_price, klines_data)
+
+                        # Таймаут позиции (max_hold_minutes) — скальперы закрываются принудительно
+                        elif strat.check_max_hold():
+                            await _close_position_early(sid, strat, current_price, klines_data, reason="MaxHold")
 
                         continue
 

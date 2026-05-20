@@ -21,58 +21,96 @@ class BacktestResult:
         self.end_balance = 0
 
     def calculate_metrics(self) -> Dict:
-        """Все ключевые метрики."""
+        """
+        Полный набор метрик:
+        PF, Sharpe, Sortino, MaxDD, WinRate, Expectancy, AvgRR,
+        Monthly Returns, Equity Curve.
+        """
         if not self.trades:
             return {"trades": 0, "win_rate": 0, "total_pnl": 0}
 
-        pnls = [t["pnl"] for t in self.trades]
-        wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p < 0]
+        pnls    = [t["pnl"] for t in self.trades]
+        r_mults = [t.get("r_multiple", 0.0) for t in self.trades]
+        wins    = [p for p in pnls if p > 0]
+        losses  = [p for p in pnls if p < 0]
 
-        total_pnl = sum(pnls)
-        win_rate = len(wins) / len(pnls) * 100 if pnls else 0
-        avg_win = np.mean(wins) if wins else 0
-        avg_loss = np.mean(losses) if losses else 0
-        profit_factor = abs(sum(wins) / sum(losses)) if losses else float("inf")
+        total_pnl     = sum(pnls)
+        n             = len(pnls)
+        win_rate      = len(wins) / n * 100
+        avg_win       = float(np.mean(wins))   if wins   else 0.0
+        avg_loss      = float(np.mean(losses)) if losses else 0.0
+        profit_factor = (
+            abs(sum(wins) / sum(losses))
+            if losses and sum(losses) != 0 else float("inf")
+        )
 
-        # Max drawdown
-        peak = self.equity_curve[0] if self.equity_curve else 0
-        max_dd = 0
-        max_dd_pct = 0
+        # ── Max Drawdown ────────────────────────────────────────────────────
+        peak = self.equity_curve[0] if self.equity_curve else 0.0
+        max_dd, max_dd_pct = 0.0, 0.0
         for eq in self.equity_curve:
             if eq > peak:
                 peak = eq
-            dd = peak - eq
-            dd_pct = (dd / peak * 100) if peak > 0 else 0
+            dd_pct = (peak - eq) / peak * 100 if peak > 0 else 0.0
             if dd_pct > max_dd_pct:
-                max_dd = dd
+                max_dd     = peak - eq
                 max_dd_pct = dd_pct
 
-        # Sharpe ratio (упрощённо)
-        if len(pnls) > 1:
-            returns = np.array(pnls)
-            sharpe = (returns.mean() / returns.std()) * np.sqrt(252) if returns.std() > 0 else 0
+        # ── Sharpe (annualised) ─────────────────────────────────────────────
+        if n > 1 and self.start_balance > 0:
+            rets    = np.array(pnls) / self.start_balance
+            std_ret = float(rets.std())
+            sharpe  = float((rets.mean() / std_ret) * np.sqrt(252)) if std_ret > 0 else 0.0
         else:
-            sharpe = 0
+            sharpe = 0.0
+
+        # ── Sortino (downside deviation) ────────────────────────────────────
+        if self.start_balance > 0:
+            rets_arr = np.array(pnls) / self.start_balance
+            down     = rets_arr[rets_arr < 0]
+            down_std = float(down.std()) if len(down) > 1 else 0.0
+            sortino  = float((rets_arr.mean() / down_std) * np.sqrt(252)) if down_std > 0 else 0.0
+        else:
+            sortino = 0.0
+
+        # ── Expectancy ($) ──────────────────────────────────────────────────
+        wr_dec     = win_rate / 100
+        expectancy = wr_dec * avg_win + (1 - wr_dec) * avg_loss  # avg_loss < 0
+
+        # ── Average R-Multiple ──────────────────────────────────────────────
+        avg_rr = float(np.mean(r_mults)) if r_mults else 0.0
+
+        # ── Monthly Returns ─────────────────────────────────────────────────
+        monthly: Dict[str, float] = {}
+        for t in self.trades:
+            ts = str(t.get("timestamp", ""))
+            month = ts[:7] if len(ts) >= 7 else "unknown"
+            monthly[month] = round(monthly.get(month, 0.0) + t["pnl"], 4)
 
         return {
-            "trades": len(pnls),
-            "wins": len(wins),
-            "losses": len(losses),
-            "win_rate": round(win_rate, 2),
-            "total_pnl": round(total_pnl, 2),
-            "avg_win": round(avg_win, 2),
-            "avg_loss": round(avg_loss, 2),
-            "profit_factor": round(profit_factor, 2),
-            "max_drawdown": round(max_dd, 2),
-            "max_drawdown_pct": round(max_dd_pct, 2),
-            "sharpe": round(sharpe, 2),
-            "start_balance": round(self.start_balance, 2),
-            "end_balance": round(self.end_balance, 2),
-            "roi_pct": round((self.end_balance - self.start_balance) / self.start_balance * 100, 2) if self.start_balance else 0,
-            "best_trade": round(max(pnls), 2) if pnls else 0,
-            "worst_trade": round(min(pnls), 2) if pnls else 0,
-            "longest_win_streak": self._longest_streak(pnls, positive=True),
+            "trades":              n,
+            "wins":                len(wins),
+            "losses":              len(losses),
+            "win_rate":            round(win_rate, 2),
+            "total_pnl":           round(total_pnl, 2),
+            "avg_win":             round(avg_win, 4),
+            "avg_loss":            round(avg_loss, 4),
+            "profit_factor":       round(profit_factor, 3),
+            "expectancy":          round(expectancy, 4),
+            "avg_rr":              round(avg_rr, 3),
+            "max_drawdown":        round(max_dd, 2),
+            "max_drawdown_pct":    round(max_dd_pct, 2),
+            "sharpe":              round(sharpe, 3),
+            "sortino":             round(sortino, 3),
+            "start_balance":       round(self.start_balance, 2),
+            "end_balance":         round(self.end_balance, 2),
+            "roi_pct":             round(
+                (self.end_balance - self.start_balance) / self.start_balance * 100, 2
+            ) if self.start_balance else 0,
+            "best_trade":          round(max(pnls), 4),
+            "worst_trade":         round(min(pnls), 4),
+            "monthly_returns":     monthly,
+            "equity_curve":        [round(e, 2) for e in self.equity_curve],
+            "longest_win_streak":  self._longest_streak(pnls, positive=True),
             "longest_loss_streak": self._longest_streak(pnls, positive=False),
         }
 
