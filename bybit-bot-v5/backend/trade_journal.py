@@ -2,6 +2,7 @@
 Журнал всех сделок — MySQL / SQLite через DBPool.
 Экспорт в CSV и Excel, heatmap-статистика.
 """
+import json
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
@@ -141,7 +142,7 @@ class TradeJournal:
             trade.get("exit_reason", ""),
             trade.get("duration_sec", 0),
             trade.get("fees", 0),
-            str(trade.get("filters_passed", {})),
+            json.dumps(trade.get("filters_passed", {}), default=str),
             trade.get("ai_score"),
             1 if trade.get("paper_trading") else 0,
             trade.get("opened_at"),
@@ -246,31 +247,136 @@ class TradeJournal:
 
     # ── экспорт ───────────────────────────────────────────────
 
-    def export_to_csv(self, output_path: str = "logs/trades_export.csv") -> str:
+    def _build_filter_sql(
+        self,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        closed_only: bool = True,
+    ):
+        """Строит WHERE-клаузу и список параметров для фильтрации."""
+        where, params = ["1=1"], []
+        if closed_only:
+            where.append("exit_price IS NOT NULL")
+        if strategy_id:
+            where.append("strategy_id = ?")
+            params.append(strategy_id)
+        if symbol:
+            where.append("symbol = ?")
+            params.append(symbol)
+        if from_date:
+            where.append("timestamp >= ?")
+            params.append(from_date)
+        if to_date:
+            where.append("timestamp <= ?")
+            params.append(to_date)
+        return " AND ".join(where), params
+
+    def _load_df(
+        self,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        closed_only: bool = True,
+    ) -> pd.DataFrame:
+        where, params = self._build_filter_sql(
+            strategy_id, symbol, from_date, to_date, closed_only
+        )
+        sql = f"SELECT * FROM trades WHERE {where} ORDER BY timestamp ASC"
         with self.pool.connection() as conn:
-            df = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC", conn)
+            return pd.read_sql(self.pool.adapt(sql), conn, params=params)
+
+    def export_to_csv(
+        self,
+        output_path: str = "logs/trades_export.csv",
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> str:
+        df = self._load_df(strategy_id, symbol, from_date, to_date, closed_only=False)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_path, index=False)
         return output_path
 
-    def export_to_excel(self, output_path: str = "logs/trades_export.xlsx") -> str:
-        with self.pool.connection() as conn:
-            df = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC", conn)
+    def export_to_excel(
+        self,
+        output_path: str = "logs/trades_export.xlsx",
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> str:
+        df = self._load_df(strategy_id, symbol, from_date, to_date, closed_only=False)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="All Trades", index=False)
             if not df.empty:
+                closed = df[df["exit_price"].notna()].copy()
                 pd.DataFrame(self.get_stats_by_strategy()).to_excel(
                     writer, sheet_name="By Strategy", index=False
                 )
-                df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
-                df["hour"] = df["timestamp_dt"].dt.hour
-                df["dayofweek"] = df["timestamp_dt"].dt.day_name()
-                df.pivot_table(
-                    values="pnl_usd", index="dayofweek", columns="hour",
-                    aggfunc="sum", fill_value=0,
-                ).to_excel(writer, sheet_name="Heatmap")
+                if not closed.empty:
+                    closed["timestamp_dt"] = pd.to_datetime(closed["timestamp"])
+                    closed["hour"] = closed["timestamp_dt"].dt.hour
+                    closed["dayofweek"] = closed["timestamp_dt"].dt.day_name()
+                    closed.pivot_table(
+                        values="pnl_usd", index="dayofweek", columns="hour",
+                        aggfunc="sum", fill_value=0,
+                    ).to_excel(writer, sheet_name="Heatmap")
+                    # Equity curve
+                    eq = closed.sort_values("timestamp").copy()
+                    eq["cumulative_pnl"] = eq["pnl_usd"].cumsum()
+                    eq[["timestamp", "strategy_id", "symbol", "pnl_usd", "cumulative_pnl"]].to_excel(
+                        writer, sheet_name="Equity Curve", index=False
+                    )
         return output_path
+
+    def export_snapshots_csv(
+        self,
+        output_path: str = "logs/snapshots_export.csv",
+        strategy_id: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> str:
+        """Экспортирует signal_snapshots (ML-фичи + исходы) в CSV."""
+        where, params = ["1=1"], []
+        if strategy_id:
+            where.append("strategy_id = ?")
+            params.append(strategy_id)
+        if from_date:
+            where.append("timestamp >= ?")
+            params.append(from_date)
+        if to_date:
+            where.append("timestamp <= ?")
+            params.append(to_date)
+        sql = "SELECT * FROM signal_snapshots WHERE {} ORDER BY timestamp ASC".format(
+            " AND ".join(where)
+        )
+        try:
+            with self.pool.connection() as conn:
+                df = pd.read_sql(self.pool.adapt(sql), conn, params=params)
+        except Exception:
+            df = pd.DataFrame()
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_path, index=False)
+        return output_path
+
+    def get_equity_curve(
+        self,
+        strategy_id: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> List[Dict]:
+        """Нарастающий PnL по времени для построения equity-кривой."""
+        df = self._load_df(strategy_id=strategy_id, from_date=from_date, to_date=to_date)
+        if df.empty:
+            return []
+        df = df.sort_values("timestamp").copy()
+        df["cumulative_pnl"] = df["pnl_usd"].cumsum()
+        return df[["timestamp", "strategy_id", "symbol", "pnl_usd", "cumulative_pnl"]].to_dict(orient="records")
 
     def get_heatmap_data(self) -> Dict:
         with self.pool.connection() as conn:

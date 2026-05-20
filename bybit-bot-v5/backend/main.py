@@ -2317,26 +2317,80 @@ async def journal_trades(strategy_id: Optional[str] = None, limit: int = 100):
 
 
 @app.get("/api/journal/export/csv")
-async def export_csv():
-    path = state.journal.export_to_csv()
-    return FileResponse(path, filename="trades.csv", media_type="text/csv")
+async def export_csv(
+    strategy_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """CSV выгрузка сделок с фильтрами по стратегии, символу, датам."""
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    path = state.journal.export_to_csv(
+        output_path=f"logs/trades_{ts}.csv",
+        strategy_id=strategy_id,
+        symbol=symbol,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    return FileResponse(path, filename=f"trades_{ts}.csv", media_type="text/csv")
 
 
 @app.get("/api/journal/export/excel")
-async def export_excel():
-    path = state.journal.export_to_excel()
+async def export_excel(
+    strategy_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """Excel с листами: All Trades, By Strategy, Heatmap, Equity Curve."""
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    path = state.journal.export_to_excel(
+        output_path=f"logs/trades_{ts}.xlsx",
+        strategy_id=strategy_id,
+        symbol=symbol,
+        from_date=from_date,
+        to_date=to_date,
+    )
     return FileResponse(
-        path, filename="trades.xlsx",
+        path, filename=f"trades_{ts}.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.get("/api/journal/export/snapshots")
+async def export_snapshots(
+    strategy_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """CSV с ML-снапшотами: фичи + исход (outcome, pnl_r) — для внешнего анализа."""
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    path = state.journal.export_snapshots_csv(
+        output_path=f"logs/snapshots_{ts}.csv",
+        strategy_id=strategy_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    return FileResponse(path, filename=f"snapshots_{ts}.csv", media_type="text/csv")
+
+
+@app.get("/api/journal/equity")
+async def equity_curve(
+    strategy_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """Нарастающий PnL по времени для построения equity-кривой."""
+    return state.journal.get_equity_curve(
+        strategy_id=strategy_id,
+        from_date=from_date,
+        to_date=to_date,
     )
 
 
 @app.get("/api/journal/export/db")
 async def export_db():
-    """
-    Скачать весь SQLite файл базы данных с сервера.
-    Только для SQLite (при MySQL возвращает CSV-дамп).
-    """
+    """Скачать весь SQLite файл. При MySQL — отдаёт CSV-дамп."""
     db_path = getattr(state.journal.pool, "db_path", None)
     if db_path and Path(db_path).exists():
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
@@ -2345,7 +2399,6 @@ async def export_db():
             filename=f"baibit_trades_{ts}.db",
             media_type="application/octet-stream",
         )
-    # Fallback: MySQL или путь не найден — отдаём CSV
     path = state.journal.export_to_csv()
     return FileResponse(path, filename="trades_dump.csv", media_type="text/csv")
 
@@ -2378,6 +2431,12 @@ async def ai_analyze(strategy_id: str):
 @app.get("/api/risk/status")
 async def risk_status():
     return state.risk_manager.get_status()
+
+
+@app.get("/api/guard/status")
+async def guard_status():
+    """Статус GlobalTradeGuard: серии убытков, кулдауны по стратегиям."""
+    return state.trade_guard.get_status()
 
 
 @app.get("/api/correlations")
