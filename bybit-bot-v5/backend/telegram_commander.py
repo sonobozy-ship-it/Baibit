@@ -341,13 +341,18 @@ class TelegramCommander:
         s = self._get_state()
         s.training_mode = True
         s.risk_manager.kill_switch = False
+        # Сбрасываем Guard-счётчики чтобы стартовать обучение чисто
+        s.trade_guard.reset_all()
         await self.reply(upd,
             "🎓 <b>Режим обучения ВКЛЮЧЁН</b>\n\n"
             "Все лимиты убраны:\n"
             "• Лимиты убытков (дневной, недельный)\n"
             "• Лимит сделок в день\n"
             "• Кулдауны после серии убытков\n"
-            "• GlobalTradeGuard блокировки\n\n"
+            "• GlobalTradeGuard блокировки\n"
+            "• AI-отклонение сигналов\n"
+            "• ML аномалии и строгий режим\n"
+            "• Оркестратор (только оповещения)\n\n"
             "⚠️ Бот торгует без ограничений для сбора данных.\n"
             "Выключи режим после набора статистики!",
             reply_markup=self._main_menu())
@@ -355,12 +360,18 @@ class TelegramCommander:
     async def _cb_training_off(self, upd, arg):
         s = self._get_state()
         s.training_mode = False
+        # Сбрасываем Guard-счётчики: кулдауны накопленные в обучении — не должны
+        # блокировать нормальную торговлю после выхода из обучения
+        s.trade_guard.reset_all()
         await self.reply(upd,
             "🛡 <b>Режим обучения ВЫКЛЮЧЕН</b>\n\n"
-            "Все лимиты и защиты восстановлены:\n"
-            "• Лимиты убытков\n"
-            "• Кулдауны и Guard\n"
-            "• Защита капитала",
+            "Все защиты восстановлены:\n"
+            "• Лимиты убытков и кулдауны\n"
+            "• GlobalTradeGuard (все блоки)\n"
+            "• Фильтр входа (EntryFilter)\n"
+            "• AI-анализ сигналов\n"
+            "• Оркестратор (авто-действия)\n\n"
+            "Guard-счётчики сброшены — кулдауны из обучения не применяются.",
             reply_markup=self._main_menu())
 
     async def _cb_set_balance(self, upd, arg):

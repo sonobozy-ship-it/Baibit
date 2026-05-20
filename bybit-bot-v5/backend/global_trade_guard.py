@@ -204,7 +204,7 @@ class GlobalTradeGuard:
         # ── 8. Технические фильтры на рабочих свечах ────────────────────────
         if df is not None and len(df) >= 30:
             # В scalp_mode пропускаем anti-FOMO (быстрые движения = суть скальпа)
-            self._check_working_tf(signal_action, df, blocked, warnings, skip_fomo=scalp_mode)
+            self._check_working_tf(signal_action, df, blocked, warnings)
 
         # ── 9. Четырёхчасовой тренд (опционально, только не в scalp_mode) ───
         if not scalp_mode and df_h4 is not None and len(df_h4) >= 50:
@@ -244,6 +244,12 @@ class GlobalTradeGuard:
     def record_win(self, strategy_id: str):
         """Сброс счётчика при выигрыше."""
         self._consec_losses[strategy_id] = 0
+
+    def reset_all(self):
+        """Полный сброс всех счётчиков и кулдаунов (вызывается при переключении режима обучения)."""
+        self._consec_losses.clear()
+        self._cooldown_until.clear()
+        logger.info("[Guard] Все счётчики и кулдауны сброшены")
 
     def get_status(self) -> Dict:
         now = datetime.utcnow()
@@ -322,9 +328,8 @@ class GlobalTradeGuard:
         df: pd.DataFrame,
         blocked: List[str],
         warnings: List[str],
-        skip_fomo: bool = False,
     ):
-        """Объём и ATR на рабочем таймфрейме. skip_fomo=True в scalp_mode."""
+        """Объём и ATR на рабочем таймфрейме. (Anti-FOMO — в _check_h1_trend, там пропускается в scalp_mode)"""
         # Подтверждение объёмом
         if "volume" in df.columns:
             vol_ma = df["volume"].rolling(20).mean().iloc[-1]

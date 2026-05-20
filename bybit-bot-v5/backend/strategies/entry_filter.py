@@ -20,7 +20,7 @@ entry_filter.py — фильтр подтверждения входа (anti-kni
 В scalp_mode: только запрет ножей (правило 1+2), остальное — предупреждения.
 """
 import logging
-from typing import Dict, Optional
+from typing import Dict
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -91,8 +91,7 @@ def validate_entry_confirmation(
     bodies = abs(df["close"] - df["open"]).astype(float).iloc[-20:]
     avg_body = float(bodies.mean()) if len(bodies) > 0 else 0.0
 
-    # Размеры тел текущей и предыдущей
-    body_c0  = abs(float(c0["close"])  - float(c0["open"]))
+    # Размер тела предыдущей свечи (для проверки разворота)
     body_c_1 = abs(float(c_1["close"]) - float(c_1["open"]))
 
     # Объём
