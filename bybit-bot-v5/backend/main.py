@@ -51,6 +51,8 @@ from boost_mode import BoostManager, BoostCalculator
 from adaptive_params import AdaptiveParamManager
 from claude_orchestrator import ClaudeOrchestrator
 from strategy_advisor import StrategyAdvisor
+from position_monitor import PositionMonitor
+from global_trade_guard import GlobalTradeGuard
 
 # ============================================================
 # Загрузка конфига
@@ -156,6 +158,12 @@ class BotState:
 
         # Адаптивные параметры стратегий (самообучение по реальным сделкам)
         self.adaptive = AdaptiveParamManager(window=int(os.getenv("ADAPTIVE_WINDOW", "30")))
+
+        # Мониторинг позиций и умное закрытие
+        self.position_monitor = PositionMonitor()
+
+        # Единый защитный слой перед открытием сделок
+        self.trade_guard = GlobalTradeGuard()
 
         # Кэш старших таймфреймов для MTF-фильтра ScalperPro
         # {symbol: (DataFrame, updated_at)}
@@ -718,6 +726,10 @@ async def _close_position_early(
     state.risk_manager.register_position_close(sid)
     _early_r = close_res.get("r_multiple", 0)
     state.adaptive.record(sid, _early_r)
+    if pnl > 0:
+        state.trade_guard.record_win(sid)
+    else:
+        state.trade_guard.record_loss(sid)
 
     if _early_jtid:
         state.journal.update_trade_close(
@@ -867,6 +879,25 @@ async def _execute_fusion_signal(
     )
     qty = round(base_qty * fused.size_multiplier, 6)
     if qty <= 0:
+        return
+
+    # GlobalTradeGuard проверяет Fusion-сигнал
+    _fusion_guard = state.trade_guard.check(
+        strategy_id=sid,
+        signal_action=fused.action,
+        entry_price=fused.entry_price,
+        stop_loss=fused.stop_loss,
+        take_profit=fused.take_profit,
+        qty=qty,
+        leverage=3,
+        balance=balance,
+        df=chart_df,
+        df_h1=chart_df,
+        ml_probability=(ml_prediction.get("probability") if ml_prediction and ml_prediction.get("available") else None),
+        signal_confidence=fused.confidence,
+    )
+    if not _fusion_guard.approved:
+        logger.info(f"[Fusion] 🛡 Guard BLOCKED {fused.action} {sym}: {_fusion_guard.blocked_by}")
         return
 
     # Открытие позиции
@@ -1130,14 +1161,28 @@ async def trading_loop():
                             if _tr_tid:
                                 state.journal.update_trade_levels(_tr_tid, stop_loss=trail_sl, trailing_triggered=True)
 
+                        # PositionMonitor: умное закрытие (TP%, trailing, near_tp, timeout)
+                        _monitor_decision = state.position_monitor.check_position(
+                            sid, strat.current_position, current_price,
+                        )
+                        if _monitor_decision:
+                            await _close_position_early(
+                                sid, strat, current_price, klines_data,
+                                reason=_monitor_decision.reason,
+                            )
+                            state.position_monitor.reset_state(sid)
+                            continue
+
                         # Ранний TP — закрыть если цена прошла early_tp_pct% пути к TP
                         early_exit = strat.check_early_tp(current_price, state.early_tp_pct)
                         if early_exit:
                             await _close_position_early(sid, strat, current_price, klines_data)
+                            state.position_monitor.reset_state(sid)
 
                         # Таймаут позиции (max_hold_minutes) — скальперы закрываются принудительно
                         elif strat.check_max_hold():
                             await _close_position_early(sid, strat, current_price, klines_data, reason="MaxHold")
+                            state.position_monitor.reset_state(sid)
 
                         continue
 
@@ -1385,6 +1430,32 @@ async def trading_loop():
                         if _atr_val:
                             logger.debug(f"{sid}: ATR={_atr_val:.6f} → qty={qty}")
 
+                    # ============== GlobalTradeGuard ==============
+                    _guard_h1 = _get_h1_cached(strat.symbol) if state.bybit else None
+                    _guard_result = state.trade_guard.check(
+                        strategy_id=sid,
+                        signal_action=signal.action,
+                        entry_price=signal.entry_price,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        qty=qty,
+                        leverage=effective_leverage,
+                        balance=balance,
+                        df=df,
+                        df_h1=_guard_h1,
+                        ml_probability=(
+                            ml_prediction.get("probability")
+                            if ml_prediction and ml_prediction.get("available") else None
+                        ),
+                        signal_confidence=signal.confidence,
+                    )
+                    if not _guard_result.approved:
+                        logger.info(
+                            f"{sid}: 🛡 Guard BLOCKED {signal.action} {strat.symbol}: "
+                            f"{_guard_result.blocked_by}"
+                        )
+                        continue
+
                     # ============== Открытие позиции ==============
                     _log_trade_attempt(
                         mode=state.trading_mode,
@@ -1573,6 +1644,13 @@ async def trading_loop():
                                     f"{'✅' if pnl > 0 else '❌'} [PAPER] {_sid} {c_sym} {reason} → {pnl:+.2f} USDT",
                                     "ok" if pnl > 0 else "warn",
                                 )
+                                # Guard: учитываем результат для кулдауна
+                                if pnl > 0:
+                                    state.trade_guard.record_win(_sid)
+                                else:
+                                    state.trade_guard.record_loss(_sid)
+                                # Monitor: сбрасываем состояние закрытой позиции
+                                state.position_monitor.reset_state(_sid)
                                 break
 
                 if state.bybit and not state.paper_mode:
@@ -1684,6 +1762,13 @@ async def trading_loop():
                                 # Boost: регистрируем результат, обновляем фазу
                                 new_balance = state.bybit.get_balance("USDT")
                                 state.boost.register_trade(pnl_usd, new_balance)
+                                # Guard: учитываем результат для кулдауна
+                                if pnl_usd > 0:
+                                    state.trade_guard.record_win(sid)
+                                else:
+                                    state.trade_guard.record_loss(sid)
+                                # Monitor: сбрасываем состояние закрытой позиции
+                                state.position_monitor.reset_state(sid)
 
                                 # Проверяем нужно ли переобучение ML
                                 if state.ml_enabled and ML_AVAILABLE and state.continuous_trainer:
