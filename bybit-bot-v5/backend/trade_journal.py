@@ -227,9 +227,11 @@ class TradeJournal:
         for sid, g in df.groupby("strategy_id"):
             wins = g[g["pnl_usd"] > 0]
             losses = g[g["pnl_usd"] < 0]
+            _name_raw = g["strategy_name"].iloc[0]
+            _name = str(_name_raw) if (pd.notna(_name_raw) and _name_raw) else sid
             stats.append({
                 "strategy_id": sid,
-                "strategy_name": g["strategy_name"].iloc[0] or sid,
+                "strategy_name": _name,
                 "trades": len(g),
                 "wins": len(wins),
                 "losses": len(losses),
