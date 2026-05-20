@@ -237,6 +237,51 @@ class TradeJournal:
             logger.warning(f"[Journal] get_open_trade error: {e}")
             return None
 
+    def restore_strategy_stats(self, strategy_id: str) -> Optional[Dict]:
+        """
+        Восстанавливает статистику стратегии из БД без pandas (raw cursor).
+        Возвращает агрегаты + последние 50 PnL для history[] + consecutive_losses.
+        Надёжнее pd.read_sql при любой версии pandas / SQLite.
+        """
+        query = self.pool.adapt(
+            "SELECT pnl_usd FROM trades "
+            "WHERE strategy_id=? AND exit_price IS NOT NULL "
+            "ORDER BY id ASC"
+        )
+        try:
+            with self.pool.connection() as conn:
+                if self.pool.is_mysql:
+                    with conn.cursor() as c:
+                        c.execute(query, [strategy_id])
+                        rows = c.fetchall()
+                        pnl_list = [float(r["pnl_usd"] or 0) for r in rows]
+                else:
+                    rows = conn.execute(query, [strategy_id]).fetchall()
+                    pnl_list = [float(r[0] or 0) for r in rows]
+
+            if not pnl_list:
+                return None
+
+            wins = sum(1 for p in pnl_list if p > 0)
+            consecutive = 0
+            for p in reversed(pnl_list):
+                if p < 0:
+                    consecutive += 1
+                else:
+                    break
+
+            return {
+                "trades":             len(pnl_list),
+                "wins":               wins,
+                "losses":             len(pnl_list) - wins,
+                "total_pnl":          round(sum(pnl_list), 4),
+                "history":            [round(p, 4) for p in pnl_list[-50:]],
+                "consecutive_losses": consecutive,
+            }
+        except Exception as e:
+            logger.warning(f"[Journal] restore_strategy_stats({strategy_id}): {e}")
+            return None
+
     def get_stats_by_strategy(self) -> List[Dict]:
         with self.pool.connection() as conn:
             df = pd.read_sql(

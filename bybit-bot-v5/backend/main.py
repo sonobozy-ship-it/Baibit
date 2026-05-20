@@ -233,23 +233,24 @@ def init_strategies():
     # Восстановление открытых бумажных позиций после перезапуска
     _restore_paper_positions()
 
-    # Восстановление счётчиков стратегий из БД (чтобы не забывать сделки после рестарта)
-    try:
-        stats_list = state.journal.get_stats_by_strategy()
-        stats_map = {s["strategy_id"]: s for s in stats_list}
-        restored = []
-        for sid, strat in state.strategies.items():
-            if sid in stats_map:
-                st = stats_map[sid]
-                strat.trades = st["trades"]
-                strat.wins   = st["wins"]
-                strat.losses = st["losses"]
-                strat.pnl    = st["total_pnl"]
-                restored.append(f"{sid}:{st['trades']}сд")
-        if restored:
-            logger.info(f"[StatRestore] Восстановлено из БД: {', '.join(restored)}")
-    except Exception as e:
-        logger.warning(f"[StatRestore] Не удалось восстановить статистику: {e}")
+    # Восстановление счётчиков стратегий из БД (raw cursor — без pandas, надёжно)
+    restored, skipped = [], []
+    for sid, strat in state.strategies.items():
+        st = state.journal.restore_strategy_stats(sid)
+        if st:
+            strat.trades             = st["trades"]
+            strat.wins               = st["wins"]
+            strat.losses             = st["losses"]
+            strat.pnl                = st["total_pnl"]
+            strat.history            = st["history"]
+            strat.consecutive_losses = st["consecutive_losses"]
+            restored.append(f"{sid}:{st['trades']}сд WR={round(st['wins']/st['trades']*100) if st['trades'] else 0}%")
+        else:
+            skipped.append(sid)
+    if restored:
+        logger.info(f"[StatRestore] ✅ Восстановлено: {', '.join(restored)}")
+    if skipped:
+        logger.info(f"[StatRestore] Нет истории в БД: {', '.join(skipped)}")
 
 
 def _restore_paper_positions():
@@ -343,6 +344,15 @@ def activate_scalp_mode(symbols: List[str] = None):
         sid = _scalp_sid(sym)
         if sid not in state.strategies:
             strat = ScalperProStrategy(symbol=sym)
+            # Восстанавливаем историю из БД при первом создании скальпера
+            _sc_st = state.journal.restore_strategy_stats(sid)
+            if _sc_st:
+                strat.trades             = _sc_st["trades"]
+                strat.wins               = _sc_st["wins"]
+                strat.losses             = _sc_st["losses"]
+                strat.pnl                = _sc_st["total_pnl"]
+                strat.history            = _sc_st["history"]
+                strat.consecutive_losses = _sc_st["consecutive_losses"]
             state.strategies[sid] = strat
             added.append(sid)
         else:
