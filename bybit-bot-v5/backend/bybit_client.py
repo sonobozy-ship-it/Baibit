@@ -266,10 +266,13 @@ class BybitClient:
         # Стейблкоины
         "USDCUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "TUSDUSDT", "USDDUSDT",
         # Мемкоины-памп с непредсказуемым движением (плохи для скальпинга)
-        "BOMEUSDT", "1000BONKUSDT", "WIFUSDT", "PENKUSDT", "PEPEUSDT",
-        "B3USDT", "SPACEUSDT", "BLURAUSDT", "EDENUUSDT", "MEWUSDT",
-        "PUMPUSDT", "FIDAUSDT", "NOTUSDT", "HMSTRUSDT", "FIGHTUSDT",
-        "GALAUSDT", "0SATUSDT", "SATUSDT",
+        # Точные имена символов с Bybit (проверены по реальным сделкам)
+        "BOMEUSDT", "1000BONKUSDT", "WIFUSDT", "PENGUUSDT", "1000PEPEUSDT",
+        "PEPEUSDT", "B3USDT", "SPACEUSDT", "BLURUSDT", "BLURAUSDT",
+        "EDENAUSDT", "MEWUSDT", "PUMPFUNUSDT", "FIDAUSDT", "NOTUSDT",
+        "HMSTRUSDT", "HAMSTERUSDT", "FIGHTUSDT", "GALAUSDT", "GALAOUSDT",
+        "1000SATSUSDT", "SATUSDT", "TURBOUSDT", "POPCATUSDT", "BRETTUSDT",
+        "PONKEUSDT", "NEIROUSDT", "MOODENGUSDT", "LAIKAAUSDT",
     })
 
     def get_top_usdt_symbols(

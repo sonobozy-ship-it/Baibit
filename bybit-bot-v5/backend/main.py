@@ -366,9 +366,12 @@ async def auto_select_symbols():
         return
 
     # Пересоздаём SC_* без открытых позиций
+    # Также удаляем SC_* которые торгуют заблокированными монетами
+    blocklist = getattr(state.bybit, "_NON_CRYPTO", frozenset())
     to_remove = [
         sid for sid, strat in list(state.strategies.items())
         if sid.startswith("SC_") and not strat.current_position
+        and (strat.symbol not in scalp_pool or strat.symbol in blocklist)
     ]
     for sid in to_remove:
         del state.strategies[sid]
@@ -602,6 +605,25 @@ async def _auto_ai_improve(sid: str, strat_name: str, strat_symbol: str, trades_
         trades_hist = state.journal.get_trades(strategy_id=sid, limit=50)
         stats_list  = state.journal.get_stats_by_strategy()
         stats       = next((x for x in stats_list if x["strategy_id"] == sid), {})
+
+        # Если журнал пустой — подтягиваем живые данные из памяти стратегии
+        strat_obj = state.strategies.get(sid)
+        if strat_obj and (not stats or stats.get("trades", 0) == 0):
+            pnls = strat_obj.history[-trades_done:] if strat_obj.history else []
+            wins = [p for p in pnls if p > 0]
+            losses = [p for p in pnls if p < 0]
+            stats = {
+                "strategy_id":   sid,
+                "trades":        strat_obj.trades,
+                "win_rate":      strat_obj.win_rate,
+                "total_pnl":     round(strat_obj.pnl, 4),
+                "avg_win":       round(sum(wins) / len(wins), 4) if wins else 0,
+                "avg_loss":      round(sum(losses) / len(losses), 4) if losses else 0,
+                "profit_factor": round(abs(sum(wins) / sum(losses)), 3) if losses and sum(losses) != 0 else 0,
+                "max_drawdown_pct": 0,
+                "longest_loss_streak": strat_obj.consecutive_losses,
+            }
+
         result = state.ai.analyze_strategy_performance({
             "id":     sid,
             "name":   strat_name,
@@ -611,8 +633,12 @@ async def _auto_ai_improve(sid: str, strat_name: str, strat_symbol: str, trades_
         })
         if result.get("available"):
             analysis = result.get("analysis", "")[:2000]
+            wr = stats.get("win_rate", 0)
+            pnl = stats.get("total_pnl", 0)
             asyncio.create_task(state.telegram.send(
-                f"🤖 <b>AI-советы: {sid} ({trades_done} сделок)</b>\n\n{analysis}"
+                f"🤖 <b>AI-советы: {sid} ({strat_name})</b>\n"
+                f"Сделок: {stats.get('trades', trades_done)} | WR: {wr:.0f}% | PnL: {pnl:+.2f}$\n\n"
+                f"{analysis}"
             ))
     except Exception as e:
         logger.debug(f"_auto_ai_improve {sid}: {e}")
