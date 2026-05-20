@@ -10,6 +10,7 @@ from typing import Optional
 from .base import BaseStrategy, TradingSignal
 from .trend_fib import TrendMomentumStrategy, TrendFibonacciStrategy
 from .scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
+from .aggressive_momentum import AggressiveMomentumStrategy
 
 
 # ============================================================
@@ -885,7 +886,8 @@ ALL_STRATEGIES = {
     "S9": TrendFibonacciStrategy,   # тренд + уровни Фибоначчи (38.2/50/61.8%)
     "S10": ScalperProStrategy,      # 3m высокочастотный скальпер (до 8 сигналов/день/символ)
     "S11": DragonflyGoldStrategy,   # Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP
-    "S12": OverboughtShortStrategy, # RSI разворот + BB + MACD — SOLUSDT
-    "S13": OverboughtShortStrategy, # RSI разворот + BB + MACD — PEPEUSDT (мем, волатильность)
-    "S14": OverboughtShortStrategy, # RSI разворот + BB + MACD — WIFUSDT (мем, резкие откаты)
+    "S12": OverboughtShortStrategy,      # RSI разворот + BB + MACD — SOLUSDT
+    "S13": OverboughtShortStrategy,      # RSI разворот + BB + MACD — PEPEUSDT (мем, волатильность)
+    "S14": OverboughtShortStrategy,      # RSI разворот + BB + MACD — WIFUSDT (мем, резкие откаты)
+    "S15": AggressiveMomentumStrategy,   # 1m EMA+RSI7+VWAP+ATR+ADX, M15 тренд, TP 0.7/1.5/2.5%
 }

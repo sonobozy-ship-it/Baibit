@@ -209,6 +209,7 @@ def init_strategies():
         "S12": "ADAUSDT",
         "S13": "1000PEPEUSDT",
         "S14": "WIFUSDT",
+        "S15": "OPUSDT",          # Aggressive Momentum AI (1m, L2 token)
     }
     for sid, cls in ALL_STRATEGIES.items():
         state.strategies[sid] = cls(symbol=symbol_map.get(sid, "BTCUSDT"))
