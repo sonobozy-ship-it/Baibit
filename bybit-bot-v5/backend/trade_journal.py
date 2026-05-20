@@ -286,7 +286,10 @@ class TradeJournal:
         sql = "SELECT * FROM trades WHERE exit_price IS NOT NULL"
         if self.pool.is_mysql:
             with self.pool.connection() as conn:
-                df = pd.read_sql(sql, conn)
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    cols = [d[0] for d in cur.description]
+                    df = pd.DataFrame([[row[c] for c in cols] for row in cur.fetchall()], columns=cols)
         else:
             import sqlite3 as _sq3
             conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
@@ -366,7 +369,10 @@ class TradeJournal:
         sql = self.pool.adapt(f"SELECT * FROM trades WHERE {where} ORDER BY timestamp ASC")
         if self.pool.is_mysql:
             with self.pool.connection() as conn:
-                return pd.read_sql(sql, conn, params=params)
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    cols = [d[0] for d in cur.description]
+                    return pd.DataFrame([[row[c] for c in cols] for row in cur.fetchall()], columns=cols)
         else:
             import sqlite3 as _sq3
             conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
@@ -450,7 +456,10 @@ class TradeJournal:
             adapted_sql = self.pool.adapt(sql)
             if self.pool.is_mysql:
                 with self.pool.connection() as conn:
-                    df = pd.read_sql(adapted_sql, conn, params=params)
+                    with conn.cursor() as cur:
+                        cur.execute(adapted_sql, params)
+                        cols = [d[0] for d in cur.description]
+                        df = pd.DataFrame([[row[c] for c in cols] for row in cur.fetchall()], columns=cols)
             else:
                 import sqlite3 as _sq3
                 conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
@@ -485,7 +494,10 @@ class TradeJournal:
         sql = "SELECT * FROM trades WHERE exit_price IS NOT NULL"
         if self.pool.is_mysql:
             with self.pool.connection() as conn:
-                df = pd.read_sql(sql, conn)
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    cols = [d[0] for d in cur.description]
+                    df = pd.DataFrame([[row[c] for c in cols] for row in cur.fetchall()], columns=cols)
         else:
             import sqlite3 as _sq3
             conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
