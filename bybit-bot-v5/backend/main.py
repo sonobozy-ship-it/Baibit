@@ -1784,8 +1784,7 @@ async def _send_hourly_report():
         balance = state.paper.balance
     elif state.bybit:
         try:
-            bal = state.bybit.get_balance()
-            balance = bal.get("total", 0) if isinstance(bal, dict) else 0
+            balance = state.bybit.get_balance("USDT")
         except Exception:
             balance = 0
 
@@ -2702,12 +2701,19 @@ class ThresholdAutoTuneRequest(BaseModel):
 @app.post("/api/ml/threshold/auto-tune")
 async def ml_threshold_auto_tune(req: ThresholdAutoTuneRequest):
     """Авто-подбор optimal threshold per strategy."""
-    with state.db_pool.connection() as conn:
-        rows = conn.execute("""
-            SELECT ml_prediction, outcome FROM signal_snapshots
-            WHERE strategy_id = ? AND ml_prediction IS NOT NULL
-            AND outcome IS NOT NULL
-        """, (req.strategy_id,)).fetchall()
+    _pool = state.db_pool
+    _q = _pool.adapt("""
+        SELECT ml_prediction, outcome FROM signal_snapshots
+        WHERE strategy_id = ? AND ml_prediction IS NOT NULL
+        AND outcome IS NOT NULL
+    """)
+    with _pool.connection() as conn:
+        if _pool.is_mysql:
+            with conn.cursor() as _c:
+                _c.execute(_q, (req.strategy_id,))
+                rows = _c.fetchall()
+        else:
+            rows = conn.execute(_q, (req.strategy_id,)).fetchall()
     if len(rows) < 30:
         return {"success": False, "error": f"Мало данных: {len(rows)}"}
     preds = [r["ml_prediction"] for r in rows]
@@ -2972,16 +2978,21 @@ async def orchestrator_disable():
 @app.post("/api/ml/anomaly/fit")
 async def ml_anomaly_fit():
     """Обучить anomaly detector на исторических сигналах."""
-    # Берём все собранные signal_snapshots
-    with state.db_pool.connection() as conn:
-        import pandas as pd, json
-        rows = conn.execute("SELECT features_json FROM signal_snapshots LIMIT 5000").fetchall()
+    import pandas as pd, json
+    pool = state.db_pool
+    with pool.connection() as conn:
+        if pool.is_mysql:
+            with conn.cursor() as _c:
+                _c.execute("SELECT features_json FROM signal_snapshots LIMIT 5000")
+                rows = _c.fetchall()
+        else:
+            rows = conn.execute("SELECT features_json FROM signal_snapshots LIMIT 5000").fetchall()
     if len(rows) < 100:
         return {"success": False, "error": f"Мало данных: {len(rows)} (нужно ≥100)"}
     features_list = []
     for r in rows:
         try:
-            features_list.append(json.loads(r["features_json"]))
+            features_list.append(json.loads(r["features_json"] if isinstance(r, dict) else r[0]))
         except Exception:
             continue
     df = pd.DataFrame(features_list)
