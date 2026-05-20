@@ -192,6 +192,7 @@ class TelegramCommander:
             "/best":       self._cmd_best_models,
             "/improve":    self._cmd_improve,
             "/advisor":    self._cmd_advisor,
+            "/exportdb":   self._cmd_exportdb,
         }
 
         handler = handlers.get(cmd)
@@ -448,7 +449,8 @@ class TelegramCommander:
             "/ai — AI рекомендации\n"
             "/news — новостной сентимент\n"
             "/advisor — AI-анализ всех стратегий + рекомендации\n"
-            "/advisor S1 — детальный анализ стратегии"
+            "/advisor S1 — детальный анализ стратегии\n"
+            "/exportdb — скачать базу данных сделок"
         )
 
     async def _cmd_status(self, upd, arg):
@@ -1077,6 +1079,61 @@ class TelegramCommander:
         s.bot_running = True
         await self._start_fn()
         await self.reply(upd, "▶️ Возобновлён", reply_markup=self._main_menu())
+
+    async def send_document(self, chat_id: str, file_path: str,
+                             filename: str, caption: str = "") -> bool:
+        """Отправить файл через Telegram (multipart/form-data)."""
+        import aiofiles
+        from pathlib import Path
+        try:
+            session = await self._get_session()
+            url = f"{self._base_url}/sendDocument"
+            async with aiofiles.open(file_path, "rb") as fh:
+                data = aiohttp.FormData()
+                data.add_field("chat_id", str(chat_id))
+                data.add_field("caption", caption, content_type="text/plain")
+                data.add_field("parse_mode", "HTML")
+                data.add_field(
+                    "document",
+                    await fh.read(),
+                    filename=filename,
+                    content_type="application/octet-stream",
+                )
+                async with session.post(url, data=data) as resp:
+                    result = await resp.json()
+                    return result.get("ok", False)
+        except Exception as e:
+            logger.error(f"send_document: {e}")
+            return False
+
+    async def _cmd_exportdb(self, upd, arg):
+        """Выгрузить базу данных сделок в Telegram."""
+        chat_id = upd.get("chat", {}).get("id") or upd.get("message", {}).get("chat", {}).get("id")
+        if not chat_id:
+            return
+        s = self._get_state()
+        await self.reply(upd, "⏳ Готовлю базу данных...")
+        try:
+            from pathlib import Path
+            db_path = getattr(s.journal.pool, "db_path", None)
+            if db_path and Path(db_path).exists():
+                ts = __import__("datetime").datetime.utcnow().strftime("%Y%m%d_%H%M")
+                fname = f"baibit_trades_{ts}.db"
+                ok = await self.send_document(str(chat_id), db_path, fname,
+                                              caption="🗃 SQLite база сделок")
+                if not ok:
+                    raise RuntimeError("Ошибка отправки файла")
+            else:
+                # Fallback: CSV-дамп
+                csv_path = s.journal.export_to_csv()
+                ts = __import__("datetime").datetime.utcnow().strftime("%Y%m%d_%H%M")
+                fname = f"baibit_trades_{ts}.csv"
+                ok = await self.send_document(str(chat_id), csv_path, fname,
+                                              caption="📊 CSV-экспорт сделок")
+                if not ok:
+                    raise RuntimeError("Ошибка отправки файла")
+        except Exception as e:
+            await self.reply(upd, f"❌ Ошибка экспорта: {e}")
 
     async def close(self):
         if self._session and not self._session.closed:
