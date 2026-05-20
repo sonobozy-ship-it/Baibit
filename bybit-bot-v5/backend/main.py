@@ -54,6 +54,7 @@ from strategy_advisor import StrategyAdvisor
 from position_monitor import PositionMonitor
 from global_trade_guard import GlobalTradeGuard
 from strategies.tp_normalizer import normalize_take_profit
+from strategies.entry_filter import validate_entry_confirmation
 
 # ============================================================
 # Загрузка конфига
@@ -540,6 +541,10 @@ async def orchestrator_loop():
         if not state.orchestrator or not state.orchestrator.enabled:
             continue
         if not state.orchestrator.is_due:
+            continue
+        # В режиме обучения оркестратор только оповещает, не вмешивается
+        if state.training_mode:
+            logger.debug("[Orchestrator] Режим обучения — автодействия пропущены")
             continue
         try:
             full = await full_status()
@@ -1309,7 +1314,7 @@ async def trading_loop():
                         ai_score = ai_result.get("score", 5)
                         approved = ai_result.get("approved", True)
                         ai_reasoning = ai_result.get("reasoning", ai_result.get("comment", ""))
-                        if not approved:
+                        if not approved and not state.training_mode:
                             # Уведомляем об отклонении и пропускаем сделку
                             asyncio.create_task(state.telegram.send(
                                 f"🚫 <b>AI отверг: {signal.action} {strat.symbol}</b>\n"
@@ -1353,11 +1358,11 @@ async def trading_loop():
                             logger.debug(f"{sid}: недостаточно свечей для ML-фич, пропуск")
                             ml_prediction = None
                         else:
-                            # Anomaly detection — score() вызывается один раз, передаём результат
+                            # Anomaly detection — в режиме обучения не блокируем (собираем аномалии тоже)
                             if state.anomaly_detector.model:
                                 anom_score = state.anomaly_detector.score(features)
                                 features["anomaly_score"] = anom_score
-                                if anom_score < -0.65:  # is_anomaly без повторного score()
+                                if anom_score < -0.65 and not state.training_mode:
                                     logger.warning(f"{sid}: 🚨 АНОМАЛИЯ (score={anom_score:.2f}) — пропускаем")
                                     await broadcast_log(f"🚨 {sid} аномальные условия рынка, skip", "warn")
                                     continue
@@ -1382,9 +1387,11 @@ async def trading_loop():
                             "trade_taken": False,
                         })
 
-                        # Решение: адаптивный порог уверенности
+                        # Решение: адаптивный порог уверенности (пропускается в режиме обучения)
                         adaptive_threshold = state.adaptive.confidence_threshold(sid)
-                        if ml_prediction and ml_prediction.get("available") and state.ml_filter_mode == "strict":
+                        if (ml_prediction and ml_prediction.get("available")
+                                and state.ml_filter_mode == "strict"
+                                and not state.training_mode):
                             prob = ml_prediction.get("probability", 0)
                             if prob < adaptive_threshold:
                                 logger.info(
@@ -1483,11 +1490,39 @@ async def trading_loop():
                         )
                         continue
 
-                    # ── Нормализация TP: ближе к цели, фильтр качества входа ──
+                    # ── Нормализация TP + фильтр качества входа ─────────────
+                    _sig_pre_norm = signal   # сохраняем до нормализации
                     signal = normalize_take_profit(signal, df, state.scalp_active)
                     if signal is None:
-                        logger.info(f"{sid}: 🚫 TP_NORM заблокировал — цена слишком близко к уровню")
-                        continue
+                        if state.training_mode:
+                            signal = _sig_pre_norm   # в обучении не блокируем
+                        else:
+                            logger.info(f"{sid}: 🚫 TP_NORM заблокировал — цена слишком близко к уровню")
+                            continue
+
+                    # ── Подтверждение входа: нет ножей, есть разворот ──────────
+                    # В режиме обучения пропускаем — собираем любые данные
+                    if not state.training_mode:
+                        _entry_check = validate_entry_confirmation(df, signal.action, state.scalp_active)
+                        if not _entry_check["entry_allowed"]:
+                            reason_code = _entry_check["entry_block_reason"]
+                            candles_dir = _entry_check.get("last_3_candles_direction", "?")
+                            logger.info(
+                                f"{sid}: 🔪 EntryFilter BLOCKED {signal.action} {strat.symbol} "
+                                f"[{reason_code}] свечи={candles_dir} "
+                                f"EMA9={_entry_check.get('ema9_position','?')}"
+                            )
+                            continue
+                        # Добавляем в filters_passed для логирования
+                        if signal.filters_passed is None:
+                            signal.filters_passed = {}
+                        signal.filters_passed.update({
+                            "entry_allowed":     True,
+                            "last_3_candles":    _entry_check.get("last_3_candles_direction", "?"),
+                            "ema9_pos":          _entry_check.get("ema9_position", "?"),
+                            "reversal_detected": _entry_check.get("reversal_candle_detected", False),
+                            "confirm_detected":  _entry_check.get("confirmation_candle_detected", False),
+                        })
 
                     # ============== Открытие позиции ==============
                     _log_trade_attempt(
