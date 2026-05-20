@@ -193,7 +193,13 @@ class BaseStrategy(ABC):
             return False
         if isinstance(opened_at, str):
             opened_at = pd.Timestamp(opened_at)
-        elapsed = (pd.Timestamp.utcnow() - opened_at).total_seconds() / 60.0
+        now = pd.Timestamp.utcnow()
+        # Нормализуем timezone: если opened_at tz-aware — делаем now тоже tz-aware
+        if getattr(opened_at, "tzinfo", None) is not None:
+            now = now.tz_localize("UTC")
+        elif getattr(now, "tzinfo", None) is not None:
+            opened_at = opened_at.tz_localize("UTC")
+        elapsed = (now - opened_at).total_seconds() / 60.0
         return elapsed >= self.max_hold_minutes
 
     def register_position(self, side: str, entry: float, sl: float, tp: float):
