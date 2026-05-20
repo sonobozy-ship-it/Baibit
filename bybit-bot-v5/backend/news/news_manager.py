@@ -229,8 +229,7 @@ class NewsManager:
             if self.db.is_mysql:
                 with conn.cursor() as c:
                     c.execute(query, (cutoff,))
-                    cols = [d[0] for d in c.description]
-                    recent = [dict(zip(cols, row)) for row in c.fetchall()]
+                    recent = [dict(row) for row in c.fetchall()]
             else:
                 import sqlite3
                 conn.row_factory = sqlite3.Row
@@ -354,8 +353,7 @@ class NewsManager:
             if self.db.is_mysql:
                 with conn.cursor() as c:
                     c.execute(query, (cutoff,))
-                    cols = [d[0] for d in c.description]
-                    recent = [dict(zip(cols, row)) for row in c.fetchall()]
+                    recent = [dict(row) for row in c.fetchall()]
             else:
                 import sqlite3
                 conn.row_factory = sqlite3.Row

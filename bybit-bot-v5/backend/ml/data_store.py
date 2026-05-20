@@ -208,8 +208,23 @@ class MLDataStore:
         if only_taken_trades:
             query += " AND trade_taken = 1"
 
-        with self.pool.connection() as conn:
-            df = pd.read_sql(self.pool.adapt(query), conn, params=params)
+        adapted = self.pool.adapt(query)
+        if self.pool.is_mysql:
+            with self.pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(adapted, params)
+                    cols = [d[0] for d in cur.description]
+                    df = pd.DataFrame([[row[c] for c in cols] for row in cur.fetchall()], columns=cols)
+        else:
+            import sqlite3 as _sq3
+            conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
+            try:
+                cur = conn.cursor()
+                cur.execute(adapted, params)
+                cols = [d[0] for d in cur.description]
+                df = pd.DataFrame(cur.fetchall(), columns=cols)
+            finally:
+                conn.close()
 
         if df.empty or len(df) < min_samples:
             return pd.DataFrame()
