@@ -306,67 +306,252 @@ class BreakoutHunterStrategy(BaseStrategy):
 
 
 # ============================================================
-# S5: SCALPER GRID (mean reversion)
+# S5: STRUCTURE SCALPER — вход только по структуре + 3+ подтверждения
 # ============================================================
 class ScalperGridStrategy(BaseStrategy):
     ID = "S5"
     NAME = "SCALPER GRID"
-    DESCRIPTION = "Сетка в боковике + ATR < порога + низкая волатильность"
-    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
+    DESCRIPTION = "Структурный скальпер: уровни 2+ касания, 3+ подтверждений, без чистых ATR-входов"
+    REGIME_PREFERENCE = []
 
     def __init__(self, **kwargs):
         super().__init__(
-            stop_loss_pct=0.8,
-            take_profit_pct=1.6,   # RR 1:2 (было 0.8 → 1:1, убыточно после комиссий)
-            edge_wr_target=0.55,   # реалистичный таргет для mean-reversion
+            stop_loss_pct=1.0,
+            take_profit_pct=2.0,
+            edge_wr_target=0.55,
             timeframe="5",
             **kwargs,
         )
 
+    # ── уровни поддержки / сопротивления ─────────────────────────────────────
+    def _find_levels(self, df: pd.DataFrame, atr: float):
+        highs = df["high"].values
+        lows  = df["low"].values
+        tol   = atr * 0.6
+
+        swing_highs, swing_lows = [], []
+        for i in range(2, len(highs) - 2):
+            if highs[i] >= max(highs[i-2], highs[i-1], highs[i+1], highs[i+2]):
+                swing_highs.append(highs[i])
+            if lows[i]  <= min(lows[i-2],  lows[i-1],  lows[i+1],  lows[i+2]):
+                swing_lows.append(lows[i])
+
+        def cluster(vals):
+            if not vals:
+                return []
+            result, group = [], [sorted(vals)[0]]
+            for v in sorted(vals)[1:]:
+                if v - group[0] <= tol:
+                    group.append(v)
+                else:
+                    if len(group) >= 2:
+                        result.append(sum(group) / len(group))
+                    group = [v]
+            if len(group) >= 2:
+                result.append(sum(group) / len(group))
+            return result
+
+        return cluster(swing_lows), cluster(swing_highs)
+
+    # ── факел (длинная тень) ──────────────────────────────────────────────────
+    @staticmethod
+    def _wick_type(c: pd.Series) -> str:
+        body  = abs(float(c["close"]) - float(c["open"]))
+        hi    = float(c["high"])
+        lo    = float(c["low"])
+        upper = hi - max(float(c["close"]), float(c["open"]))
+        lower = min(float(c["close"]), float(c["open"])) - lo
+        if body < 1e-9:
+            return ""
+        if lower > body * 2 and lower > upper * 1.2:
+            return "bullish"
+        if upper > body * 2 and upper > lower * 1.2:
+            return "bearish"
+        return ""
+
+    # ── ложный пробой ─────────────────────────────────────────────────────────
+    def _fake_breakout(self, df: pd.DataFrame, levels: list, side: str, atr: float) -> bool:
+        if len(df) < 4 or not levels:
+            return False
+        recent = df.iloc[-4:]
+        close_now = float(df.iloc[-1]["close"])
+        for lvl in levels:
+            if side == "support":
+                if any(recent["low"] < lvl - atr * 0.05) and close_now > lvl:
+                    return True
+            else:
+                if any(recent["high"] > lvl + atr * 0.05) and close_now < lvl:
+                    return True
+        return False
+
+    # ── ближайший уровень ─────────────────────────────────────────────────────
+    @staticmethod
+    def _nearest(price: float, levels: list, atr: float) -> float:
+        for lvl in sorted(levels, key=lambda x: abs(x - price)):
+            if abs(price - lvl) <= atr * 0.5:
+                return lvl
+        return 0.0
+
+    # ── MACD ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _macd_confirm(df: pd.DataFrame, side: str) -> bool:
+        try:
+            macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
+            if macd is None or macd.empty:
+                return False
+            hist_col = [c for c in macd.columns if "h" in c.lower() or "hist" in c.lower()]
+            if not hist_col:
+                return False
+            h = macd[hist_col[0]]
+            if side == "BUY":
+                return float(h.iloc[-1]) > float(h.iloc[-2])   # гистограмма растёт
+            else:
+                return float(h.iloc[-1]) < float(h.iloc[-2])   # гистограмма падает
+        except Exception:
+            return False
+
+    # ── главный метод ─────────────────────────────────────────────────────────
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 50:
+        if len(df) < 100:
             return None
         df = df.copy()
 
-        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["rsi"]    = ta.rsi(df["close"], length=14)
         df["ema_20"] = ta.ema(df["close"], length=20)
         df["ema_50"] = ta.ema(df["close"], length=50)
-        bb = ta.bbands(df["close"], length=20, std=2)
-        df = df.join(bb)
+        df["vol_ma"] = df["volume"].rolling(20).mean()
 
-        last = df.iloc[-1]
+        last   = df.iloc[-1]
+        price  = float(last["close"])
+        atr    = float(last["atr"])   if not pd.isna(last["atr"])    else 0.0
+        rsi    = float(last["rsi"])   if not pd.isna(last["rsi"])    else 50.0
+        vol    = float(last["volume"])
+        vol_ma = float(last["vol_ma"]) if not pd.isna(last["vol_ma"]) else vol
+        ema20  = float(last["ema_20"]) if not pd.isna(last["ema_20"]) else price
+        ema50  = float(last["ema_50"]) if not pd.isna(last["ema_50"]) else price
 
-        # Боковик: ATR низкий, EMA20 и EMA50 близко
-        atr_pct = last["atr"] / last["close"] * 100
-        low_atr = atr_pct < 2.5
-        flat_ema = abs(last["ema_20"] - last["ema_50"]) / last["close"] * 100 < 1.2
-        bbw = (last["BBU_20_2.0"] - last["BBL_20_2.0"]) / last["close"]
-        narrow_bb = bbw < 0.08
-
-        if not (low_atr and flat_ema and narrow_bb):
+        if atr == 0 or price == 0:
             return None
 
-        # В боковике покупаем у нижней BB, продаём у верхней
-        near_lower = last["close"] < last["BBL_20_2.0"] * 1.006
-        near_upper = last["close"] > last["BBU_20_2.0"] * 0.994
-
-        if not (near_lower or near_upper):
+        # ATR должен быть достаточным для покрытия комиссий
+        atr_pct = atr / price * 100
+        if atr_pct < 0.25:
             return None
 
-        side = "BUY" if near_lower else "SELL"
-        entry = float(last["close"])
+        # Поиск структурных уровней (последние 100 свечей)
+        support_lvls, resist_lvls = self._find_levels(df.iloc[-100:], atr)
+        if not support_lvls and not resist_lvls:
+            return None
+
+        buy_lvl  = self._nearest(price, support_lvls, atr)
+        sell_lvl = self._nearest(price, resist_lvls,  atr)
+
+        # Цена должна быть у одного уровня, не в середине диапазона
+        if buy_lvl and sell_lvl:
+            return None
+        if not buy_lvl and not sell_lvl:
+            return None
+
+        side    = "BUY" if buy_lvl else "SELL"
+        lvl     = buy_lvl or sell_lvl
+        fake_bo = self._fake_breakout(
+            df, support_lvls if side == "BUY" else resist_lvls,
+            "support" if side == "BUY" else "resistance", atr
+        )
+
+        # ── 8 подтверждений ──────────────────────────────────────────────────
+        checks = {}
+
+        # 1. Структурный уровень (уже гарантирован выше)
+        checks["structure"] = True
+
+        # 2. Свеча подтверждения (текущая закрылась в нужную сторону)
         if side == "BUY":
-            sl = entry * (1 - self.stop_loss_pct / 100)
-            tp = entry * (1 + self.take_profit_pct / 100)
+            checks["confirm_candle"] = float(last["close"]) > float(last["open"])
         else:
-            sl = entry * (1 + self.stop_loss_pct / 100)
-            tp = entry * (1 - self.take_profit_pct / 100)
+            checks["confirm_candle"] = float(last["close"]) < float(last["open"])
+
+        # 3. Объём × 1.3 от среднего
+        checks["volume"] = vol > vol_ma * 1.3
+
+        # 4. RSI не на экстремуме, подтверждает направление
+        if side == "BUY":
+            checks["rsi"] = 25 < rsi < 62
+        else:
+            checks["rsi"] = 38 < rsi < 75
+
+        # 5. Факел в нужную сторону
+        wick = self._wick_type(last)
+        checks["wick"] = (wick == "bullish") if side == "BUY" else (wick == "bearish")
+
+        # 6. Ложный пробой
+        checks["fake_breakout"] = fake_bo
+
+        # 7. EMA не против входа (допускаем небольшое отклонение)
+        if side == "BUY":
+            checks["ema_align"] = ema20 >= ema50 * 0.993
+        else:
+            checks["ema_align"] = ema20 <= ema50 * 1.007
+
+        # 8. MACD-гистограмма в нужном направлении
+        checks["macd"] = self._macd_confirm(df, side)
+
+        conf_count = sum(1 for v in checks.values() if v)
+
+        # Адаптивный порог по серии убытков
+        if self.consecutive_losses >= 4:
+            min_conf = 5   # SAFE: только A+ сигналы
+        elif self.consecutive_losses >= 3:
+            min_conf = 4
+        else:
+            min_conf = 3
+
+        if conf_count < min_conf:
+            return None
+
+        # ── SL за структурой + 0.2 ATR буфер, минимум 0.8 ATR ───────────────
+        if side == "BUY":
+            sl_struct = lvl - atr * 0.2
+            sl_min    = price - atr * 0.8
+            sl        = min(sl_struct, sl_min)
+            risk      = price - sl
+            tp        = price + risk * 2.0   # RR 2:1 минимум
+        else:
+            sl_struct = lvl + atr * 0.2
+            sl_min    = price + atr * 0.8
+            sl        = max(sl_struct, sl_min)
+            risk      = sl - price
+            tp        = price - risk * 2.0
+
+        # Проверяем что TP не слишком близко (должен покрыть комиссии × 3)
+        tp_pct = abs(tp - price) / price * 100
+        if tp_pct < 0.4:
+            return None
+
+        # confidence: вклад подтверждений + бонус за приоритетные паттерны
+        conf = conf_count / 8.0
+        if checks["fake_breakout"]: conf = min(1.0, conf + 0.15)
+        if checks["wick"]:          conf = min(1.0, conf + 0.10)
+
+        parts = []
+        if checks["fake_breakout"]: parts.append("FakeBO")
+        if checks["wick"]:          parts.append(f"Wick({wick})")
+        parts.append(f"Lvl@{lvl:.5g}")
+        parts.append(f"{conf_count}/8conf")
+        parts.append(f"RSI={rsi:.0f}")
+        if self.consecutive_losses >= 3:
+            parts.append(f"SAFE(loss={self.consecutive_losses})")
 
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.65,
-            entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"Range {('BUY low' if near_lower else 'SELL high')} + ATR {atr_pct:.2f}%",
-            filters_passed={"low_atr": True, "flat_ema": True, "narrow_bb": True},
+            action=side,
+            symbol=self.symbol,
+            confidence=round(conf, 2),
+            entry_price=price,
+            stop_loss=round(sl, 8),
+            take_profit=round(tp, 8),
+            reason=" | ".join(parts),
+            filters_passed=checks,
         )
 
 
