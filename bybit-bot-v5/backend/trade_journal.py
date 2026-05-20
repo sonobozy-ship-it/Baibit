@@ -228,7 +228,7 @@ class TradeJournal:
             losses = g[g["pnl_usd"] < 0]
             stats.append({
                 "strategy_id": sid,
-                "strategy_name": g["strategy_name"].iloc[0],
+                "strategy_name": g["strategy_name"].iloc[0] or sid,
                 "trades": len(g),
                 "wins": len(wins),
                 "losses": len(losses),

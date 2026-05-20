@@ -1467,7 +1467,7 @@ async def trading_loop():
                                 "side":          signal.action,
                                 "entry_price":   signal.entry_price,
                                 "qty":           qty,
-                                "leverage":      strat.leverage,
+                                "leverage":      effective_leverage,
                                 "stop_loss":     signal.stop_loss,
                                 "take_profit":   signal.take_profit,
                                 "initial_sl":    signal.stop_loss,
@@ -1637,25 +1637,35 @@ async def trading_loop():
                                         duration_min=0,
                                     )
                                     # Drift monitor
-                                    with state.db_pool.connection() as conn:
-                                        conn.row_factory = __import__("sqlite3").Row
-                                        row = conn.execute(
-                                            "SELECT ml_prediction FROM signal_snapshots WHERE id = ?",
-                                            (snapshot_id,),
-                                        ).fetchone()
-                                        if row and row["ml_prediction"] is not None:
-                                            state.drift_monitor.record(
-                                                sid, row["ml_prediction"], 1 if outcome == "win" else 0,
-                                            )
-                                            # Проверка drift
-                                            drift = state.drift_monitor.should_disable_model(sid)
-                                            if drift["disable"]:
-                                                logger.critical(f"🚨 DRIFT detected {sid}: {drift['reason']}")
-                                                # Деактивируем модель
-                                                state.ml_predictor.models.pop(sid, None)
-                                                asyncio.create_task(state.telegram.send(
-                                                    f"🚨 <b>ML DRIFT</b> {sid}\n{drift['reason']}\nМодель отключена"
-                                                ))
+                                    _drift_row = None
+                                    try:
+                                        _sql = state.db_pool.adapt(
+                                            "SELECT ml_prediction FROM signal_snapshots WHERE id = ?"
+                                        )
+                                        with state.db_pool.connection() as _dc:
+                                            if state.db_pool.is_mysql:
+                                                with _dc.cursor() as _cc:
+                                                    _cc.execute(_sql, (snapshot_id,))
+                                                    _drift_row = _cc.fetchone()
+                                            else:
+                                                import sqlite3 as _sq3
+                                                _dc.row_factory = _sq3.Row
+                                                _r = _dc.execute(_sql, (snapshot_id,)).fetchone()
+                                                _drift_row = dict(_r) if _r else None
+                                    except Exception:
+                                        pass
+                                    if _drift_row and _drift_row.get("ml_prediction") is not None:
+                                        state.drift_monitor.record(
+                                            sid, _drift_row["ml_prediction"], 1 if outcome == "win" else 0,
+                                        )
+                                        # Проверка drift
+                                        drift = state.drift_monitor.should_disable_model(sid)
+                                        if drift["disable"]:
+                                            logger.critical(f"🚨 DRIFT detected {sid}: {drift['reason']}")
+                                            state.ml_predictor.models.pop(sid, None)
+                                            asyncio.create_task(state.telegram.send(
+                                                f"🚨 <b>ML DRIFT</b> {sid}\n{drift['reason']}\nМодель отключена"
+                                            ))
 
                                     await broadcast_log(
                                         f"🎯 {sid} → {outcome.upper()} R={r_multiple:+.2f}",

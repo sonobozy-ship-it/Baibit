@@ -516,7 +516,13 @@ class ClaudeOrchestrator:
         history_msgs: List[Dict] = []
         for h in self._history[-self.MAX_HISTORY:]:
             user_content = h.get("report_sent", "")
-            asst_content = json.dumps(h.get("result", {}), ensure_ascii=False)
+            # h IS the result dict (from result.to_dict()); reconstruct the LLM response
+            asst_content = json.dumps({
+                "analysis":       h.get("analysis", ""),
+                "risk_level":     h.get("risk_level", "low"),
+                "decisions":      h.get("decisions", []),
+                "next_check_min": h.get("next_check_min", 15),
+            }, ensure_ascii=False)
             if not user_content or not asst_content:
                 continue
             history_msgs.append({"role": "user",      "content": user_content})
