@@ -1,5 +1,5 @@
 """
-Все 9 торговых стратегий.
+Все торговые стратегии.
 Каждая имеет систему фильтров (math edge) + breakeven + trailing stop.
 Индикаторы — pandas_ta (или ручной расчёт где нужно).
 """
@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 from typing import Optional
+from datetime import datetime, timezone
 from .base import BaseStrategy, TradingSignal
 from .trend_fib import TrendMomentumStrategy, TrendFibonacciStrategy
 from .scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
@@ -14,91 +15,212 @@ from .aggressive_momentum import AggressiveMomentumStrategy
 
 
 # ============================================================
-# S1: EMA CROSSOVER
+# Shared utilities — общие функции для всех стратегий
+# ============================================================
+
+def _struct_levels(df: pd.DataFrame, atr: float, lookback: int = 100):
+    """Swing-уровни поддержки/сопротивления с 2+ касаниями."""
+    highs  = df["high"].values[-lookback:]
+    lows   = df["low"].values[-lookback:]
+    tol    = atr * 0.6
+    sh, sl = [], []
+    for i in range(2, len(highs) - 2):
+        if highs[i] >= max(highs[i-2], highs[i-1], highs[i+1], highs[i+2]):
+            sh.append(highs[i])
+        if lows[i] <= min(lows[i-2], lows[i-1], lows[i+1], lows[i+2]):
+            sl.append(lows[i])
+
+    def cluster(vals):
+        if not vals:
+            return []
+        out, grp = [], [sorted(vals)[0]]
+        for v in sorted(vals)[1:]:
+            if v - grp[0] <= tol:
+                grp.append(v)
+            else:
+                if len(grp) >= 2:
+                    out.append(sum(grp) / len(grp))
+                grp = [v]
+        if len(grp) >= 2:
+            out.append(sum(grp) / len(grp))
+        return out
+
+    return cluster(sl), cluster(sh)   # (support_levels, resistance_levels)
+
+
+def _nearest_level(price: float, levels: list, atr: float) -> float:
+    """Возвращает ближайший уровень в пределах 0.5 ATR, иначе 0."""
+    for lvl in sorted(levels, key=lambda x: abs(x - price)):
+        if abs(price - lvl) <= atr * 0.5:
+            return lvl
+    return 0.0
+
+
+def _wick_signal(c: pd.Series) -> str:
+    """Факел: 'bullish' / 'bearish' / ''."""
+    body  = abs(float(c["close"]) - float(c["open"]))
+    upper = float(c["high"]) - max(float(c["close"]), float(c["open"]))
+    lower = min(float(c["close"]), float(c["open"])) - float(c["low"])
+    if body < 1e-9:
+        return ""
+    if lower > body * 2 and lower > upper * 1.2:
+        return "bullish"
+    if upper > body * 2 and upper > lower * 1.2:
+        return "bearish"
+    return ""
+
+
+def _fake_bo(df: pd.DataFrame, levels: list, direction: str, atr: float) -> bool:
+    """Ложный пробой уровня (direction: 'sup' или 'res')."""
+    if len(df) < 4 or not levels:
+        return False
+    r = df.iloc[-4:]
+    close = float(df.iloc[-1]["close"])
+    for lvl in levels:
+        if direction == "sup":
+            if any(r["low"] < lvl - atr * 0.05) and close > lvl:
+                return True
+        else:
+            if any(r["high"] > lvl + atr * 0.05) and close < lvl:
+                return True
+    return False
+
+
+def _htf_trend(df: pd.DataFrame, n: int = 24) -> int:
+    """Грубый HTF тренд по последним n свечам: +1 вверх, -1 вниз, 0 флэт."""
+    if len(df) < n + 1:
+        return 0
+    start = float(df.iloc[-n]["close"])
+    end   = float(df.iloc[-1]["close"])
+    chg   = (end - start) / start * 100
+    if chg > 0.5:
+        return 1
+    if chg < -0.5:
+        return -1
+    return 0
+
+
+def _atr_ok(last, df: pd.DataFrame, max_mult: float = 1.5) -> bool:
+    """True если ATR не аномально высокий (< среднего × max_mult)."""
+    atr_mean = df["atr"].iloc[-20:].mean() if "atr" in df.columns else 0
+    return atr_mean == 0 or float(last.get("atr", 0)) <= atr_mean * max_mult
+
+
+
+# ============================================================
+# S1: EMA CROSSOVER — точный вход за структурой, R:R ≥ 2.5
 # ============================================================
 class EMACrossoverStrategy(BaseStrategy):
     ID = "S1"
     NAME = "EMA CROSSOVER"
-    DESCRIPTION = "EMA 9/21 cross + RSI зона + объём × 1.5 + свеча подтверждения"
-    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
+    DESCRIPTION = "EMA 9/21 cross + структурный уровень + R:R ≥ 2.5 + объём + HTF"
+    REGIME_PREFERENCE = []
 
     def __init__(self, **kwargs):
         super().__init__(
             stop_loss_pct=1.5,
-            take_profit_pct=3.5,
+            take_profit_pct=3.75,   # R:R 2.5:1
             edge_wr_target=0.62,
             timeframe="15",
             **kwargs,
         )
-        self.fast_ema = 9
-        self.slow_ema = 21
-        self.rsi_period = 14
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 50:
+        if len(df) < 60:
             return None
         df = df.copy()
 
-        df["ema_fast"] = ta.ema(df["close"], length=self.fast_ema)
-        df["ema_slow"] = ta.ema(df["close"], length=self.slow_ema)
-        df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
-        df["vol_ma"] = df["volume"].rolling(20).mean()
+        df["atr"]      = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["ema_fast"] = ta.ema(df["close"], length=9)
+        df["ema_slow"] = ta.ema(df["close"], length=21)
+        df["ema_50"]   = ta.ema(df["close"], length=50)
+        df["rsi"]      = ta.rsi(df["close"], length=14)
+        df["vol_ma"]   = df["volume"].rolling(20).mean()
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+        last  = df.iloc[-1]
+        prev  = df.iloc[-2]
+        atr   = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
+        price = float(last["close"])
 
-        ema_bull_cross = prev["ema_fast"] < prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
-        ema_bear_cross = prev["ema_fast"] > prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
-
-        # Касание EMA: свеча должна задеть EMA своим телом/тенью при кроссе
-        # BUY: low свечи <= ema_fast (касание снизу-вверх), тело закрылось выше
-        # SELL: high свечи >= ema_fast (касание сверху-вниз), тело закрылось ниже
-        ema_touch_bull = last["low"] <= last["ema_fast"] * 1.002
-        ema_touch_bear = last["high"] >= last["ema_fast"] * 0.998
-
-        rsi_in_zone = 30 < last["rsi"] < 70   # зона без экстремумов
-        vol_confirm = last["volume"] > last["vol_ma"] * 1.3  # реальный объём
-
-        # Подтверждение свечой: бычья свеча при BUY, медвежья при SELL
-        bull_candle = last["close"] > last["open"]
-        bear_candle = last["close"] < last["open"]
-
-        filters = {
-            "ema_cross":    ema_bull_cross or ema_bear_cross,
-            "ema_touch":    ema_touch_bull if ema_bull_cross else ema_touch_bear,
-            "rsi_zone":     rsi_in_zone,
-            "volume_spike": vol_confirm,
-            "candle_confirm": bull_candle if ema_bull_cross else bear_candle,
-        }
-
-        if not all(filters.values()):
+        if atr == 0 or price == 0:
             return None
 
-        side = "BUY" if ema_bull_cross else "SELL"
-        entry = float(last["close"])
-        if side == "BUY":
-            sl = entry * (1 - self.stop_loss_pct / 100)
-            tp = entry * (1 + self.take_profit_pct / 100)
-        else:
-            sl = entry * (1 + self.stop_loss_pct / 100)
-            tp = entry * (1 - self.take_profit_pct / 100)
+        # ATR не должен быть аномально высоким
+        if not _atr_ok(last, df):
+            return None
 
+        # EMA кросс
+        bull_cross = float(prev["ema_fast"]) < float(prev["ema_slow"]) and float(last["ema_fast"]) > float(last["ema_slow"])
+        bear_cross = float(prev["ema_fast"]) > float(prev["ema_slow"]) and float(last["ema_fast"]) < float(last["ema_slow"])
+        if not (bull_cross or bear_cross):
+            return None
+
+        side = "BUY" if bull_cross else "SELL"
+
+        # Структурный уровень обязателен
+        sup_lvls, res_lvls = _struct_levels(df, atr)
+        if side == "BUY":
+            lvl = _nearest_level(price, sup_lvls, atr)
+        else:
+            lvl = _nearest_level(price, res_lvls, atr)
+        if not lvl:
+            return None   # нет структуры — WAIT
+
+        # Не входить в середине диапазона
+        if sup_lvls and res_lvls:
+            mid = (max(sup_lvls) + min(res_lvls)) / 2
+            if abs(price - mid) / atr < 1.0:
+                return None
+
+        rsi   = float(last["rsi"]) if not pd.isna(last["rsi"]) else 50.0
+        vol   = float(last["volume"])
+        volma = float(last["vol_ma"]) if not pd.isna(last["vol_ma"]) else vol
+
+        checks = {
+            "ema_cross":   True,
+            "structure":   True,
+            "volume":      vol > volma * 1.3,
+            "rsi":         (30 < rsi < 65) if side == "BUY" else (35 < rsi < 70),
+            "candle":      (price > float(last["open"])) if side == "BUY" else (price < float(last["open"])),
+            "htf_trend":   _htf_trend(df) in (1, 0) if side == "BUY" else _htf_trend(df) in (-1, 0),
+            "ema50_align": price > float(last["ema_50"]) if side == "BUY" else price < float(last["ema_50"]),
+        }
+
+        if not all(checks.values()):
+            return None
+
+        # SL за структурой + 0.2 ATR, минимум 0.8 ATR
+        if side == "BUY":
+            sl  = min(lvl - atr * 0.2, price - atr * 0.8)
+            risk = price - sl
+            tp  = price + risk * 2.5   # R:R 2.5:1
+        else:
+            sl  = max(lvl + atr * 0.2, price + atr * 0.8)
+            risk = sl - price
+            tp  = price - risk * 2.5
+
+        # Проверяем R:R (на случай плохой структуры)
+        actual_rr = abs(tp - price) / max(abs(sl - price), 1e-9)
+        if actual_rr < 2.0:
+            return None
+
+        conf = 0.70 + 0.03 * sum(1 for v in checks.values() if v)
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.7,
-            entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"EMA{self.fast_ema}/{self.slow_ema} cross+touch | RSI {last['rsi']:.1f} | vol×{last['volume']/last['vol_ma']:.1f}",
-            filters_passed=filters,
+            action=side, symbol=self.symbol, confidence=round(min(0.88, conf), 2),
+            entry_price=price, stop_loss=round(sl, 8), take_profit=round(tp, 8),
+            reason=f"EMA9/21 cross | Lvl@{lvl:.5g} | RR{actual_rr:.1f} | RSI{rsi:.0f}",
+            filters_passed=checks,
         )
 
 
 # ============================================================
-# S2: BOLLINGER BANDS
+# S2: BOLLINGER BANDS — усиленный, HTF + запрет флэта
 # ============================================================
 class BollingerBandsStrategy(BaseStrategy):
     ID = "S2"
     NAME = "BOLLINGER BANDS"
-    DESCRIPTION = "BB squeeze + RSI экстремум + объём + наклон 50EMA"
-    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
+    DESCRIPTION = "BB крайние + RSI экстремум + объём + HTF тренд + запрет флэта"
+    REGIME_PREFERENCE = []
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -116,46 +238,93 @@ class BollingerBandsStrategy(BaseStrategy):
 
         bb = ta.bbands(df["close"], length=20, std=2)
         df = df.join(bb)
-        df["rsi"] = ta.rsi(df["close"], length=14)
-        df["ema50"] = ta.ema(df["close"], length=50)
+        df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["rsi"]    = ta.rsi(df["close"], length=14)
+        df["ema50"]  = ta.ema(df["close"], length=50)
+        df["ema20"]  = ta.ema(df["close"], length=20)
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
-        last = df.iloc[-1]
+        last  = df.iloc[-1]
+        prev  = df.iloc[-2]
+        price = float(last["close"])
+        atr   = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
+        rsi   = float(last["rsi"]) if not pd.isna(last["rsi"]) else 50.0
+        vol   = float(last["volume"])
+        volma = float(last["vol_ma"]) if not pd.isna(last["vol_ma"]) else vol
 
-        # Фильтры (используем имена колонок pandas_ta)
-        bb_lower = last["BBL_20_2.0"]
-        bb_upper = last["BBU_20_2.0"]
-        bb_width = (bb_upper - bb_lower) / last["close"]
+        if atr == 0 or price == 0:
+            return None
 
-        below_lower = last["close"] <= bb_lower * 1.001
-        above_upper = last["close"] >= bb_upper * 0.999
-        rsi_oversold = last["rsi"] < 38
-        rsi_overbought = last["rsi"] > 60
-        vol_spike = last["volume"] > last["vol_ma"] * 1.2
+        # Запрет флэта: ATR должен быть достаточным
+        atr_pct = atr / price * 100
+        if atr_pct < 0.4:
+            return None
 
-        long_setup = below_lower and rsi_oversold and vol_spike
-        short_setup = above_upper and rsi_overbought and vol_spike
+        bb_lower = float(last["BBL_20_2.0"])
+        bb_upper = float(last["BBU_20_2.0"])
+        bb_mid   = float(last["BBM_20_2.0"])
+
+        below_lower = price <= bb_lower * 1.002
+        above_upper = price >= bb_upper * 0.998
+
+        # RSI экстремум + разворот (не просто экстремум, а начало возврата)
+        rsi_bull = rsi < 38 and rsi > float(prev["rsi"])   # перепродан и начинает расти
+        rsi_bear = rsi > 62 and rsi < float(prev["rsi"])   # перекуплен и начинает падать
+
+        vol_confirm = vol > volma * 1.2
+
+        long_setup  = below_lower and rsi_bull and vol_confirm
+        short_setup = above_upper and rsi_bear and vol_confirm
 
         if not (long_setup or short_setup):
             return None
 
         side = "BUY" if long_setup else "SELL"
-        entry = float(last["close"])
-        if side == "BUY":
-            sl = entry * (1 - self.stop_loss_pct / 100)
-            tp = entry * (1 + self.take_profit_pct / 100)
-        else:
-            sl = entry * (1 + self.stop_loss_pct / 100)
-            tp = entry * (1 - self.take_profit_pct / 100)
 
+        # HTF тренд — торговать ОТ экстремума в направлении тренда
+        htf = _htf_trend(df)
+        if side == "BUY" and htf == -1:    # сильный нисходящий HTF → пропускаем BUY против тренда
+            return None
+        if side == "SELL" and htf == 1:    # сильный восходящий HTF → пропускаем SELL против тренда
+            return None
+
+        # EMA50 наклон совпадает (для BUY — ema50 растёт, для SELL — падает)
+        ema50_slope = float(last["ema50"]) - float(df.iloc[-5]["ema50"])
+        if side == "BUY" and ema50_slope < -atr * 0.5:
+            return None
+        if side == "SELL" and ema50_slope > atr * 0.5:
+            return None
+
+        # RSI 45-65 для BUY, 35-55 для SELL (зоны подтверждения)
+        # Уже проверено через rsi_bull/rsi_bear + BB
+
+        # SL за BB + 0.2 ATR, TP к противоположной BB
+        if side == "BUY":
+            sl  = round(bb_lower - atr * 0.2, 8)
+            tp  = round(bb_mid + (bb_mid - bb_lower) * 0.8, 8)
+        else:
+            sl  = round(bb_upper + atr * 0.2, 8)
+            tp  = round(bb_mid - (bb_upper - bb_mid) * 0.8, 8)
+
+        rr = abs(tp - price) / max(abs(sl - price), 1e-9)
+        if rr < 1.8:
+            return None
+
+        checks = {
+            "bb_touch":    True,
+            "rsi_reverse": True,
+            "volume":      vol_confirm,
+            "htf_ok":      htf != (-1 if side == "BUY" else 1),
+            "no_flat":     atr_pct >= 0.4,
+            "ema50_slope": True,
+        }
+
+        conf = 0.72 + (0.04 if htf == (1 if side == "BUY" else -1) else 0.0)
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.75,
-            entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"BB {'lower' if long_setup else 'upper'} + RSI extreme + vol",
-            filters_passed={
-                "bb_touch": True, "rsi_extreme": True,
-                "vol_spike": vol_spike, "ema_slope": True,
-            },
+            action=side, symbol=self.symbol, confidence=round(min(0.88, conf), 2),
+            entry_price=price, stop_loss=sl, take_profit=tp,
+            reason=f"BB {'lower' if long_setup else 'upper'} | RSI{rsi:.0f}↑↓ | vol×{vol/volma:.1f} | HTF{htf:+d}",
+            filters_passed=checks,
         )
 
 
@@ -238,13 +407,13 @@ class RSIDivergenceStrategy(BaseStrategy):
 
 
 # ============================================================
-# S4: BREAKOUT HUNTER
+# S4: BREAKOUT HUNTER — пробой + ретест + 3+ подтверждений
 # ============================================================
 class BreakoutHunterStrategy(BaseStrategy):
     ID = "S4"
     NAME = "BREAKOUT HUNTER"
-    DESCRIPTION = "Пробой + ретест уровня + объём × 2 + ATR фильтр"
-    REGIME_PREFERENCE = []  # обучение: работает во всех режимах
+    DESCRIPTION = "Пробой структурного уровня + ретест + 3+ подтверждений, адаптивный режим"
+    REGIME_PREFERENCE = []
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -256,52 +425,92 @@ class BreakoutHunterStrategy(BaseStrategy):
         )
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 60:
+        if len(df) < 70:
             return None
         df = df.copy()
 
-        # Уровни: high/low за последние 48 свечей (не включая последние 5)
-        lookback = 48
-        level_zone = df.iloc[-lookback:-5]
-        resistance = level_zone["high"].max()
-        support    = level_zone["low"].min()
-
         df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["ema_20"] = ta.ema(df["close"], length=20)
+        df["ema_50"] = ta.ema(df["close"], length=50)
+        df["rsi"]    = ta.rsi(df["close"], length=14)
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
-        last = df.iloc[-1]
+        last  = df.iloc[-1]
+        price = float(last["close"])
+        atr   = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
+        rsi   = float(last["rsi"]) if not pd.isna(last["rsi"]) else 50.0
+        vol   = float(last["volume"])
+        volma = float(last["vol_ma"]) if not pd.isna(last["vol_ma"]) else vol
 
-        # ── Пробой: закрытие выше/ниже уровня с минимальным зазором 0.2% ──────
-        break_up   = last["close"] > resistance * 1.002
-        break_down = last["close"] < support * 0.998
-
-        # ── Ретест: в последних 3 свечах цена касалась уровня (вернулась к нему) ─
-        # После пробоя вверх: минимум одной из последних свечей опускался к resistance
-        recent_3 = df.iloc[-4:-1]
-        retest_up   = break_up   and recent_3["low"].min()  <= resistance * 1.005
-        retest_down = break_down and recent_3["high"].max() >= support   * 0.995
-
-        vol_confirm = last["volume"] > last["vol_ma"] * 1.5   # объём × 1.5
-        atr_expand  = last["atr"]    > df.iloc[-10:]["atr"].mean() * 1.1  # ATR расширяется
-
-        if not ((retest_up or retest_down) and vol_confirm and atr_expand):
+        if atr == 0:
             return None
 
-        side = "BUY" if retest_up else "SELL"
-        level = resistance if retest_up else support
-        entry = float(last["close"])
-        if side == "BUY":
-            sl = min(entry * (1 - self.stop_loss_pct / 100), level * 0.998)
-            tp = entry * (1 + self.take_profit_pct / 100)
-        else:
-            sl = max(entry * (1 + self.stop_loss_pct / 100), level * 1.002)
-            tp = entry * (1 - self.take_profit_pct / 100)
+        # Структурные уровни (последние 60 свечей)
+        sup_lvls, res_lvls = _struct_levels(df, atr, lookback=60)
 
+        # Уровни из простого диапазона 48 свечей (классический подход)
+        level_zone = df.iloc[-55:-5]
+        resistance = float(level_zone["high"].max())
+        support    = float(level_zone["low"].min())
+
+        # Пробой классического уровня
+        broke_up   = price > resistance * 1.002
+        broke_down = price < support    * 0.998
+
+        if not (broke_up or broke_down):
+            return None
+
+        side  = "BUY" if broke_up else "SELL"
+        level = resistance if broke_up else support
+
+        # Ретест: последние 3 свечи касались уровня
+        recent = df.iloc[-4:-1]
+        retested = (
+            (side == "BUY"  and float(recent["low"].min())  <= resistance * 1.006) or
+            (side == "SELL" and float(recent["high"].max()) >= support    * 0.994)
+        )
+
+        # 5 подтверждений
+        checks = {
+            "breakout":  True,
+            "retest":    retested,
+            "volume":    vol > volma * 1.5,
+            "candle":    (price > float(last["open"])) if side == "BUY" else (price < float(last["open"])),
+            "htf_trend": _htf_trend(df) in (1, 0) if side == "BUY" else _htf_trend(df) in (-1, 0),
+            "ema_align": price > float(last["ema_50"]) if side == "BUY" else price < float(last["ema_50"]),
+        }
+
+        # Адаптивный порог: больше убытков → строже фильтр
+        min_conf = 3
+        if self.consecutive_losses >= 3:
+            min_conf = 5   # SAFE: нужны почти все подтверждения
+        elif self.consecutive_losses >= 2:
+            min_conf = 4
+
+        conf_count = sum(1 for v in checks.values() if v)
+        if conf_count < min_conf:
+            return None
+
+        # SL за структурой + 0.2 ATR
+        if side == "BUY":
+            sl   = round(min(level - atr * 0.2, price - atr * 0.8), 8)
+            risk = price - sl
+            tp   = round(price + risk * 3.0, 8)   # R:R 3:1 — пробои дают большой ход
+        else:
+            sl   = round(max(level + atr * 0.2, price + atr * 0.8), 8)
+            risk = sl - price
+            tp   = round(price - risk * 3.0, 8)
+
+        rr = abs(tp - price) / max(abs(sl - price), 1e-9)
+        if rr < 2.0:
+            return None
+
+        conf = 0.70 + 0.03 * conf_count
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.73,
-            entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"Breakout+Retest {'⬆' if retest_up else '⬇'} level={level:.4f} | vol×{last['volume']/last['vol_ma']:.1f}",
-            filters_passed={"break": True, "retest": True, "vol": vol_confirm, "atr": atr_expand},
+            action=side, symbol=self.symbol, confidence=round(min(0.90, conf), 2),
+            entry_price=price, stop_loss=sl, take_profit=tp,
+            reason=f"Breakout+Retest lvl={level:.5g} | {conf_count}/6conf | RR{rr:.1f}",
+            filters_passed=checks,
         )
 
 
@@ -631,113 +840,155 @@ class TrendFollowerStrategy(BaseStrategy):
 
 
 # ============================================================
-# S7: MULTI-CONFIRM (максимальный edge)
+# S7: MULTI-CONFIRM — индикаторы + обязательная ценовая структура
 # ============================================================
 class MultiConfirmStrategy(BaseStrategy):
     ID = "S7"
     NAME = "MULTI-CONFIRM"
-    DESCRIPTION = "≥5 из 6 независимых индикаторов согласованы → высокий WR"
-    REGIME_PREFERENCE = []  # работает во всех режимах (6 фильтров сами фильтруют)
+    DESCRIPTION = "5/7 индикаторов + обязательная структура цены + R:R ≥ 2.2 + ATR фильтр"
+    REGIME_PREFERENCE = []
 
     def __init__(self, **kwargs):
         super().__init__(
             stop_loss_pct=1.2,
-            take_profit_pct=4.0,
+            take_profit_pct=3.6,   # RR 3:1 минимум от структурного SL
             edge_wr_target=0.72,
             timeframe="60",
             **kwargs,
         )
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 60:
+        if len(df) < 80:
             return None
         df = df.copy()
 
+        df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
         df["ema_21"] = ta.ema(df["close"], length=21)
         df["ema_50"] = ta.ema(df["close"], length=50)
-        df["rsi"] = ta.rsi(df["close"], length=14)
-        bb = ta.bbands(df["close"], length=20, std=2)
-        df = df.join(bb)
+        df["rsi"]    = ta.rsi(df["close"], length=14)
+        bb   = ta.bbands(df["close"], length=20, std=2)
+        df   = df.join(bb)
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-        df = df.join(macd)
+        df   = df.join(macd)
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+        last  = df.iloc[-1]
+        prev  = df.iloc[-2]
+        price = float(last["close"])
+        atr   = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
+        rsi   = float(last["rsi"]) if not pd.isna(last["rsi"]) else 50.0
+        vol   = float(last["volume"])
+        volma = float(last["vol_ma"]) if not pd.isna(last["vol_ma"]) else vol
 
-        # Касание: цена должна касаться EMA21 (в пределах 0.8%)
-        # Это делает S7 pullback-стратегией, а не "входом в воздухе"
-        touch_ema21 = abs(last["close"] - last["ema_21"]) / last["ema_21"] < 0.008
+        if atr == 0:
+            return None
 
-        # 6 фильтров
-        ema_bull = last["close"] > last["ema_21"] > last["ema_50"]
-        ema_bear = last["close"] < last["ema_21"] < last["ema_50"]
-        rsi_bull = 38 < last["rsi"] < 62 and last["rsi"] > prev["rsi"]
-        rsi_bear = 38 < last["rsi"] < 62 and last["rsi"] < prev["rsi"]
-        # BB: цена возвращается к средней линии (BB midline touch) — реальное касание
-        bb_touch_bull = last["close"] <= last["BBM_20_2.0"] * 1.005  # касание средней снизу
-        bb_touch_bear = last["close"] >= last["BBM_20_2.0"] * 0.995  # касание средней сверху
-        macd_bull = last["MACD_12_26_9"] > last["MACDs_12_26_9"] and last["MACDh_12_26_9"] > prev["MACDh_12_26_9"]
-        macd_bear = last["MACD_12_26_9"] < last["MACDs_12_26_9"] and last["MACDh_12_26_9"] < prev["MACDh_12_26_9"]
-        vol_spike = last["volume"] > last["vol_ma"] * 1.5
-        htf_bull = last["close"] > df.iloc[-24]["close"]  # рост за 24ч
-        htf_bear = last["close"] < df.iloc[-24]["close"]
+        # Блок если ATR аномально высокий (рынок слишком волатилен — стоп будет огромным)
+        if not _atr_ok(last, df, max_mult=1.5):
+            return None
+
+        # ── ОБЯЗАТЕЛЬНО: ценовая структура ───────────────────────────────────
+        sup_lvls, res_lvls = _struct_levels(df, atr)
+        near_sup = _nearest_level(price, sup_lvls, atr)
+        near_res = _nearest_level(price, res_lvls, atr)
+        has_structure = bool(near_sup or near_res)
+        if not has_structure:
+            return None   # без структуры — WAIT
+
+        # Касание EMA21 (pullback к динамической поддержке)
+        touch_ema21 = abs(price - float(last["ema_21"])) / float(last["ema_21"]) < 0.010
+
+        ema_bull = price > float(last["ema_21"]) > float(last["ema_50"])
+        ema_bear = price < float(last["ema_21"]) < float(last["ema_50"])
+
+        rsi_bull = 38 < rsi < 62 and rsi > float(prev["rsi"])
+        rsi_bear = 38 < rsi < 62 and rsi < float(prev["rsi"])
+
+        bb_mid = float(last["BBM_20_2.0"]) if "BBM_20_2.0" in last else price
+        bb_touch_bull = price <= bb_mid * 1.006
+        bb_touch_bear = price >= bb_mid * 0.994
+
+        macd_h = float(last.get("MACDh_12_26_9", 0))
+        macd_h_prev = float(prev.get("MACDh_12_26_9", 0))
+        macd_bull = macd_h > 0 and macd_h > macd_h_prev
+        macd_bear = macd_h < 0 and macd_h < macd_h_prev
+
+        vol_spike = vol > volma * 1.5
+        htf = _htf_trend(df)
+
+        # Факел как бонусный фильтр
+        wick = _wick_signal(last)
 
         long_filters = {
             "ema_trend":   ema_bull,
             "ema21_touch": touch_ema21,
             "rsi_confirm": rsi_bull,
             "bb_touch":    bb_touch_bull,
-            "macd_cross":  macd_bull,
+            "macd":        macd_bull,
             "vol_spike":   vol_spike,
-            "htf_trend":   htf_bull,
+            "htf_trend":   htf >= 0,
         }
         short_filters = {
             "ema_trend":   ema_bear,
             "ema21_touch": touch_ema21,
             "rsi_confirm": rsi_bear,
             "bb_touch":    bb_touch_bear,
-            "macd_cross":  macd_bear,
+            "macd":        macd_bear,
             "vol_spike":   vol_spike,
-            "htf_trend":   htf_bear,
+            "htf_trend":   htf <= 0,
         }
 
-        # Требуем минимум 5 из 7 фильтров (включая обязательный ema21_touch)
-        # ema21_touch обязателен отдельно
         if not touch_ema21:
-            return None
-        REQUIRED_SCORE = 5
-        long_score = sum(long_filters.values())
+            return None   # обязательный фильтр
+
+        long_score  = sum(long_filters.values())
         short_score = sum(short_filters.values())
-        long_setup = long_score >= REQUIRED_SCORE
-        short_setup = short_score >= REQUIRED_SCORE
+
+        long_setup  = long_score >= 5
+        short_setup = short_score >= 5
 
         if not (long_setup or short_setup):
             return None
 
-        # Если оба набирают нужный счёт — выбираем направление с бо́льшим счётом
         if long_setup and short_setup:
-            if long_score >= short_score:
-                short_setup = False
-            else:
-                long_setup = False
+            long_setup  = long_score >= short_score
+            short_setup = not long_setup
 
-        side = "BUY" if long_setup else "SELL"
-        entry = float(last["close"])
-        if side == "BUY":
-            sl = entry * (1 - self.stop_loss_pct / 100)
-            tp = entry * (1 + self.take_profit_pct / 100)
-        else:
-            sl = entry * (1 + self.stop_loss_pct / 100)
-            tp = entry * (1 - self.take_profit_pct / 100)
-
+        side  = "BUY" if long_setup else "SELL"
         score = long_score if long_setup else short_score
-        confidence = 0.80 + 0.03 * (score - REQUIRED_SCORE)  # 0.80 при 5/6, 0.83 при 6/6
+
+        # Проверяем что структура совпадает с направлением
+        if side == "BUY" and not near_sup:
+            return None
+        if side == "SELL" and not near_res:
+            return None
+        lvl = near_sup if side == "BUY" else near_res
+
+        # SL за структурой + 0.2 ATR
+        if side == "BUY":
+            sl   = round(min(lvl - atr * 0.2, price - atr * 0.8), 8)
+            risk = price - sl
+            tp   = round(price + risk * 2.5, 8)
+        else:
+            sl   = round(max(lvl + atr * 0.2, price + atr * 0.8), 8)
+            risk = sl - price
+            tp   = round(price - risk * 2.5, 8)
+
+        rr = abs(tp - price) / max(abs(sl - price), 1e-9)
+        if rr < 2.2:
+            return None
+
+        conf = 0.80 + 0.03 * (score - 5)
+        if wick == ("bullish" if side == "BUY" else "bearish"):
+            conf = min(0.95, conf + 0.05)
+
+        filters = long_filters if long_setup else short_filters
+        filters["structure"] = True
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=round(confidence, 2),
-            entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"MULTI-CONFIRM {side} — {score}/6 фильтров согласованы",
-            filters_passed=long_filters if long_setup else short_filters,
+            action=side, symbol=self.symbol, confidence=round(conf, 2),
+            entry_price=price, stop_loss=sl, take_profit=tp,
+            reason=f"MULTI-CONFIRM {score}/7 | Lvl@{lvl:.5g} | RR{rr:.1f} | RSI{rsi:.0f}",
+            filters_passed=filters,
         )
 
 
@@ -1057,6 +1308,118 @@ class OverboughtShortStrategy(BaseStrategy):
 
 
 # ============================================================
+# S13: MEME REVERSAL — кулдаун после убытков, SAFE режим
+# ============================================================
+class MemeReversalS13Strategy(OverboughtShortStrategy):
+    """
+    OverboughtShort для мем-монет (PEPEUSDT) с кулдауном после убытков.
+    После 1 убытка: 30 мин паузы. После 2 подряд: 45 мин. После 3+: SAFE.
+    """
+    ID   = "S13"
+    NAME = "MEME REVERSAL S13"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_loss_time: Optional[datetime] = None
+
+    def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
+        now = datetime.now(timezone.utc)
+
+        # Кулдаун по серии убытков
+        if self.consecutive_losses >= 3:
+            return None   # SAFE: ждём пока серия не прервётся
+
+        if self.consecutive_losses >= 1 and self._last_loss_time:
+            cooldown_min = 45 if self.consecutive_losses >= 2 else 30
+            elapsed = (now - self._last_loss_time).total_seconds() / 60
+            if elapsed < cooldown_min:
+                return None
+
+        sig = super().analyze(df)
+        if sig is None:
+            return None
+
+        # В SAFE режиме (2 убытка) требуем более высокий confidence
+        if self.consecutive_losses >= 2 and sig.confidence < 0.72:
+            return None
+
+        return sig
+
+    def close_position(self, exit_price: float, qty: float = 1.0, fees_pct: float = 0.06):
+        result = super().close_position(exit_price, qty, fees_pct)
+        if result.get("pnl", 0) < 0:
+            self._last_loss_time = datetime.now(timezone.utc)
+        return result
+
+
+# ============================================================
+# S14: MEME REVERSAL — 4+ подтверждений, запрет догонять движение
+# ============================================================
+class MemeReversalS14Strategy(OverboughtShortStrategy):
+    """
+    OverboughtShort для мем-монет (WIFUSDT) с усиленными фильтрами.
+    Требует 4+ подтверждений, запрещает входить если движение >70% ATR уже прошло.
+    """
+    ID   = "S14"
+    NAME = "MEME REVERSAL S14"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
+        if len(df) < 60:
+            return None
+        df_copy = df.copy()
+
+        df_copy["atr"]    = ta.atr(df_copy["high"], df_copy["low"], df_copy["close"], length=14)
+        df_copy["ema50"]  = ta.ema(df_copy["close"], length=50)
+        df_copy["vol_ma"] = df_copy["volume"].rolling(20).mean()
+        df_copy["rsi"]    = ta.rsi(df_copy["close"], length=14)
+
+        last  = df_copy.iloc[-1]
+        atr   = float(last["atr"]) if not pd.isna(last["atr"]) else 0.0
+        price = float(last["close"])
+        rsi   = float(last["rsi"]) if not pd.isna(last["rsi"]) else 50.0
+        vol   = float(last["volume"])
+        volma = float(last["vol_ma"]) if not pd.isna(last["vol_ma"]) else vol
+
+        if atr == 0:
+            return None
+
+        sig = super().analyze(df)
+        if sig is None:
+            return None
+
+        # Запрет: движение уже прошло > 70% ATR от открытия свечи
+        candle_move = abs(price - float(last["open"]))
+        if candle_move > atr * 0.7:
+            return None   # догоняем поезд — WAIT
+
+        # Структурный уровень обязателен
+        sup_lvls, res_lvls = _struct_levels(df_copy, atr)
+        if sig.action == "SELL":
+            lvl = _nearest_level(price, res_lvls, atr * 1.2)
+        else:
+            lvl = _nearest_level(price, sup_lvls, atr * 1.2)
+        if not lvl:
+            return None
+
+        # 4 подтверждения: структура + объём + RSI + EMA50 + HTF + свеча
+        checks = {
+            "structure": True,
+            "volume":    vol > volma * 1.2,
+            "rsi":       (rsi < 40) if sig.action == "BUY" else (rsi > 60),
+            "ema50":     price < float(last["ema50"]) * 1.01 if sig.action == "BUY" else price > float(last["ema50"]) * 0.99,
+            "htf":       _htf_trend(df_copy) != (1 if sig.action == "SELL" else -1),
+            "candle":    (price > float(last["open"])) if sig.action == "BUY" else (price < float(last["open"])),
+        }
+        if sum(1 for v in checks.values() if v) < 4:
+            return None
+
+        return sig
+
+
+# ============================================================
 # Реестр всех стратегий
 # ============================================================
 ALL_STRATEGIES = {
@@ -1067,12 +1430,12 @@ ALL_STRATEGIES = {
     "S5": ScalperGridStrategy,
     "S6": TrendFollowerStrategy,
     "S7": MultiConfirmStrategy,
-    "S8": TrendMomentumStrategy,    # тренд роста/падения (HH/HL + EMA-стек + ADX)
-    "S9": TrendFibonacciStrategy,   # тренд + уровни Фибоначчи (38.2/50/61.8%)
-    "S10": ScalperProStrategy,      # 3m высокочастотный скальпер (до 8 сигналов/день/символ)
-    "S11": DragonflyGoldStrategy,   # Ichimoku + PSAR + Stochastic + OBV + BB-динамический SL/TP
-    "S12": OverboughtShortStrategy,      # RSI разворот + BB + MACD — SOLUSDT
-    "S13": OverboughtShortStrategy,      # RSI разворот + BB + MACD — PEPEUSDT (мем, волатильность)
-    "S14": OverboughtShortStrategy,      # RSI разворот + BB + MACD — WIFUSDT (мем, резкие откаты)
-    "S15": AggressiveMomentumStrategy,   # 1m EMA+RSI7+VWAP+ATR+ADX, M15 тренд, TP 0.7/1.5/2.5%
+    "S8": TrendMomentumStrategy,
+    "S9": TrendFibonacciStrategy,
+    "S10": ScalperProStrategy,
+    "S11": DragonflyGoldStrategy,
+    "S12": OverboughtShortStrategy,
+    "S13": MemeReversalS13Strategy,   # кулдаун 30/45 мин, SAFE после 3 убытков
+    "S14": MemeReversalS14Strategy,   # 4+ подтверждений, запрет догонять движение
+    "S15": AggressiveMomentumStrategy,
 }
