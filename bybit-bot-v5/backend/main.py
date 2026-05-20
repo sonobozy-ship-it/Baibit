@@ -901,6 +901,7 @@ async def _execute_fusion_signal(
         entry_price=fused.entry_price,
         stop_loss_price=fused.stop_loss,
         leverage=3,
+        min_notional=state.risk_manager.min_trade_usdt,
     )
     qty = round(base_qty * fused.size_multiplier, 6)
     if qty <= 0:
@@ -1459,6 +1460,7 @@ async def trading_loop():
                             stop_loss_price=signal.stop_loss,
                             leverage=effective_leverage,
                             atr=_atr_val,
+                            min_notional=state.risk_manager.min_trade_usdt,
                         )
                         if _atr_val:
                             logger.debug(f"{sid}: ATR={_atr_val:.6f} → qty={qty}")

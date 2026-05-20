@@ -34,6 +34,7 @@ class RiskManager:
         max_daily_trades: int = 0,
         max_daily_losses: int = 3,
         max_strategy_daily_losses: int = 10,
+        min_trade_usdt: float = 5.0,             # мин. размер сделки в USDT
     ):
         self.daily_max_loss_pct        = daily_max_loss_pct
         self.weekly_max_loss_pct       = weekly_max_loss_pct
@@ -49,6 +50,7 @@ class RiskManager:
         self.max_daily_losses          = max_daily_losses
         self.max_strategy_daily_losses = max_strategy_daily_losses
         self.risk_hard_cap_pct         = min(risk_per_trade_pct, 1.0)
+        self.min_trade_usdt            = min_trade_usdt
 
         # Дневное состояние
         self.daily_start_balance: Optional[float] = None

@@ -106,6 +106,7 @@ class TelegramCommander:
         scalp_btn = _btn("⚡ Скальп: ВКЛ", "scalp_off") if s.scalp_active else _btn("⚡ Скальп: ВЫКЛ", "scalp_on")
         train_btn = _btn("🎓 Обучение: ВКЛ", "training_off") if getattr(s, "training_mode", False) \
                     else _btn("🎓 Обучение: ВЫКЛ", "training_on")
+        min_trade = s.risk_manager.min_trade_usdt
         return _keyboard([
             [go_btn, pause_btn],
             [_btn("💰 Баланс", "balance"), _btn("📌 Позиции", "positions")],
@@ -114,8 +115,8 @@ class TelegramCommander:
             [_btn("📰 Новости", "news"), _btn("🤖 AI", "ai")],
             [_btn(f"💵 Баланс: {bal_str} USDT", "set_balance"),
              _btn(f"📦 Макс сделок: {max_pos}", "set_max_pos")],
-            [scalp_btn, train_btn],
-            [_btn("🔄 Обновить меню", "menu")],
+            [_btn(f"💲 Мин. сделка: {min_trade:.0f} USDT", "set_min_trade"), scalp_btn],
+            [train_btn, _btn("🔄 Обновить меню", "menu")],
         ])
 
     # ── Polling ───────────────────────────────────────────────────
@@ -236,8 +237,9 @@ class TelegramCommander:
             "risk":        self._cmd_risk,
             "ai":          self._cmd_ai,
             "news":        self._cmd_news,
-            "set_balance": self._cb_set_balance,
-            "set_max_pos": self._cb_set_max_pos,
+            "set_balance":   self._cb_set_balance,
+            "set_max_pos":   self._cb_set_max_pos,
+            "set_min_trade": self._cb_set_min_trade,
             "scalp_on":      self._cb_scalp_on,
             "scalp_off":     self._cb_scalp_off,
             "training_on":   self._cb_training_on,
@@ -405,6 +407,20 @@ class TelegramCommander:
             reply_markup=_keyboard([[_btn("❌ Отмена", "menu")]])
         )
 
+    async def _cb_set_min_trade(self, upd, arg):
+        """Запрашивает минимальный размер сделки в USDT."""
+        s = self._get_state()
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        chat_id = str(msg.get("chat", {}).get("id", self.allowed_id))
+        self._pending_input[chat_id] = "set_min_trade"
+        await self.reply(upd,
+            f"💲 <b>Минимальный размер сделки</b>\n\n"
+            f"Текущее значение: <b>{s.risk_manager.min_trade_usdt:.0f} USDT</b>\n\n"
+            f"Если расчётный объём сделки меньше этого порога — сделка пропускается.\n\n"
+            f"Введи число от 1 до 1000 (например: <code>10</code>):",
+            reply_markup=_keyboard([[_btn("❌ Отмена", "menu")]])
+        )
+
     async def _handle_pending_input(self, upd: Dict, action: str, text: str):
         """Обрабатывает текстовый ввод после нажатия кнопки."""
         s = self._get_state()
@@ -448,6 +464,26 @@ class TelegramCommander:
                     f"Введи целое число от 1 до 50",
                     reply_markup=self._main_menu()
                 )
+
+        elif action == "set_min_trade":
+            try:
+                new_min = float(text.replace(",", "."))
+                if not 1 <= new_min <= 1000:
+                    raise ValueError("вне диапазона")
+                old_min = s.risk_manager.min_trade_usdt
+                s.risk_manager.min_trade_usdt = round(new_min, 1)
+                await self.reply(upd,
+                    f"✅ <b>Мин. размер сделки обновлён</b>\n\n"
+                    f"{old_min:.0f} USDT → <b>{new_min:.0f} USDT</b>",
+                    reply_markup=self._main_menu()
+                )
+            except (ValueError, TypeError):
+                await self.reply(upd,
+                    f"❌ Неверное значение: <code>{text}</code>\n"
+                    f"Введи число от 1 до 1000",
+                    reply_markup=self._main_menu()
+                )
+
         else:
             await self.reply(upd, "❓ Неизвестное действие", reply_markup=self._main_menu())
 
