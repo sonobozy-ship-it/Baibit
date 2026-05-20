@@ -3,7 +3,7 @@
 set -e
 
 APP_DIR="/opt/baibit"
-BRANCH="claude/analyze-repository-files-TvlQi"
+BRANCH="claude/fix-empty-text-validation-DwzYW"
 VENV="$APP_DIR/bybit-bot-v5/venv/bin/activate"
 BACKEND="$APP_DIR/bybit-bot-v5/backend"
 
