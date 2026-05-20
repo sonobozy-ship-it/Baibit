@@ -13,7 +13,6 @@ Position Monitor — умное управление открытыми пози
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
@@ -63,11 +62,7 @@ def calc_unrealized_pnl(
     Считает unrealized PnL с учётом плеча.
     side: "Buy" или "Sell" (или "BUY"/"SELL")
     """
-    direction = 1 if side.upper() in ("BUY", "BUY") else -1
-    if side.lower() in ("buy", "long", "buy"):
-        direction = 1
-    else:
-        direction = -1
+    direction = 1 if side.lower() in ("buy", "long") else -1
     return direction * (current_price - entry_price) * qty * leverage
 
 

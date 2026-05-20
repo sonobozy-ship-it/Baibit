@@ -81,8 +81,13 @@ cd /tmp
 unzip -o baibit-update.zip -d "$REMOTE_DIR/" > /dev/null 2>&1
 echo "Распаковка завершена"
 
-# Установка/обновление зависимостей
-pip install -q anthropic openai httpx fastapi uvicorn python-dotenv 2>/dev/null || true
+# Установка/обновление зависимостей из requirements.txt
+REQ="$REMOTE_DIR/bybit-bot-v5/requirements.txt"
+if [ -f "\$REQ" ]; then
+    pip install -q -r "\$REQ" 2>/dev/null || pip install -q -r "\$REQ" --break-system-packages 2>/dev/null || true
+else
+    pip install -q anthropic openai httpx fastapi uvicorn python-dotenv openpyxl pandas numpy 2>/dev/null || true
+fi
 echo "Зависимости OK"
 
 rm -f /tmp/baibit-update.zip
