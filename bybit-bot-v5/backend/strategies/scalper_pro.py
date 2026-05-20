@@ -180,10 +180,10 @@ class ScalperProStrategy(BaseStrategy):
     _BB_PERIOD  = 20
     _BB_K       = 2.0
     _VOL_MULT   = 1.0
-    _RSI_OS     = 45   # перепроданность → BUY  (было 42, расширено для большего числа сигналов)
-    _RSI_OB     = 55   # перекупленность → SELL (было 58)
-    _RSI_WINDOW = 3    # RSI-кросс засчитывается если был в последних N свечах
-    _BB_TOUCH   = 0.02 # цена считается "у полосы" если в пределах 2% (было 0.6%)
+    _RSI_OS     = 35   # перепроданность → BUY (RSI ≤35 — реальный oversold)
+    _RSI_OB     = 65   # перекупленность → SELL (RSI ≥65 — реальный overbought)
+    _RSI_WINDOW = 2    # RSI-кросс засчитывается если был в последних N свечах
+    _BB_TOUCH   = 0.008 # цена считается "у полосы" если в пределах 0.8%
     _MIN_BARS   = 60
 
     def __init__(self, symbol: str = "DOGEUSDT", **kwargs):

@@ -294,8 +294,8 @@ class ScalperGridStrategy(BaseStrategy):
     def __init__(self, **kwargs):
         super().__init__(
             stop_loss_pct=0.8,
-            take_profit_pct=0.8,
-            edge_wr_target=0.70,
+            take_profit_pct=1.6,   # RR 1:2 (было 0.8 → 1:1, убыточно после комиссий)
+            edge_wr_target=0.55,   # реалистичный таргет для mean-reversion
             timeframe="5",
             **kwargs,
         )
@@ -471,8 +471,8 @@ class MultiConfirmStrategy(BaseStrategy):
             "htf_trend": htf_bear,
         }
 
-        # Требуем минимум 4 из 6 фильтров — режим сбора данных для ML
-        REQUIRED_SCORE = 4
+        # Требуем минимум 5 из 6 фильтров — высококачественный сигнал
+        REQUIRED_SCORE = 5
         long_score = sum(long_filters.values())
         short_score = sum(short_filters.values())
         long_setup = long_score >= REQUIRED_SCORE
@@ -535,7 +535,7 @@ class DragonflyGoldStrategy(BaseStrategy):
 
     _MIN_RISK_PCT  = 0.20   # меньше — шум
     _MAX_RISK_PCT  = 5.0    # больше — нет смысла открывать
-    _MIN_FILTERS   = 3      # минимум из 5 систем должны совпасть
+    _MIN_FILTERS   = 4      # минимум 4 из 5 систем должны совпасть
 
     def __init__(self, **kwargs):
         super().__init__(

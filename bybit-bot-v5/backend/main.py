@@ -317,8 +317,10 @@ def activate_scalp_mode(symbols: List[str] = None):
             state.strategies[sid] = strat
             added.append(sid)
         else:
-            state.strategies[sid].symbol  = sym
-            state.strategies[sid].enabled = True
+            state.strategies[sid].symbol           = sym
+            state.strategies[sid].enabled          = True
+            state.strategies[sid].auto_disabled    = False   # сброс блокировки
+            state.strategies[sid].consecutive_losses = 0     # сброс серии убытков
     state.scalp_active = True
     logger.info(f"⚡ Scalp Mode: {len(added)} скальперов → {added}")
     return added
@@ -1586,16 +1588,8 @@ async def trading_loop():
                     except Exception as e:
                         logger.error(f"Position close detection: {e}")
 
-                # Авто-отключение
-                for sid, strat in state.strategies.items():
-                    if strat.auto_disabled or not strat.enabled:
-                        continue
-                    if strat.consecutive_losses >= state.risk_manager.max_consecutive_losses:
-                        strat.auto_disabled = True
-                        asyncio.create_task(state.telegram.notify_strategy_disabled(
-                            sid, strat.NAME, f"Серия {strat.consecutive_losses} убытков"
-                        ))
-                        await broadcast_log(f"⚠️ {sid} АВТО-ОТКЛЮЧЕНА")
+                # Авто-отключение убрано: RiskManager уже блокирует через 12ч cooldown
+                # после 3 убытков подряд. Двойной бан (auto_disabled=True) мешал перезапуску SC_*.
 
                 await broadcast_state()
                 # Скальпинг: цикл каждые 5 сек; обычный режим: 10 сек

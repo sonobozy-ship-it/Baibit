@@ -259,18 +259,24 @@ class BybitClient:
             logger.error(f"Ошибка тикера {symbol}: {e}")
             return {}
 
-    # Не крипто — металлы, стейблкоины и прочие CFD на Bybit
+    # Не крипто — металлы, стейблкоины, мемкоины-памп и прочие CFD на Bybit
     _NON_CRYPTO = frozenset({
-        "XAUUSDT", "XAGUSDT", "XAUTUSDT",            # золото, серебро
-        "USDCUSDT", "BUSDUSDT", "FDUSDUSDT",          # стейблкоины
-        "DAIUSDT", "TUSDUSDT", "USDDUSDT",
+        # Металлы и CFD
+        "XAUUSDT", "XAGUSDT", "XAUTUSDT",
+        # Стейблкоины
+        "USDCUSDT", "BUSDUSDT", "FDUSDUSDT", "DAIUSDT", "TUSDUSDT", "USDDUSDT",
+        # Мемкоины-памп с непредсказуемым движением (плохи для скальпинга)
+        "BOMEUSDT", "1000BONKUSDT", "WIFUSDT", "PENKUSDT", "PEPEUSDT",
+        "B3USDT", "SPACEUSDT", "BLURAUSDT", "EDENUUSDT", "MEWUSDT",
+        "PUMPUSDT", "FIDAUSDT", "NOTUSDT", "HMSTRUSDT", "FIGHTUSDT",
+        "GALAUSDT", "0SATUSDT", "SATUSDT",
     })
 
     def get_top_usdt_symbols(
         self,
         top_n: int = 30,
         exclude: set = None,
-        min_trades: int = 50_000,      # минимум 50к сделок за 24ч (не USD-объём!)
+        min_trades: int = 200_000,     # минимум 200к сделок за 24ч (только ликвидные пары)
     ) -> List[str]:
         """
         Возвращает топ-N ликвидных USDT-перп символов.
