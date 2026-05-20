@@ -624,11 +624,11 @@ class TelegramCommander:
             today  = datetime.utcnow().date().isoformat()
             trades = s.journal.get_trades(start_date=today, limit=500)
             total  = len(trades)
-            wins   = sum(1 for t in trades if (t.get("pnl_usd") or 0) > 0)
-            pnl    = sum(t.get("pnl_usd") or 0 for t in trades)
+            wins   = sum(1 for t in trades if float(t.get("pnl_usd") or 0) > 0)
+            pnl    = sum(float(t.get("pnl_usd") or 0) for t in trades)
             wr     = wins / total * 100 if total else 0
-            best   = max((t.get("pnl_usd") or 0 for t in trades), default=0)
-            worst  = min((t.get("pnl_usd") or 0 for t in trades), default=0)
+            best   = max((float(t.get("pnl_usd") or 0) for t in trades), default=0)
+            worst  = min((float(t.get("pnl_usd") or 0) for t in trades), default=0)
             await self.reply(upd,
                 f"📊 <b>Дневной отчёт</b> <i>{today}</i>\n\n"
                 f"Сделок: <b>{total}</b> ({wins}W/{total-wins}L)\n"

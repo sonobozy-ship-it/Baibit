@@ -283,13 +283,20 @@ class TradeJournal:
             return None
 
     def get_stats_by_strategy(self) -> List[Dict]:
-        with self.pool.connection() as conn:
-            df = pd.read_sql(
-                "SELECT * FROM trades WHERE exit_price IS NOT NULL",
-                conn,
-            )
+        sql = "SELECT * FROM trades WHERE exit_price IS NOT NULL"
+        if self.pool.is_mysql:
+            with self.pool.connection() as conn:
+                df = pd.read_sql(sql, conn)
+        else:
+            import sqlite3 as _sq3
+            conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
+            try:
+                df = pd.read_sql(sql, conn)
+            finally:
+                conn.close()
         if df.empty:
             return []
+        df["pnl_usd"] = pd.to_numeric(df["pnl_usd"], errors="coerce").fillna(0.0)
         stats = []
         for sid, g in df.groupby("strategy_id"):
             wins = g[g["pnl_usd"] > 0]
@@ -353,9 +360,19 @@ class TradeJournal:
         where, params = self._build_filter_sql(
             strategy_id, symbol, from_date, to_date, closed_only
         )
-        sql = f"SELECT * FROM trades WHERE {where} ORDER BY timestamp ASC"
-        with self.pool.connection() as conn:
-            return pd.read_sql(self.pool.adapt(sql), conn, params=params)
+        sql = self.pool.adapt(f"SELECT * FROM trades WHERE {where} ORDER BY timestamp ASC")
+        if self.pool.is_mysql:
+            with self.pool.connection() as conn:
+                return pd.read_sql(sql, conn, params=params)
+        else:
+            # Свежее соединение БЕЗ row_factory — pd.read_sql несовместим с sqlite3.Row
+            import sqlite3 as _sq3
+            conn = _sq3.connect(self.pool.db_path, check_same_thread=False, timeout=10)
+            try:
+                df = pd.read_sql(sql, conn, params=params)
+            finally:
+                conn.close()
+            return df
 
     def export_to_csv(
         self,

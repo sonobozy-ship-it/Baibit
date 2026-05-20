@@ -1141,11 +1141,14 @@ async def trading_loop():
                         logger.debug(f"AI рекомендации пропущены: {e}")
 
                 for sid, strat in state.strategies.items():
-                    if not strat.enabled or strat.auto_disabled:
+                    # В режиме обучения пропускаем только явно disabled (не auto_disabled)
+                    if not strat.enabled:
+                        continue
+                    if strat.auto_disabled and not state.training_mode:
                         continue
 
-                    # Boost-режим: пропускаем стратегии вне разрешённого списка
-                    if not state.boost.strategy_allowed(sid):
+                    # Boost-режим: ограничение списка стратегий (в обучении — все стратегии)
+                    if not state.training_mode and not state.boost.strategy_allowed(sid):
                         continue
 
                     # Нет подключения к бирже — нет рыночных данных
@@ -1169,8 +1172,9 @@ async def trading_loop():
                         except Exception:
                             pass
 
-                    # Soft-фильтр по режиму: пропускаем стратегию если режим не подходит
-                    if (current_regime_name and strat.REGIME_PREFERENCE
+                    # Soft-фильтр по режиму (в обучении — торгуем при любом режиме)
+                    if (not state.training_mode
+                            and current_regime_name and strat.REGIME_PREFERENCE
                             and current_regime_name not in strat.REGIME_PREFERENCE):
                         logger.debug(
                             f"{sid}: режим '{current_regime_name}' не подходит "
@@ -1225,12 +1229,12 @@ async def trading_loop():
                         continue
 
                     # Поиск сигнала
-                    # SC_* (ScalperPro) получают H1 + 15m для MTF-фильтра
-                    if sid.startswith("SC_"):
+                    # SC_* и S15 получают MTF данные для trend-фильтра
+                    if sid.startswith("SC_") or sid == "S15":
                         signal = strat.analyze(
                             df,
                             df_h1  = _get_h1_cached(strat.symbol),
-                            df_m15 = _get_m15_cached(strat.symbol) if state.scalp_active else None,
+                            df_m15 = _get_m15_cached(strat.symbol),
                         )
                     else:
                         signal = strat.analyze(df)
