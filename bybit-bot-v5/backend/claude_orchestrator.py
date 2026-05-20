@@ -515,8 +515,12 @@ class ClaudeOrchestrator:
         """Формируем историю диалога и вызываем активный провайдер."""
         history_msgs: List[Dict] = []
         for h in self._history[-self.MAX_HISTORY:]:
-            history_msgs.append({"role": "user",      "content": h.get("report_sent", "")})
-            history_msgs.append({"role": "assistant",  "content": json.dumps(h.get("result", {}), ensure_ascii=False)})
+            user_content = h.get("report_sent", "")
+            asst_content = json.dumps(h.get("result", {}), ensure_ascii=False)
+            if not user_content or not asst_content:
+                continue
+            history_msgs.append({"role": "user",      "content": user_content})
+            history_msgs.append({"role": "assistant",  "content": asst_content})
 
         messages = history_msgs + [{"role": "user", "content": report}]
         return await self._provider.complete(

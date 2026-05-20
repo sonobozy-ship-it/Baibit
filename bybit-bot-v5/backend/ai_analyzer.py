@@ -93,6 +93,9 @@ class AIAnalyzer:
         """Асинхронный вызов провайдера."""
         if not self.enabled:
             return None
+        if not prompt or not prompt.strip():
+            logger.warning("[AIAnalyzer] Пустой промпт — пропускаем вызов LLM")
+            return None
         try:
             # Для Anthropic меняем модель по задаче; для остальных — берём что есть
             if ORCHESTRATOR_AVAILABLE and ANTHROPIC_AVAILABLE and isinstance(self._provider, AnthropicProvider):
