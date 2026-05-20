@@ -215,6 +215,28 @@ class TradeJournal:
                 conn.row_factory = sqlite3.Row
                 return [dict(r) for r in conn.execute(self.pool.adapt(query), params).fetchall()]
 
+    def get_open_trade(self, strategy_id: str, symbol: str) -> Optional[Dict]:
+        """Найти последнюю незакрытую запись в журнале для strategy_id + symbol."""
+        query = self.pool.adapt(
+            "SELECT * FROM trades WHERE strategy_id=? AND symbol=? "
+            "AND exit_price IS NULL ORDER BY id DESC LIMIT 1"
+        )
+        try:
+            with self.pool.connection() as conn:
+                if self.pool.is_mysql:
+                    with conn.cursor() as c:
+                        c.execute(query, [strategy_id, symbol])
+                        row = c.fetchone()
+                        return dict(row) if row else None
+                else:
+                    import sqlite3
+                    conn.row_factory = sqlite3.Row
+                    row = conn.execute(query, [strategy_id, symbol]).fetchone()
+                    return dict(row) if row else None
+        except Exception as e:
+            logger.warning(f"[Journal] get_open_trade error: {e}")
+            return None
+
     def get_stats_by_strategy(self) -> List[Dict]:
         with self.pool.connection() as conn:
             df = pd.read_sql(

@@ -981,7 +981,18 @@ class TelegramCommander:
     async def _cmd_risk(self, upd, arg):
         s  = self._get_state()
         rm = s.risk_manager.get_status()
-        kill = "🛑 KILL SWITCH" if rm.get("kill_switch") else "✅ Активен"
+        training = getattr(s, "training_mode", False)
+        if training:
+            kill = "🎓 Режим обучения (лимиты ВЫКЛ)"
+        elif rm.get("kill_switch"):
+            kill = "🛑 KILL SWITCH"
+        else:
+            kill = "✅ Активен"
+        training_note = (
+            "\n\n⚠️ <b>Режим обучения АКТИВЕН</b>\n"
+            "Все лимиты и фильтры отключены.\n"
+            "Бот торгует без ограничений."
+        ) if training else ""
         await self.reply(upd,
             f"🛡 <b>Риск-менеджер</b>\n\n"
             f"Статус: {kill}\n"
@@ -989,7 +1000,7 @@ class TelegramCommander:
             f"Сделок сегодня: <b>{rm.get('daily_trades_count',0)}</b>\n"
             f"Убытков сегодня: <b>{rm.get('daily_losses_count',0)}/{rm.get('max_daily_losses',3)}</b> (стоп после {rm.get('max_daily_losses',3)})\n"
             f"Дневной PnL: <b>{rm.get('daily_pnl',0):+.2f} USDT</b>\n"
-            f"Лимит просадки: {rm.get('daily_max_loss_pct',0):.0f}%",
+            f"Лимит просадки: {rm.get('daily_max_loss_pct',0):.0f}%{training_note}",
             reply_markup=self._main_menu()
         )
 

@@ -53,6 +53,7 @@ from claude_orchestrator import ClaudeOrchestrator
 from strategy_advisor import StrategyAdvisor
 from position_monitor import PositionMonitor
 from global_trade_guard import GlobalTradeGuard
+from strategies.tp_normalizer import normalize_take_profit
 
 # ============================================================
 # Загрузка конфига
@@ -263,6 +264,7 @@ def _restore_paper_positions():
         pos = state.paper.positions.get(sym)
         if not pos:
             continue
+        _jtid = pos.get("journal_trade_id")
         strat.current_position = {
             "side":             pos["side"],
             "entry":            pos["entry_price"],
@@ -273,8 +275,22 @@ def _restore_paper_positions():
             "qty":              pos.get("qty", 0),
             "leverage":         pos.get("leverage", 1),
             "opened_at":        pos.get("opened_at"),
-            "journal_trade_id": pos.get("journal_trade_id"),
+            "journal_trade_id": _jtid,
         }
+        # Если journal_trade_id не сохранён — ищем незакрытую запись в БД
+        if _jtid is None:
+            try:
+                open_trade = state.journal.get_open_trade(sid, sym)
+                if open_trade:
+                    recovered_id = open_trade["id"]
+                    strat.current_position["journal_trade_id"] = recovered_id
+                    state.paper.set_journal_id(sym, recovered_id)
+                    logger.info(
+                        f"[PaperRestore] {sid} {sym}: journal_trade_id={recovered_id} "
+                        f"восстановлен из БД"
+                    )
+            except Exception as e:
+                logger.warning(f"[PaperRestore] {sid} {sym}: не удалось восстановить journal_trade_id: {e}")
         state.risk_manager.register_position_open(sid, pos.get("qty", 0) * pos.get("entry_price", 0))
         logger.info(f"[PaperRestore] {sid} {pos['side']} {sym} @ {pos['entry_price']} восстановлен")
 
@@ -899,6 +915,7 @@ async def _execute_fusion_signal(
         df_h1=chart_df,
         ml_probability=(ml_prediction.get("probability") if ml_prediction and ml_prediction.get("available") else None),
         signal_confidence=fused.confidence,
+        scalp_mode=state.scalp_active,
     )
     if not _fusion_guard.approved:
         logger.info(f"[Fusion] 🛡 Guard BLOCKED {fused.action} {sym}: {_fusion_guard.blocked_by}")
@@ -1244,22 +1261,26 @@ async def trading_loop():
                             logger.info(f"{sid}: 🚫 Boost: {boost_check['reason']}")
                             continue
 
-                    # Проверка плеча и notional экспозиции
-                    lev_check = state.risk_manager.check_leverage(sid, strat.leverage, balance)
-                    if not lev_check["allowed"]:
-                        logger.info(f"{sid}: ❌ {lev_check['reason']}")
-                        continue
-                    effective_leverage = lev_check["effective_leverage"]
+                    # Проверка плеча и notional экспозиции (пропускается в режиме обучения)
+                    if not state.training_mode:
+                        lev_check = state.risk_manager.check_leverage(sid, strat.leverage, balance)
+                        if not lev_check["allowed"]:
+                            logger.info(f"{sid}: ❌ {lev_check['reason']}")
+                            continue
+                        effective_leverage = lev_check["effective_leverage"]
+                    else:
+                        effective_leverage = strat.leverage
 
-                    # Корреляция
+                    # Корреляция (пропускается в режиме обучения)
                     open_positions = [
                         {"symbol": s.symbol, "side": s.current_position["side"]}
                         for s in state.strategies.values() if s.current_position
                     ]
-                    corr_check = state.correlation.can_open(strat.symbol, signal.action, open_positions)
-                    if not corr_check["allowed"]:
-                        logger.info(f"{sid}: ❌ {corr_check['reason']}")
-                        continue
+                    if not state.training_mode:
+                        corr_check = state.correlation.can_open(strat.symbol, signal.action, open_positions)
+                        if not corr_check["allowed"]:
+                            logger.info(f"{sid}: ❌ {corr_check['reason']}")
+                            continue
 
                     # ============== AI-АНАЛИЗ сигнала ==============
                     ai_score = None
@@ -1453,12 +1474,19 @@ async def trading_loop():
                             if ml_prediction and ml_prediction.get("available") else None
                         ),
                         signal_confidence=signal.confidence,
+                        scalp_mode=state.scalp_active,
                     )
                     if not _guard_result.approved and not state.training_mode:
                         logger.info(
                             f"{sid}: 🛡 Guard BLOCKED {signal.action} {strat.symbol}: "
                             f"{_guard_result.blocked_by}"
                         )
+                        continue
+
+                    # ── Нормализация TP: ближе к цели, фильтр качества входа ──
+                    signal = normalize_take_profit(signal, df, state.scalp_active)
+                    if signal is None:
+                        logger.info(f"{sid}: 🚫 TP_NORM заблокировал — цена слишком близко к уровню")
                         continue
 
                     # ============== Открытие позиции ==============

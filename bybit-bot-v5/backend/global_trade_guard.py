@@ -146,12 +146,27 @@ class GlobalTradeGuard:
         df_h4: Optional[pd.DataFrame] = None,      # свечи 4H (опционально)
         ml_probability: Optional[float] = None,
         signal_confidence: float = 0.0,
+        scalp_mode: bool = False,                  # агрессивный скальпинг: ослабленные фильтры
     ) -> GuardDecision:
         """
         Возвращает GuardDecision с approved=True/False и списком причин блокировки.
+        В scalp_mode: пониженный порог confidence (0.55), R:R>=1.2, нет H1 фильтра.
+        После 3+ убытков в scalp_mode: возврат к нормальным порогам.
         """
         blocked: List[str] = []
         warnings: List[str] = []
+
+        # Адаптивные пороги: в scalp_mode ослабляем, но ужесточаем после убытков
+        consec = self._consec_losses.get(strategy_id, 0)
+        if scalp_mode and consec < 3:
+            min_confidence = 0.55   # ослабленный порог
+            min_rr = 1.2
+        elif scalp_mode and consec < 5:
+            min_confidence = cfg.MIN_SIGNAL_CONFIDENCE   # нормальный
+            min_rr = 1.3
+        else:
+            min_confidence = cfg.MIN_SIGNAL_CONFIDENCE
+            min_rr = 1.5
 
         # ── 1. Кулдаун после серии убытков ──────────────────────────────────
         if self._is_in_cooldown(strategy_id):
@@ -159,7 +174,7 @@ class GlobalTradeGuard:
 
         # ── 2. Risk/Reward ────────────────────────────────────────────────────
         rr = self._calc_rr(signal_action, entry_price, stop_loss, take_profit)
-        if rr is not None and rr < 1.5:
+        if rr is not None and rr < min_rr:
             blocked.append(f"low_rr_{rr:.2f}")
 
         # ── 3. Risk per trade (USDT) ──────────────────────────────────────────
@@ -172,7 +187,7 @@ class GlobalTradeGuard:
             blocked.append(f"leverage_{leverage}x_exceeds_{cfg.MAX_LEVERAGE}x")
 
         # ── 5. Signal confidence ─────────────────────────────────────────────
-        if signal_confidence < cfg.MIN_SIGNAL_CONFIDENCE and signal_confidence > 0:
+        if signal_confidence < min_confidence and signal_confidence > 0:
             blocked.append(f"low_confidence_{signal_confidence:.2f}")
 
         # ── 6. ML probability ────────────────────────────────────────────────
@@ -182,16 +197,17 @@ class GlobalTradeGuard:
             else:
                 warnings.append(f"ml_probability_marginal_{ml_probability:.2f}")
 
-        # ── 7. Технические фильтры на 1H свечах ─────────────────────────────
-        if df_h1 is not None and len(df_h1) >= 50:
+        # ── 7. Технические фильтры на 1H свечах (пропускаем в scalp_mode) ───
+        if not scalp_mode and df_h1 is not None and len(df_h1) >= 50:
             self._check_h1_trend(signal_action, df_h1, blocked, warnings)
 
         # ── 8. Технические фильтры на рабочих свечах ────────────────────────
         if df is not None and len(df) >= 30:
-            self._check_working_tf(signal_action, df, blocked, warnings)
+            # В scalp_mode пропускаем anti-FOMO (быстрые движения = суть скальпа)
+            self._check_working_tf(signal_action, df, blocked, warnings, skip_fomo=scalp_mode)
 
-        # ── 9. Четырёхчасовой тренд (опционально) ────────────────────────────
-        if df_h4 is not None and len(df_h4) >= 50:
+        # ── 9. Четырёхчасовой тренд (опционально, только не в scalp_mode) ───
+        if not scalp_mode and df_h4 is not None and len(df_h4) >= 50:
             self._check_h4_trend(signal_action, df_h4, warnings)
 
         approved = len(blocked) == 0
@@ -306,8 +322,9 @@ class GlobalTradeGuard:
         df: pd.DataFrame,
         blocked: List[str],
         warnings: List[str],
+        skip_fomo: bool = False,
     ):
-        """Объём и ATR на рабочем таймфрейме."""
+        """Объём и ATR на рабочем таймфрейме. skip_fomo=True в scalp_mode."""
         # Подтверждение объёмом
         if "volume" in df.columns:
             vol_ma = df["volume"].rolling(20).mean().iloc[-1]
