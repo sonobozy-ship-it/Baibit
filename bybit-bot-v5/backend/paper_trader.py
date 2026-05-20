@@ -98,16 +98,17 @@ class PaperTrader:
         self.balance = round(self.balance - total_cost, 4)
 
         self.positions[signal.symbol] = {
-            "strategy_id": strategy_id,
-            "side": "Buy" if signal.action == "BUY" else "Sell",
-            "entry_price": signal.entry_price,
-            "qty": qty,
-            "leverage": leverage,
-            "margin": margin,
-            "stop_loss": signal.stop_loss,
-            "take_profit": signal.take_profit,
-            "opened_at": datetime.utcnow().isoformat(),
-            "be_moved": False,
+            "strategy_id":     strategy_id,
+            "side":            "Buy" if signal.action == "BUY" else "Sell",
+            "entry_price":     signal.entry_price,
+            "qty":             qty,
+            "leverage":        leverage,
+            "margin":          margin,
+            "stop_loss":       signal.stop_loss,
+            "take_profit":     signal.take_profit,
+            "opened_at":       datetime.utcnow().isoformat(),
+            "be_moved":        False,
+            "journal_trade_id": None,   # заполняется после log_trade
         }
         self._save_state()
         logger.info(
@@ -115,6 +116,12 @@ class PaperTrader:
             f"@ {signal.entry_price} | маржа={margin:.2f} USDT | баланс={self.balance:.2f}"
         )
         return {"success": True, "position": self.positions[signal.symbol]}
+
+    def set_journal_id(self, symbol: str, journal_trade_id: int):
+        """Сохраняет journal_trade_id в позицию и записывает state — чтобы не потерять после рестарта."""
+        if symbol in self.positions:
+            self.positions[symbol]["journal_trade_id"] = journal_trade_id
+            self._save_state()
 
     def check_positions(self, current_prices: Dict[str, float]):
         """Проверка SL/TP по всем позициям."""

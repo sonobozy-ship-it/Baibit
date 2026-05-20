@@ -104,6 +104,8 @@ class TelegramCommander:
         bal_str   = f"{s.paper.balance:.0f}" if s.paper_mode else "реал"
         max_pos   = s.risk_manager.max_open_positions
         scalp_btn = _btn("⚡ Скальп: ВКЛ", "scalp_off") if s.scalp_active else _btn("⚡ Скальп: ВЫКЛ", "scalp_on")
+        train_btn = _btn("🎓 Обучение: ВКЛ", "training_off") if getattr(s, "training_mode", False) \
+                    else _btn("🎓 Обучение: ВЫКЛ", "training_on")
         return _keyboard([
             [go_btn, pause_btn],
             [_btn("💰 Баланс", "balance"), _btn("📌 Позиции", "positions")],
@@ -112,7 +114,8 @@ class TelegramCommander:
             [_btn("📰 Новости", "news"), _btn("🤖 AI", "ai")],
             [_btn(f"💵 Баланс: {bal_str} USDT", "set_balance"),
              _btn(f"📦 Макс сделок: {max_pos}", "set_max_pos")],
-            [scalp_btn, _btn("🔄 Обновить меню", "menu")],
+            [scalp_btn, train_btn],
+            [_btn("🔄 Обновить меню", "menu")],
         ])
 
     # ── Polling ───────────────────────────────────────────────────
@@ -235,8 +238,10 @@ class TelegramCommander:
             "news":        self._cmd_news,
             "set_balance": self._cb_set_balance,
             "set_max_pos": self._cb_set_max_pos,
-            "scalp_on":   self._cb_scalp_on,
-            "scalp_off":  self._cb_scalp_off,
+            "scalp_on":      self._cb_scalp_on,
+            "scalp_off":     self._cb_scalp_off,
+            "training_on":   self._cb_training_on,
+            "training_off":  self._cb_training_off,
         }
 
         # Закрытие отдельной позиции
@@ -330,6 +335,32 @@ class TelegramCommander:
         await self.reply(upd,
             "⚡ <b>ScalperPro отключён</b>\n"
             "SC_* стратегии приостановлены",
+            reply_markup=self._main_menu())
+
+    async def _cb_training_on(self, upd, arg):
+        s = self._get_state()
+        s.training_mode = True
+        s.risk_manager.kill_switch = False
+        await self.reply(upd,
+            "🎓 <b>Режим обучения ВКЛЮЧЁН</b>\n\n"
+            "Все лимиты убраны:\n"
+            "• Лимиты убытков (дневной, недельный)\n"
+            "• Лимит сделок в день\n"
+            "• Кулдауны после серии убытков\n"
+            "• GlobalTradeGuard блокировки\n\n"
+            "⚠️ Бот торгует без ограничений для сбора данных.\n"
+            "Выключи режим после набора статистики!",
+            reply_markup=self._main_menu())
+
+    async def _cb_training_off(self, upd, arg):
+        s = self._get_state()
+        s.training_mode = False
+        await self.reply(upd,
+            "🛡 <b>Режим обучения ВЫКЛЮЧЕН</b>\n\n"
+            "Все лимиты и защиты восстановлены:\n"
+            "• Лимиты убытков\n"
+            "• Кулдауны и Guard\n"
+            "• Защита капитала",
             reply_markup=self._main_menu())
 
     async def _cb_set_balance(self, upd, arg):

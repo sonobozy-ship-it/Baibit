@@ -165,6 +165,9 @@ class BotState:
         # Единый защитный слой перед открытием сделок
         self.trade_guard = GlobalTradeGuard()
 
+        # Режим сбора данных: убирает все лимиты (лосс-лимиты, кулдауны, Guard-блоки)
+        self.training_mode: bool = False
+
         # Кэш старших таймфреймов для MTF-фильтра ScalperPro
         # {symbol: (DataFrame, updated_at)}
         self.h1_cache:  Dict[str, tuple] = {}
@@ -261,15 +264,16 @@ def _restore_paper_positions():
         if not pos:
             continue
         strat.current_position = {
-            "side": pos["side"],
-            "entry": pos["entry_price"],
-            "sl": pos["stop_loss"],
-            "tp": pos["take_profit"],
-            "initial_sl": pos.get("stop_loss"),
-            "be_moved": pos.get("be_moved", False),
-            "qty": pos.get("qty", 0),
-            "leverage": pos.get("leverage", 1),
-            "opened_at": pos.get("opened_at"),
+            "side":             pos["side"],
+            "entry":            pos["entry_price"],
+            "sl":               pos["stop_loss"],
+            "tp":               pos["take_profit"],
+            "initial_sl":       pos.get("stop_loss"),
+            "be_moved":         pos.get("be_moved", False),
+            "qty":              pos.get("qty", 0),
+            "leverage":         pos.get("leverage", 1),
+            "opened_at":        pos.get("opened_at"),
+            "journal_trade_id": pos.get("journal_trade_id"),
         }
         state.risk_manager.register_position_open(sid, pos.get("qty", 0) * pos.get("entry_price", 0))
         logger.info(f"[PaperRestore] {sid} {pos['side']} {sym} @ {pos['entry_price']} восстановлен")
@@ -1227,13 +1231,14 @@ async def trading_loop():
                             logger.debug(f"Adaptive SL skip: {e}")
 
                     # Проверка риск-менеджера
-                    check = state.risk_manager.can_open_trade(sid, balance)
-                    if not check["allowed"]:
-                        logger.info(f"{sid}: ❌ {check['reason']}")
-                        continue
+                    if not state.training_mode:
+                        check = state.risk_manager.can_open_trade(sid, balance)
+                        if not check["allowed"]:
+                            logger.info(f"{sid}: ❌ {check['reason']}")
+                            continue
 
                     # Boost-режим: дополнительные проверки фазы
-                    if state.boost.is_active:
+                    if state.boost.is_active and not state.training_mode:
                         boost_check = state.boost.can_open_trade(balance)
                         if not boost_check["allowed"]:
                             logger.info(f"{sid}: 🚫 Boost: {boost_check['reason']}")
@@ -1449,7 +1454,7 @@ async def trading_loop():
                         ),
                         signal_confidence=signal.confidence,
                     )
-                    if not _guard_result.approved:
+                    if not _guard_result.approved and not state.training_mode:
                         logger.info(
                             f"{sid}: 🛡 Guard BLOCKED {signal.action} {strat.symbol}: "
                             f"{_guard_result.blocked_by}"
@@ -1504,6 +1509,7 @@ async def trading_loop():
                             "opened_at":     strat.current_position["opened_at"],
                         })
                         strat.current_position["journal_trade_id"] = _ptid
+                        state.paper.set_journal_id(signal.symbol, _ptid)
                         asyncio.create_task(state.telegram.notify_trade_open(
                             sid, signal.symbol, signal.action,
                             signal.entry_price, signal.stop_loss, signal.take_profit,
