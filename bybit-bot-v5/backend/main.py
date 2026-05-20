@@ -659,11 +659,12 @@ async def _close_position_early(
     if not pos:
         return
 
-    qty       = pos.get("qty", 1.0)
-    side      = pos["side"]
-    entry     = pos["entry"]
-    tp        = pos["tp"]
-    opened_at = pos.get("opened_at")
+    qty              = pos.get("qty", 1.0)
+    side             = pos["side"]
+    entry            = pos["entry"]
+    tp               = pos["tp"]
+    opened_at        = pos.get("opened_at")
+    _early_jtid      = pos.get("journal_trade_id")
     if hasattr(opened_at, "isoformat"):
         opened_at = opened_at.isoformat()
 
@@ -715,7 +716,18 @@ async def _close_position_early(
 
     state.risk_manager.register_trade_result(sid, pnl)
     state.risk_manager.register_position_close(sid)
-    state.adaptive.record(sid, close_res.get("r_multiple", 0))
+    _early_r = close_res.get("r_multiple", 0)
+    state.adaptive.record(sid, _early_r)
+
+    if _early_jtid:
+        state.journal.update_trade_close(
+            _early_jtid,
+            exit_price=exit_price,
+            pnl_usd=pnl,
+            pnl_pct=close_res.get("pnl_pct", 0),
+            exit_reason=reason_str,
+            r_multiple=_early_r,
+        )
 
     if strat.trades > 0 and strat.trades % 10 == 0:
         asyncio.create_task(_auto_ai_improve(sid, strat.NAME, strat.symbol, strat.trades))
@@ -907,6 +919,9 @@ async def _execute_fusion_signal(
                 "leverage":      lev_check["effective_leverage"],
                 "stop_loss":     fused.stop_loss,
                 "take_profit":   fused.take_profit,
+                "initial_sl":    fused.stop_loss,
+                "initial_tp":    fused.take_profit,
+                "signal_reason": fused.reason,
                 "filters_passed": {
                     "fusion_score":     fused.fusion_score,
                     "strategies":       fused.source_strategies,
@@ -1103,11 +1118,17 @@ async def trading_loop():
                         if new_sl and not state.paper_mode:
                             state.bybit.update_stop_loss(strat.symbol, new_sl)
                             await broadcast_log(f"🛡 {sid} перенос SL в безубыток @ {new_sl:.4f}")
+                            _be_tid = strat.current_position.get("journal_trade_id") if strat.current_position else None
+                            if _be_tid:
+                                state.journal.update_trade_levels(_be_tid, stop_loss=new_sl, be_triggered=True)
 
                         # Trailing stop
                         trail_sl = strat.check_trailing_stop(current_price)
                         if trail_sl and not state.paper_mode:
                             state.bybit.update_stop_loss(strat.symbol, trail_sl)
+                            _tr_tid = strat.current_position.get("journal_trade_id") if strat.current_position else None
+                            if _tr_tid:
+                                state.journal.update_trade_levels(_tr_tid, stop_loss=trail_sl, trailing_triggered=True)
 
                         # Ранний TP — закрыть если цена прошла early_tp_pct% пути к TP
                         early_exit = strat.check_early_tp(current_price, state.early_tp_pct)
@@ -1136,6 +1157,8 @@ async def trading_loop():
                     # Добавляем в буфер для fusion-анализа
                     state.signal_buffer.update(sid, signal, strat.timeframe)
 
+                    _entry_atr: Optional[float] = None  # ATR на момент входа (для журнала)
+
                     # Адаптивный SL/TP по ATR (множители зависят от режима и статистики)
                     if state.use_adaptive_sl:
                         try:
@@ -1144,6 +1167,7 @@ async def trading_loop():
                             if atr_series is None or len(atr_series) == 0:
                                 raise ValueError("ATR empty")
                             atr = float(atr_series.iloc[-1])
+                            _entry_atr = atr
                             if atr > 0:
                                 sl_mult, rr = state.adaptive.atr_params(sid, regime=current_regime_name)
                                 adaptive = adaptive_sl_tp(
@@ -1349,6 +1373,8 @@ async def trading_loop():
                                 _atr_val = float(_atr_s.iloc[-1])
                         except Exception:
                             pass
+                        if _atr_val:
+                            _entry_atr = _atr_val
                         qty = state.risk_manager.calculate_position_size(
                             balance=balance,
                             entry_price=signal.entry_price,
@@ -1387,6 +1413,26 @@ async def trading_loop():
                         strat.current_position["opened_at"] = state.paper.positions[signal.symbol]["opened_at"]
                         notional = qty * signal.entry_price
                         state.risk_manager.register_position_open(sid, notional)
+                        _ptid = state.journal.log_trade({
+                            "strategy_id":   sid,
+                            "strategy_name": strat.NAME,
+                            "symbol":        signal.symbol,
+                            "side":          signal.action,
+                            "entry_price":   signal.entry_price,
+                            "qty":           qty,
+                            "leverage":      effective_leverage,
+                            "stop_loss":     signal.stop_loss,
+                            "take_profit":   signal.take_profit,
+                            "initial_sl":    signal.stop_loss,
+                            "initial_tp":    signal.take_profit,
+                            "atr_at_entry":  _entry_atr,
+                            "signal_reason": signal.reason,
+                            "filters_passed": signal.filters_passed,
+                            "ai_score":      ai_score,
+                            "paper_trading": True,
+                            "opened_at":     strat.current_position["opened_at"],
+                        })
+                        strat.current_position["journal_trade_id"] = _ptid
                         asyncio.create_task(state.telegram.notify_trade_open(
                             sid, signal.symbol, signal.action,
                             signal.entry_price, signal.stop_loss, signal.take_profit,
@@ -1415,19 +1461,24 @@ async def trading_loop():
                             state.risk_manager.register_position_open(sid, notional)
 
                             trade_id = state.journal.log_trade({
-                                "strategy_id": sid,
+                                "strategy_id":   sid,
                                 "strategy_name": strat.NAME,
-                                "symbol": signal.symbol,
-                                "side": signal.action,
-                                "entry_price": signal.entry_price,
-                                "qty": qty,
-                                "leverage": strat.leverage,
-                                "stop_loss": signal.stop_loss,
-                                "take_profit": signal.take_profit,
+                                "symbol":        signal.symbol,
+                                "side":          signal.action,
+                                "entry_price":   signal.entry_price,
+                                "qty":           qty,
+                                "leverage":      strat.leverage,
+                                "stop_loss":     signal.stop_loss,
+                                "take_profit":   signal.take_profit,
+                                "initial_sl":    signal.stop_loss,
+                                "initial_tp":    signal.take_profit,
+                                "atr_at_entry":  _entry_atr,
+                                "signal_reason": signal.reason,
                                 "filters_passed": signal.filters_passed,
-                                "ai_score": ai_score,
-                                "opened_at": datetime.utcnow().isoformat(),
+                                "ai_score":      ai_score,
+                                "opened_at":     datetime.utcnow().isoformat(),
                             })
+                            strat.current_position["journal_trade_id"] = trade_id
 
                             if state.ml_enabled and snapshot_id:
                                 state.snapshot_signal_id_map[signal.symbol] = snapshot_id
@@ -1484,13 +1535,24 @@ async def trading_loop():
                                 _opened_at = _strat.current_position.get("opened_at")
                                 if hasattr(_opened_at, "isoformat"):
                                     _opened_at = _opened_at.isoformat()
+                                _paper_jtid = _strat.current_position.get("journal_trade_id")
                                 close_res = _strat.close_position(
                                     closed_pos.get("exit_price", 0),
                                     qty=_strat.current_position.get("qty", 0),
                                 )
                                 state.risk_manager.register_trade_result(_sid, pnl)
                                 state.risk_manager.register_position_close(_sid)
-                                state.adaptive.record(_sid, close_res.get("r_multiple", 0))
+                                _paper_r = close_res.get("r_multiple", 0)
+                                state.adaptive.record(_sid, _paper_r)
+                                if _paper_jtid:
+                                    state.journal.update_trade_close(
+                                        _paper_jtid,
+                                        exit_price=closed_pos.get("exit_price", 0),
+                                        pnl_usd=pnl,
+                                        pnl_pct=close_res.get("pnl_pct", 0),
+                                        exit_reason=reason,
+                                        r_multiple=_paper_r,
+                                    )
                                 # AI-советы каждые 10 закрытых сделок стратегии
                                 if _strat.trades > 0 and _strat.trades % 10 == 0:
                                     asyncio.create_task(_auto_ai_improve(
@@ -1532,6 +1594,7 @@ async def trading_loop():
                                 sl = pos["sl"]
                                 tp = pos["tp"]
                                 qty = pos.get("qty", 1.0)
+                                _real_jtid = pos.get("journal_trade_id")
 
                                 # Корректный PnL
                                 close_result = strat.close_position(exit_price, qty=qty)
@@ -1553,6 +1616,16 @@ async def trading_loop():
                                     asyncio.create_task(_auto_advisor_run())
 
                                 exit_reason = "TP" if pnl_usd > 0 else "SL"
+
+                                if _real_jtid:
+                                    state.journal.update_trade_close(
+                                        _real_jtid,
+                                        exit_price=exit_price,
+                                        pnl_usd=pnl_usd,
+                                        pnl_pct=close_result.get("pnl_pct", 0),
+                                        exit_reason=exit_reason,
+                                        r_multiple=r_multiple,
+                                    )
 
                                 # ML labelling
                                 if state.ml_enabled and strat.symbol in state.snapshot_signal_id_map:
@@ -2152,13 +2225,35 @@ async def journal_trades(strategy_id: Optional[str] = None, limit: int = 100):
 @app.get("/api/journal/export/csv")
 async def export_csv():
     path = state.journal.export_to_csv()
-    return FileResponse(path, filename="trades.csv")
+    return FileResponse(path, filename="trades.csv", media_type="text/csv")
 
 
 @app.get("/api/journal/export/excel")
 async def export_excel():
     path = state.journal.export_to_excel()
-    return FileResponse(path, filename="trades.xlsx")
+    return FileResponse(
+        path, filename="trades.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.get("/api/journal/export/db")
+async def export_db():
+    """
+    Скачать весь SQLite файл базы данных с сервера.
+    Только для SQLite (при MySQL возвращает CSV-дамп).
+    """
+    db_path = getattr(state.journal.pool, "db_path", None)
+    if db_path and Path(db_path).exists():
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
+        return FileResponse(
+            db_path,
+            filename=f"baibit_trades_{ts}.db",
+            media_type="application/octet-stream",
+        )
+    # Fallback: MySQL или путь не найден — отдаём CSV
+    path = state.journal.export_to_csv()
+    return FileResponse(path, filename="trades_dump.csv", media_type="text/csv")
 
 
 @app.get("/api/journal/heatmap")
