@@ -46,16 +46,28 @@ class EMACrossoverStrategy(BaseStrategy):
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Фильтры (расслабленные для сбора ML-данных)
         ema_bull_cross = prev["ema_fast"] < prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
         ema_bear_cross = prev["ema_fast"] > prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
-        rsi_in_zone = 20 < last["rsi"] < 80
-        vol_confirm = last["volume"] > last["vol_ma"] * 1.0  # объём любой
+
+        # Касание EMA: свеча должна задеть EMA своим телом/тенью при кроссе
+        # BUY: low свечи <= ema_fast (касание снизу-вверх), тело закрылось выше
+        # SELL: high свечи >= ema_fast (касание сверху-вниз), тело закрылось ниже
+        ema_touch_bull = last["low"] <= last["ema_fast"] * 1.002
+        ema_touch_bear = last["high"] >= last["ema_fast"] * 0.998
+
+        rsi_in_zone = 30 < last["rsi"] < 70   # зона без экстремумов
+        vol_confirm = last["volume"] > last["vol_ma"] * 1.3  # реальный объём
+
+        # Подтверждение свечой: бычья свеча при BUY, медвежья при SELL
+        bull_candle = last["close"] > last["open"]
+        bear_candle = last["close"] < last["open"]
 
         filters = {
-            "ema_cross": ema_bull_cross or ema_bear_cross,
-            "rsi_zone": rsi_in_zone,
+            "ema_cross":    ema_bull_cross or ema_bear_cross,
+            "ema_touch":    ema_touch_bull if ema_bull_cross else ema_touch_bear,
+            "rsi_zone":     rsi_in_zone,
             "volume_spike": vol_confirm,
+            "candle_confirm": bull_candle if ema_bull_cross else bear_candle,
         }
 
         if not all(filters.values()):
@@ -73,7 +85,7 @@ class EMACrossoverStrategy(BaseStrategy):
         return TradingSignal(
             action=side, symbol=self.symbol, confidence=0.7,
             entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"EMA{self.fast_ema}/{self.slow_ema} cross + RSI {last['rsi']:.1f} + vol",
+            reason=f"EMA{self.fast_ema}/{self.slow_ema} cross+touch | RSI {last['rsi']:.1f} | vol×{last['volume']/last['vol_ma']:.1f}",
             filters_passed=filters,
         )
 
@@ -172,36 +184,38 @@ class RSIDivergenceStrategy(BaseStrategy):
         df["rsi"] = ta.rsi(df["close"], length=14)
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
         df = df.join(macd)
-
-        # Простой детектор дивергенции на последних 10 свечах
-        last_10 = df.iloc[-10:]
-        price_lows = last_10["low"].idxmin()
-        rsi_at_low = last_10.loc[price_lows, "rsi"]
-        price_highs = last_10["high"].idxmax()
-        rsi_at_high = last_10.loc[price_highs, "rsi"]
+        df["ema50"] = ta.ema(df["close"], length=50)
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Bullish divergence: цена сделала LL, RSI на свинг-лоу выше начального
-        bull_div = (
-            last_10["low"].iloc[-1] < last_10["low"].iloc[0]
-            and rsi_at_low > last_10["rsi"].iloc[0]
-            and last["rsi"] < 48
-        )
-        bear_div = (
-            last_10["high"].iloc[-1] > last_10["high"].iloc[0]
-            and rsi_at_high < last_10["rsi"].iloc[0]
-            and last["rsi"] > 52
-        )
+        # ── Реальная дивергенция: ищем два свинг-лоу/хая в окне 20 свечей ──────
+        # Бычья: второй ценовой лоу НИЖЕ первого, но RSI на втором лоу ВЫШЕ
+        # Медвежья: второй ценовой хай ВЫШЕ первого, но RSI на втором хае НИЖЕ
+        window = df.iloc[-20:]
+        # Находим два минимума цены
+        low_idx1 = window["low"].iloc[:10].idxmin()
+        low_idx2 = window["low"].iloc[10:].idxmin()
+        price_ll  = window.loc[low_idx2, "low"]  < window.loc[low_idx1, "low"]
+        rsi_hl    = window.loc[low_idx2, "rsi"]  > window.loc[low_idx1, "rsi"]
+        # Находим два максимума цены
+        high_idx1 = window["high"].iloc[:10].idxmax()
+        high_idx2 = window["high"].iloc[10:].idxmax()
+        price_hh  = window.loc[high_idx2, "high"] > window.loc[high_idx1, "high"]
+        rsi_lh    = window.loc[high_idx2, "rsi"]  < window.loc[high_idx1, "rsi"]
 
+        # RSI должен быть в зоне экстремума при дивергенции
+        bull_div = price_ll and rsi_hl and last["rsi"] < 45   # цена ниже, RSI выше → сила покупателей
+        bear_div = price_hh and rsi_lh and last["rsi"] > 55   # цена выше, RSI ниже → слабость продавцов
+
+        # MACD кросс обязателен (не просто направление)
         macd_bull_cross = prev["MACD_12_26_9"] < prev["MACDs_12_26_9"] and last["MACD_12_26_9"] > last["MACDs_12_26_9"]
         macd_bear_cross = prev["MACD_12_26_9"] > prev["MACDs_12_26_9"] and last["MACD_12_26_9"] < last["MACDs_12_26_9"]
-        # Дивергенция без MACD кросса тоже принимается (собираем данные для ML)
-        macd_ok = (macd_bull_cross or last["MACD_12_26_9"] > last["MACDs_12_26_9"]) if bull_div \
-             else (macd_bear_cross or last["MACD_12_26_9"] < last["MACDs_12_26_9"])
 
-        if not ((bull_div or bear_div) and macd_ok):
+        # Касание уровня: цена у EMA50 (зона поддержки/сопротивления)
+        near_ema50 = abs(last["close"] - last["ema50"]) / last["ema50"] < 0.012
+
+        if not ((bull_div and macd_bull_cross) or (bear_div and macd_bear_cross)):
             return None
 
         side = "BUY" if bull_div else "SELL"
@@ -213,11 +227,12 @@ class RSIDivergenceStrategy(BaseStrategy):
             sl = entry * (1 + self.stop_loss_pct / 100)
             tp = entry * (1 - self.take_profit_pct / 100)
 
+        confidence = 0.70 + (0.05 if near_ema50 else 0.0)
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.7,
+            action=side, symbol=self.symbol, confidence=round(confidence, 2),
             entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"RSI divergence + MACD cross",
-            filters_passed={"rsi_div": True, "macd_cross": True, "structure": True, "h4_confirm": True},
+            reason=f"RSI div ({side}) + MACD cross | RSI={last['rsi']:.1f} | EMA50={'touch' if near_ema50 else 'far'}",
+            filters_passed={"rsi_div": True, "macd_cross": True, "rsi_extreme": True, "ema50_touch": near_ema50},
         )
 
 
@@ -244,41 +259,48 @@ class BreakoutHunterStrategy(BaseStrategy):
             return None
         df = df.copy()
 
-        # Уровни: high/low за последние 48 свечей
+        # Уровни: high/low за последние 48 свечей (не включая последние 5)
         lookback = 48
-        recent = df.iloc[-lookback:-1]
-        resistance = recent["high"].max()
-        support = recent["low"].min()
+        level_zone = df.iloc[-lookback:-5]
+        resistance = level_zone["high"].max()
+        support    = level_zone["low"].min()
 
-        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
         last = df.iloc[-1]
-        prev = df.iloc[-2]
 
-        # Пробой (расслабленные условия для сбора ML-данных)
-        break_up = prev["close"] < resistance and last["close"] > resistance * 1.0005
-        break_down = prev["close"] > support and last["close"] < support * 0.9995
-        vol_confirm = last["volume"] > last["vol_ma"] * 1.0
-        atr_expand = last["atr"] > df.iloc[-10:]["atr"].mean() * 0.9
+        # ── Пробой: закрытие выше/ниже уровня с минимальным зазором 0.2% ──────
+        break_up   = last["close"] > resistance * 1.002
+        break_down = last["close"] < support * 0.998
 
-        if not ((break_up or break_down) and vol_confirm and atr_expand):
+        # ── Ретест: в последних 3 свечах цена касалась уровня (вернулась к нему) ─
+        # После пробоя вверх: минимум одной из последних свечей опускался к resistance
+        recent_3 = df.iloc[-4:-1]
+        retest_up   = break_up   and recent_3["low"].min()  <= resistance * 1.005
+        retest_down = break_down and recent_3["high"].max() >= support   * 0.995
+
+        vol_confirm = last["volume"] > last["vol_ma"] * 1.5   # объём × 1.5
+        atr_expand  = last["atr"]    > df.iloc[-10:]["atr"].mean() * 1.1  # ATR расширяется
+
+        if not ((retest_up or retest_down) and vol_confirm and atr_expand):
             return None
 
-        side = "BUY" if break_up else "SELL"
+        side = "BUY" if retest_up else "SELL"
+        level = resistance if retest_up else support
         entry = float(last["close"])
         if side == "BUY":
-            sl = entry * (1 - self.stop_loss_pct / 100)
+            sl = min(entry * (1 - self.stop_loss_pct / 100), level * 0.998)
             tp = entry * (1 + self.take_profit_pct / 100)
         else:
-            sl = entry * (1 + self.stop_loss_pct / 100)
+            sl = max(entry * (1 + self.stop_loss_pct / 100), level * 1.002)
             tp = entry * (1 - self.take_profit_pct / 100)
 
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.72,
+            action=side, symbol=self.symbol, confidence=0.73,
             entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"Breakout {'⬆' if break_up else '⬇'} + vol×2 + ATR expand",
-            filters_passed={"break": True, "retest": True, "vol": vol_confirm, "atr": atr_expand, "no_resist": True},
+            reason=f"Breakout+Retest {'⬆' if retest_up else '⬇'} level={level:.4f} | vol×{last['volume']/last['vol_ma']:.1f}",
+            filters_passed={"break": True, "retest": True, "vol": vol_confirm, "atr": atr_expand},
         )
 
 
@@ -378,32 +400,47 @@ class TrendFollowerStrategy(BaseStrategy):
 
         last = df.iloc[-1]
 
-        adx_strong = last["ADX_14"] > 18
+        adx_strong   = last["ADX_14"] > 22
         above_ema200 = last["close"] > last["ema_200"]
         below_ema200 = last["close"] < last["ema_200"]
         st_bull = last["SUPERTd_10_3.0"] == 1
         st_bear = last["SUPERTd_10_3.0"] == -1
 
-        long_setup = adx_strong and above_ema200 and st_bull
-        short_setup = adx_strong and below_ema200 and st_bear
+        # Касание: пуллбэк к линии Supertrend (не более 1.5% от неё)
+        supert_val = last.get("SUPERT_10_3.0", float("nan"))
+        if pd.isna(supert_val):
+            supert_val = last.get("SUPERT_10_3", float("nan"))
+        touch_supert = not pd.isna(supert_val) and abs(last["close"] - supert_val) / supert_val < 0.015
+
+        # Дополнительно: RSI не перекуплен/перепродан (пуллбэк, а не экстремум)
+        df["rsi"] = ta.rsi(df["close"], length=14)
+        rsi_val = float(df["rsi"].iloc[-1])
+        rsi_pullback_bull = 35 < rsi_val < 60   # откат, но не oversold
+        rsi_pullback_bear = 40 < rsi_val < 65
+
+        long_setup  = adx_strong and above_ema200 and st_bull and touch_supert and rsi_pullback_bull
+        short_setup = adx_strong and below_ema200 and st_bear and touch_supert and rsi_pullback_bear
 
         if not (long_setup or short_setup):
             return None
 
         side = "BUY" if long_setup else "SELL"
         entry = float(last["close"])
+        # SL за линию Supertrend
         if side == "BUY":
-            sl = entry * (1 - self.stop_loss_pct / 100)
+            sl = min(entry * (1 - self.stop_loss_pct / 100), supert_val * 0.998) if not pd.isna(supert_val) \
+                 else entry * (1 - self.stop_loss_pct / 100)
             tp = entry * (1 + self.take_profit_pct / 100)
         else:
-            sl = entry * (1 + self.stop_loss_pct / 100)
+            sl = max(entry * (1 + self.stop_loss_pct / 100), supert_val * 1.002) if not pd.isna(supert_val) \
+                 else entry * (1 + self.stop_loss_pct / 100)
             tp = entry * (1 - self.take_profit_pct / 100)
 
         return TradingSignal(
-            action=side, symbol=self.symbol, confidence=0.75,
+            action=side, symbol=self.symbol, confidence=0.76,
             entry_price=entry, stop_loss=sl, take_profit=tp,
-            reason=f"Trend {side}: ADX {last['ADX_14']:.1f} + Supertrend + EMA200",
-            filters_passed={"adx": True, "supertrend": True, "ema200": True, "htf_align": True},
+            reason=f"Trend {side}: ADX {last['ADX_14']:.1f} + Supertrend touch | RSI {rsi_val:.0f}",
+            filters_passed={"adx": True, "supertrend": True, "ema200": True, "st_touch": touch_supert, "rsi_pullback": True},
         )
 
 
@@ -442,12 +479,18 @@ class MultiConfirmStrategy(BaseStrategy):
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
+        # Касание: цена должна касаться EMA21 (в пределах 0.8%)
+        # Это делает S7 pullback-стратегией, а не "входом в воздухе"
+        touch_ema21 = abs(last["close"] - last["ema_21"]) / last["ema_21"] < 0.008
+
         # 6 фильтров
         ema_bull = last["close"] > last["ema_21"] > last["ema_50"]
         ema_bear = last["close"] < last["ema_21"] < last["ema_50"]
-        rsi_bull = 35 < last["rsi"] < 65 and last["rsi"] > prev["rsi"]
-        rsi_bear = 35 < last["rsi"] < 65 and last["rsi"] < prev["rsi"]
-        bb_mid = last["BBL_20_2.0"] < last["close"] < last["BBU_20_2.0"]
+        rsi_bull = 38 < last["rsi"] < 62 and last["rsi"] > prev["rsi"]
+        rsi_bear = 38 < last["rsi"] < 62 and last["rsi"] < prev["rsi"]
+        # BB: цена возвращается к средней линии (BB midline touch) — реальное касание
+        bb_touch_bull = last["close"] <= last["BBM_20_2.0"] * 1.005  # касание средней снизу
+        bb_touch_bear = last["close"] >= last["BBM_20_2.0"] * 0.995  # касание средней сверху
         macd_bull = last["MACD_12_26_9"] > last["MACDs_12_26_9"] and last["MACDh_12_26_9"] > prev["MACDh_12_26_9"]
         macd_bear = last["MACD_12_26_9"] < last["MACDs_12_26_9"] and last["MACDh_12_26_9"] < prev["MACDh_12_26_9"]
         vol_spike = last["volume"] > last["vol_ma"] * 1.5
@@ -455,23 +498,28 @@ class MultiConfirmStrategy(BaseStrategy):
         htf_bear = last["close"] < df.iloc[-24]["close"]
 
         long_filters = {
-            "ema_trend": ema_bull,
+            "ema_trend":   ema_bull,
+            "ema21_touch": touch_ema21,
             "rsi_confirm": rsi_bull,
-            "bb_position": bb_mid,
-            "macd_cross": macd_bull,
-            "vol_spike": vol_spike,
-            "htf_trend": htf_bull,
+            "bb_touch":    bb_touch_bull,
+            "macd_cross":  macd_bull,
+            "vol_spike":   vol_spike,
+            "htf_trend":   htf_bull,
         }
         short_filters = {
-            "ema_trend": ema_bear,
+            "ema_trend":   ema_bear,
+            "ema21_touch": touch_ema21,
             "rsi_confirm": rsi_bear,
-            "bb_position": bb_mid,
-            "macd_cross": macd_bear,
-            "vol_spike": vol_spike,
-            "htf_trend": htf_bear,
+            "bb_touch":    bb_touch_bear,
+            "macd_cross":  macd_bear,
+            "vol_spike":   vol_spike,
+            "htf_trend":   htf_bear,
         }
 
-        # Требуем минимум 5 из 6 фильтров — высококачественный сигнал
+        # Требуем минимум 5 из 7 фильтров (включая обязательный ema21_touch)
+        # ema21_touch обязателен отдельно
+        if not touch_ema21:
+            return None
         REQUIRED_SCORE = 5
         long_score = sum(long_filters.values())
         short_score = sum(short_filters.values())
