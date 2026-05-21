@@ -208,6 +208,7 @@ def init_strategies():
         "S7":  "LINKUSDT",        # отдельный символ — не конфликтует с S1 (BTCUSDT)
         "S8":  "DOTUSDT",         # отдельный символ — не конфликтует с S2 (ETHUSDT)
         "S9":  "NEARUSDT",        # отдельный символ — не конфликтует с S3 (SOLUSDT)
+        "S10": "LINKUSDT",        # ScalperPro — S7 (MultiConfirm) отключена, символ свободен
         "S11": "AVAXUSDT",        # DragonflyGold
         "S12": "ADAUSDT",
         "S13": "1000PEPEUSDT",
@@ -1273,8 +1274,8 @@ async def trading_loop():
                         continue
 
                     # Поиск сигнала
-                    # SC_* и S15 получают MTF данные для trend-фильтра
-                    if sid.startswith("SC_") or sid == "S15":
+                    # SC_*, S10 и S15 получают MTF данные для trend-фильтра
+                    if sid.startswith("SC_") or sid in ("S15", "S10"):
                         signal = strat.analyze(
                             df,
                             df_h1  = _get_h1_cached(strat.symbol),
@@ -1284,6 +1285,11 @@ async def trading_loop():
                         signal = strat.analyze(df)
                     if not signal or signal.action not in ("BUY", "SELL"):
                         continue
+
+                    # Скальперы SC_* и S15/S10 — устанавливаем ДО всех фильтров
+                    # (нужно знать тип стратегии для выбора порогов R:R и применения стопов)
+                    _is_scalper = sid.startswith("SC_")
+                    _scalp_like = _is_scalper or sid in ("S15", "S10")
 
                     # Добавляем в буфер для fusion-анализа (до адаптивного SL/TP)
                     state.signal_buffer.update(sid, signal, strat.timeframe)
@@ -1312,28 +1318,39 @@ async def trading_loop():
                         except Exception as e:
                             logger.debug(f"Adaptive SL skip: {e}")
 
-                    # Глобальный R:R фильтр >= 2.0 — после adaptive SL/TP чтобы проверять финальные значения
+                    # Глобальный R:R фильтр:
+                    #   - Свинг/тренд стратегии: >= 2.0 (основное требование промта)
+                    #   - Скальперы SC_*/S15: >= 1.2 (GlobalTradeGuard также проверяет)
                     if signal.entry_price and signal.stop_loss and signal.take_profit:
                         _s_rr_risk   = abs(signal.entry_price - signal.stop_loss)
                         _s_rr_reward = abs(signal.take_profit  - signal.entry_price)
                         _s_rr = _s_rr_reward / max(_s_rr_risk, 1e-9)
-                        if _s_rr < 2.0:
+                        _rr_min_for_sid = 1.2 if _scalp_like else 2.0
+                        if _s_rr < _rr_min_for_sid:
                             logger.info(
-                                f"{sid}: ❌ R:R {_s_rr:.2f} < 2.0 "
+                                f"{sid}: ❌ R:R {_s_rr:.2f} < {_rr_min_for_sid} "
                                 f"(TP={signal.take_profit:.6g} SL={signal.stop_loss:.6g})"
                             )
                             continue
 
-                    # Скальперы SC_* торгуют независимо — не ограничиваем общим лимитом позиций
-                    _is_scalper = sid.startswith("SC_")
-                    _scalp_like = _is_scalper or sid == "S15"
-
                     # Проверка риск-менеджера
-                    if not state.training_mode and not _is_scalper:
-                        check = state.risk_manager.can_open_trade(sid, balance)
-                        if not check["allowed"]:
-                            logger.info(f"{sid}: ❌ {check['reason']}")
-                            continue
+                    # Скальперы SC_* обходят лимит позиций, но уважают дневные стопы
+                    if not state.training_mode:
+                        if _is_scalper:
+                            # Только kill switch и pause (без лимита позиций)
+                            if state.risk_manager.kill_switch:
+                                logger.info(f"{sid}: ❌ KILL SWITCH: {state.risk_manager.kill_switch_reason}")
+                                continue
+                            _pause = state.risk_manager.daily_pause_until
+                            if _pause is not None and datetime.utcnow() < _pause:
+                                _rem = int((_pause - datetime.utcnow()).total_seconds() / 60)
+                                logger.info(f"{sid}: ⏸ Дневная пауза, осталось {_rem} мин")
+                                continue
+                        else:
+                            check = state.risk_manager.can_open_trade(sid, balance)
+                            if not check["allowed"]:
+                                logger.info(f"{sid}: ❌ {check['reason']}")
+                                continue
 
                     # Boost-режим: дополнительные проверки фазы
                     if state.boost.is_active and not state.training_mode and not _is_scalper:
