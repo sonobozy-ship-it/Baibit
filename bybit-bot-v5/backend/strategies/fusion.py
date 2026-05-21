@@ -146,7 +146,11 @@ class StrategyFusion:
         "S8":  ["structure_swing","trend_ema",  "strength_adx"],
         "S9":  ["fibonacci",      "structure_swing", "trend_ema"],
         "S10": ["scalp_ema",      "scalp_rsi",  "volatility_bb"],
-        "S11": ["pattern_candle", "momentum_rsi", "volume"],   # Dragonfly Gold: свечи+RSI+объём
+        "S11": ["pattern_candle", "momentum_rsi", "volume"],   # Dragonfly Gold
+        "S12": ["overbought",     "volatility_bb", "momentum_rsi"],
+        "S13": ["overbought",     "volatility_bb", "momentum_rsi"],
+        "S14": ["overbought",     "volatility_bb", "structure_swing"],
+        "S15": ["aggressive_momentum", "volume", "momentum_rsi"],
     }
 
     # Веса стратегий (выше = заслуживают больше доверия при fusion)
@@ -234,7 +238,10 @@ class StrategyFusion:
         # ── Diversity score ──
         groups_used: set = set()
         for sid in best_signals:
-            groups_used.update(self.INDICATOR_GROUPS.get(sid, []))
+            if sid.startswith("SC_"):
+                groups_used.update(["scalp_ema", "scalp_rsi", "volatility_bb"])
+            else:
+                groups_used.update(self.INDICATOR_GROUPS.get(sid, []))
         all_groups = {g for gs in self.INDICATOR_GROUPS.values() for g in gs}
         diversity_score = min(len(groups_used) / max(len(all_groups), 1), 1.0) if groups_used else 0.0
 
@@ -353,9 +360,16 @@ class StrategyFusion:
             "S7": [],
             "S8": ["uptrend", "downtrend"],
             "S9": ["uptrend", "downtrend"],
-            "S10": ["uptrend", "downtrend", "volatile"],  # ScalperPro: любой тренд
-            "S11": ["flat", "volatile"],                  # DragonflyGold: BB mean-reversion
+            "S10": ["uptrend", "downtrend", "volatile"],
+            "S11": ["flat", "volatile"],
+            "S12": ["volatile", "uptrend", "downtrend"],
+            "S13": ["volatile", "uptrend", "downtrend"],
+            "S14": ["volatile", "uptrend", "downtrend"],
+            "S15": ["uptrend", "downtrend", "volatile"],
         }
+        # SC_* strategies follow scalp-style prefs
+        if sid.startswith("SC_"):
+            return ["uptrend", "downtrend", "volatile"]
         return prefs.get(sid, [])
 
     def get_fusion_features(

@@ -56,15 +56,36 @@ async def main():
     _secret = os.getenv("BYBIT_API_SECRET", "").strip()
     _testnet = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 
-    # Всегда создаём клиент — публичные эндпоинты (klines, ticker, orderbook)
-    # работают без ключей. Ключи нужны только для реальных ордеров.
+    # Determine trading mode and warn if live without confirmation
+    _trading_mode = os.getenv("TRADING_MODE", "paper").lower()
+    state.trading_mode = _trading_mode.upper()
+
+    _live_confirmed = os.getenv("LIVE_TRADING_CONFIRMED", "false").lower() in ("1", "true", "yes")
+    if _trading_mode == "live" and not _live_confirmed:
+        logger.warning(
+            "⚠️  TRADING_MODE=live but LIVE_TRADING_CONFIRMED is not set. "
+            "Operating in safe paper mode. Set LIVE_TRADING_CONFIRMED=true to enable live trading."
+        )
+        _trading_mode = "paper"
+        state.trading_mode = "PAPER"
+
+    # Public-only mode if no keys provided — avoids fake placeholder keys
+    _has_keys = bool(_key and _secret)
+
+    # Always create client — public endpoints (klines, ticker, orderbook)
+    # work without API keys. Keys are only needed for real orders.
     try:
-        state.bybit = BybitClient(_key or "x", _secret or "x", _testnet)
-        if _key and _secret:
+        if _has_keys:
+            state.bybit = BybitClient(_key, _secret, _testnet)
             bal = state.bybit.get_balance("USDT")
-            logger.info(f"✅ Bybit подключён | Баланс: {bal:.2f} USDT")
+            logger.info(f"✅ Bybit подключён | Баланс: {bal:.2f} USDT | Режим: {state.trading_mode}")
         else:
+            # Use public-only mode: pass empty strings so BybitClient skips auth
+            state.bybit = BybitClient("", "", _testnet)
             logger.info("📡 Bybit: публичные данные (ключи не заданы — только paper mode)")
+            if not state.paper_mode:
+                state.paper_mode = True
+                logger.info("📄 Paper mode автоматически включён (нет API ключей)")
     except Exception as e:
         logger.error(f"❌ Bybit инициализация: {e}")
 

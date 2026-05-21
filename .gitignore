@@ -1,7 +1,10 @@
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.pyc
 .Python
 *.egg-info/
 dist/

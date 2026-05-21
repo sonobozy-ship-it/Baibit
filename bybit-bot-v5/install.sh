@@ -20,9 +20,10 @@ apt-get install -y -qq python3 python3-pip python3-venv git curl build-essential
 # ── 2. MySQL ───────────────────────────────────────────────────
 echo "[2/6] Настройка MySQL..."
 systemctl enable --now mysql 2>/dev/null || true
+MYSQL_PASS="${MYSQL_PASSWORD:-YOUR_MYSQL_PASSWORD}"
 mysql -u root -e "
 CREATE DATABASE IF NOT EXISTS baibit CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS 'baibit'@'localhost' IDENTIFIED BY '73501505aAaA!';
+CREATE USER IF NOT EXISTS 'baibit'@'localhost' IDENTIFIED BY '${MYSQL_PASS}';
 GRANT ALL PRIVILEGES ON baibit.* TO 'baibit'@'localhost';
 FLUSH PRIVILEGES;
 " 2>/dev/null || true
@@ -50,22 +51,22 @@ mkdir -p backend/data/candles backend/data/features backend/data/models backend/
 if [ -f backend/.env ]; then
     echo "    .env уже существует — ключи сохранены"
 else
-cat > backend/.env << 'ENVEOF'
-BYBIT_API_KEY=
-BYBIT_API_SECRET=
+cat > backend/.env << ENVEOF
+BYBIT_API_KEY=${BYBIT_API_KEY:-YOUR_BYBIT_API_KEY}
+BYBIT_API_SECRET=${BYBIT_API_SECRET:-YOUR_BYBIT_API_SECRET}
 BYBIT_TESTNET=false
 
-ANTHROPIC_API_KEY=
-OPENAI_API_KEY=
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+OPENAI_API_KEY=${OPENAI_API_KEY:-}
 OLLAMA_BASE_URL=
 
-TELEGRAM_TOKEN=8865970945:AAEeRQMJ2YsHoRULyM9a727nygg3TphjSqc
-TELEGRAM_CHAT_ID=872119694
+TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-YOUR_TELEGRAM_BOT_TOKEN}
+TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-YOUR_TELEGRAM_CHAT_ID}
 
 MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
 MYSQL_USER=baibit
-MYSQL_PASSWORD=73501505aAaA!
+MYSQL_PASSWORD=${MYSQL_PASS}
 MYSQL_DATABASE=baibit
 
 CRYPTOPANIC_API_KEY=

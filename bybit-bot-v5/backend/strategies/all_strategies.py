@@ -515,252 +515,205 @@ class BreakoutHunterStrategy(BaseStrategy):
 
 
 # ============================================================
-# S5: STRUCTURE SCALPER — вход только по структуре + 3+ подтверждения
+# S5: STRICT MEAN-REVERSION — BB rejection in flat market
 # ============================================================
 class ScalperGridStrategy(BaseStrategy):
     ID = "S5"
     NAME = "SCALPER GRID"
-    DESCRIPTION = "Структурный скальпер: уровни 2+ касания, 3+ подтверждений, без чистых ATR-входов"
-    REGIME_PREFERENCE = []
+    DESCRIPTION = "Строгий mean-reversion: отказ от края Bollinger в плоском рынке"
+    REGIME_PREFERENCE = ["flat"]
 
     def __init__(self, **kwargs):
         super().__init__(
-            stop_loss_pct=1.0,
-            take_profit_pct=2.0,
-            edge_wr_target=0.55,
+            stop_loss_pct=0.5,
+            take_profit_pct=1.0,
+            edge_wr_target=0.60,
             timeframe="5",
             **kwargs,
         )
+        self.max_hold_minutes = 45
 
-    # ── уровни поддержки / сопротивления ─────────────────────────────────────
-    def _find_levels(self, df: pd.DataFrame, atr: float):
-        highs = df["high"].values
-        lows  = df["low"].values
-        tol   = atr * 0.6
-
-        swing_highs, swing_lows = [], []
-        for i in range(2, len(highs) - 2):
-            if highs[i] >= max(highs[i-2], highs[i-1], highs[i+1], highs[i+2]):
-                swing_highs.append(highs[i])
-            if lows[i]  <= min(lows[i-2],  lows[i-1],  lows[i+1],  lows[i+2]):
-                swing_lows.append(lows[i])
-
-        def cluster(vals):
-            if not vals:
-                return []
-            result, group = [], [sorted(vals)[0]]
-            for v in sorted(vals)[1:]:
-                if v - group[0] <= tol:
-                    group.append(v)
-                else:
-                    if len(group) >= 2:
-                        result.append(sum(group) / len(group))
-                    group = [v]
-            if len(group) >= 2:
-                result.append(sum(group) / len(group))
-            return result
-
-        return cluster(swing_lows), cluster(swing_highs)
-
-    # ── факел (длинная тень) ──────────────────────────────────────────────────
-    @staticmethod
-    def _wick_type(c: pd.Series) -> str:
-        body  = abs(float(c["close"]) - float(c["open"]))
-        hi    = float(c["high"])
-        lo    = float(c["low"])
-        upper = hi - max(float(c["close"]), float(c["open"]))
-        lower = min(float(c["close"]), float(c["open"])) - lo
-        if body < 1e-9:
-            return ""
-        if lower > body * 2 and lower > upper * 1.2:
-            return "bullish"
-        if upper > body * 2 and upper > lower * 1.2:
-            return "bearish"
-        return ""
-
-    # ── ложный пробой ─────────────────────────────────────────────────────────
-    def _fake_breakout(self, df: pd.DataFrame, levels: list, side: str, atr: float) -> bool:
-        if len(df) < 4 or not levels:
-            return False
-        recent = df.iloc[-4:]
-        close_now = float(df.iloc[-1]["close"])
-        for lvl in levels:
-            if side == "support":
-                if any(recent["low"] < lvl - atr * 0.05) and close_now > lvl:
-                    return True
-            else:
-                if any(recent["high"] > lvl + atr * 0.05) and close_now < lvl:
-                    return True
-        return False
-
-    # ── ближайший уровень ─────────────────────────────────────────────────────
-    @staticmethod
-    def _nearest(price: float, levels: list, atr: float) -> float:
-        for lvl in sorted(levels, key=lambda x: abs(x - price)):
-            if abs(price - lvl) <= atr * 0.5:
-                return lvl
-        return 0.0
-
-    # ── MACD ─────────────────────────────────────────────────────────────────
-    @staticmethod
-    def _macd_confirm(df: pd.DataFrame, side: str) -> bool:
-        try:
-            macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-            if macd is None or macd.empty:
-                return False
-            hist_col = [c for c in macd.columns if "h" in c.lower() or "hist" in c.lower()]
-            if not hist_col:
-                return False
-            h = macd[hist_col[0]]
-            if side == "BUY":
-                return float(h.iloc[-1]) > float(h.iloc[-2])   # гистограмма растёт
-            else:
-                return float(h.iloc[-1]) < float(h.iloc[-2])   # гистограмма падает
-        except Exception:
-            return False
-
-    # ── главный метод ─────────────────────────────────────────────────────────
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 100:
+        if len(df) < 80:
             return None
         df = df.copy()
 
+        # ── Indicators ──────────────────────────────────────────────────────
         df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["ema20"]  = ta.ema(df["close"], length=20)
+        df["ema50"]  = ta.ema(df["close"], length=50)
         df["rsi"]    = ta.rsi(df["close"], length=14)
-        df["ema_20"] = ta.ema(df["close"], length=20)
-        df["ema_50"] = ta.ema(df["close"], length=50)
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
-        last   = df.iloc[-1]
-        price  = float(last["close"])
-        atr    = float(last["atr"])   if not pd.isna(last["atr"])    else 0.0
-        rsi    = float(last["rsi"])   if not pd.isna(last["rsi"])    else 50.0
-        vol    = float(last["volume"])
-        vol_ma = float(last["vol_ma"]) if not pd.isna(last["vol_ma"]) else vol
-        ema20  = float(last["ema_20"]) if not pd.isna(last["ema_20"]) else price
-        ema50  = float(last["ema_50"]) if not pd.isna(last["ema_50"]) else price
+        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+        if adx_df is not None:
+            df = df.join(adx_df)
 
-        if atr == 0 or price == 0:
+        bb = ta.bbands(df["close"], length=20, std=2)
+        if bb is not None:
+            df = df.join(bb)
+
+        last  = df.iloc[-1]
+        prev  = df.iloc[-2]
+
+        # Extract values — guard NaN
+        close  = float(last["close"])
+        open_  = float(last["open"])
+        high   = float(last["high"])
+        low    = float(last["low"])
+        atr    = float(last["atr"])   if not pd.isna(last.get("atr",   float("nan"))) else 0.0
+        ema20  = float(last["ema20"]) if not pd.isna(last.get("ema20", float("nan"))) else close
+        ema50  = float(last["ema50"]) if not pd.isna(last.get("ema50", float("nan"))) else close
+        rsi    = float(last["rsi"])   if not pd.isna(last.get("rsi",   float("nan"))) else 50.0
+        prev_rsi = float(prev["rsi"]) if not pd.isna(prev.get("rsi",   float("nan"))) else 50.0
+        volume = float(last["volume"])
+        vol_ma = float(last["vol_ma"]) if not pd.isna(last.get("vol_ma", float("nan"))) else volume
+
+        # ADX
+        adx_col = next((c for c in df.columns if c.startswith("ADX_")), None)
+        if adx_col is None:
+            return None
+        adx = float(last[adx_col]) if not pd.isna(last.get(adx_col, float("nan"))) else 99.0
+
+        # BB columns
+        bbl_col = next((c for c in df.columns if c.startswith("BBL_")), None)
+        bbu_col = next((c for c in df.columns if c.startswith("BBU_")), None)
+        bbm_col = next((c for c in df.columns if c.startswith("BBM_")), None)
+        if not bbl_col or not bbu_col or not bbm_col:
+            return None
+        bbl = float(last[bbl_col]) if not pd.isna(last.get(bbl_col, float("nan"))) else 0.0
+        bbu = float(last[bbu_col]) if not pd.isna(last.get(bbu_col, float("nan"))) else 0.0
+        bbm = float(last[bbm_col]) if not pd.isna(last.get(bbm_col, float("nan"))) else close
+
+        if atr <= 0 or close <= 0 or bbl <= 0 or bbu <= 0:
             return None
 
-        # ATR должен быть достаточным для покрытия комиссий
-        atr_pct = atr / price * 100
-        if atr_pct < 0.25:
-            return None
+        # ── FLAT MARKET FILTERS ──────────────────────────────────────────────
+        atr_pct = atr / close * 100
 
-        # Поиск структурных уровней (последние 100 свечей)
-        support_lvls, resist_lvls = self._find_levels(df.iloc[-100:], atr)
-        if not support_lvls and not resist_lvls:
-            return None
+        # 1. ATR range: 0.12% to 1.20%
+        tradable_atr = 0.12 <= atr_pct <= 1.20
 
-        buy_lvl  = self._nearest(price, support_lvls, atr)
-        sell_lvl = self._nearest(price, resist_lvls,  atr)
+        # 2. EMA20 and EMA50 close together
+        flat_ema = abs(ema20 - ema50) / close * 100 < 0.45
 
-        # Цена должна быть у одного уровня, не в середине диапазона
-        if buy_lvl and sell_lvl:
-            return None
-        if not buy_lvl and not sell_lvl:
-            return None
+        # 3. EMA50 slope < 0.35% over last 10 candles
+        if len(df) >= 11:
+            ema50_10 = float(df["ema50"].iloc[-11])
+            ema50_slope_pct = abs(ema50 - ema50_10) / max(ema50_10, 1e-9) * 100
+        else:
+            ema50_slope_pct = 99.0
+        flat_slope = ema50_slope_pct < 0.35
 
-        side    = "BUY" if buy_lvl else "SELL"
-        lvl     = buy_lvl or sell_lvl
-        fake_bo = self._fake_breakout(
-            df, support_lvls if side == "BUY" else resist_lvls,
-            "support" if side == "BUY" else "resistance", atr
+        # 4. BB width in range
+        bbw = (bbu - bbl) / close
+        range_width = 0.006 <= bbw <= 0.045
+
+        # 5. ADX < 16
+        adx_flat = adx < 16
+
+        # 6. ADX not accelerating: last ADX <= mean of previous 5 + 1.0
+        if adx_col and len(df) >= 7:
+            prev5_adx = df[adx_col].iloc[-7:-2].dropna()
+            adx_mean5 = float(prev5_adx.mean()) if len(prev5_adx) > 0 else adx
+            adx_not_rising = adx <= adx_mean5 + 1.0
+        else:
+            adx_not_rising = True
+
+        # 7. Volume in normal range: 0.45 to 1.25 of MA
+        normal_volume = (vol_ma > 0) and (0.45 * vol_ma <= volume <= 1.25 * vol_ma)
+
+        flat_filters_pass = (
+            tradable_atr and flat_ema and flat_slope
+            and range_width and adx_flat and adx_not_rising and normal_volume
         )
-
-        # ── 8 подтверждений ──────────────────────────────────────────────────
-        checks = {}
-
-        # 1. Структурный уровень (уже гарантирован выше)
-        checks["structure"] = True
-
-        # 2. Свеча подтверждения (текущая закрылась в нужную сторону)
-        if side == "BUY":
-            checks["confirm_candle"] = float(last["close"]) > float(last["open"])
-        else:
-            checks["confirm_candle"] = float(last["close"]) < float(last["open"])
-
-        # 3. Объём × 1.3 от среднего
-        checks["volume"] = vol > vol_ma * 1.3
-
-        # 4. RSI не на экстремуме, подтверждает направление
-        if side == "BUY":
-            checks["rsi"] = 25 < rsi < 62
-        else:
-            checks["rsi"] = 38 < rsi < 75
-
-        # 5. Факел в нужную сторону
-        wick = self._wick_type(last)
-        checks["wick"] = (wick == "bullish") if side == "BUY" else (wick == "bearish")
-
-        # 6. Ложный пробой
-        checks["fake_breakout"] = fake_bo
-
-        # 7. EMA не против входа (допускаем небольшое отклонение)
-        if side == "BUY":
-            checks["ema_align"] = ema20 >= ema50 * 0.993
-        else:
-            checks["ema_align"] = ema20 <= ema50 * 1.007
-
-        # 8. MACD-гистограмма в нужном направлении
-        checks["macd"] = self._macd_confirm(df, side)
-
-        conf_count = sum(1 for v in checks.values() if v)
-
-        # Адаптивный порог по серии убытков
-        if self.consecutive_losses >= 4:
-            min_conf = 5   # SAFE: только A+ сигналы
-        elif self.consecutive_losses >= 3:
-            min_conf = 4
-        else:
-            min_conf = 3
-
-        if conf_count < min_conf:
+        if not flat_filters_pass:
             return None
 
-        # ── SL за структурой + 0.2 ATR буфер, минимум 0.8 ATR ───────────────
-        if side == "BUY":
-            sl_struct = lvl - atr * 0.2
-            sl_min    = price - atr * 0.8
-            sl        = min(sl_struct, sl_min)
-            risk      = price - sl
-            tp        = price + risk * 2.0   # RR 2:1 минимум
-        else:
-            sl_struct = lvl + atr * 0.2
-            sl_min    = price + atr * 0.8
-            sl        = max(sl_struct, sl_min)
-            risk      = sl - price
-            tp        = price - risk * 2.0
+        # ── REJECTION CANDLE DETECTION ───────────────────────────────────────
+        candle_range = high - low
+        buy_setup  = False
+        sell_setup = False
 
-        # Проверяем что TP не слишком близко (должен покрыть комиссии × 3)
-        tp_pct = abs(tp - price) / price * 100
-        if tp_pct < 0.4:
+        # BUY setup: lower BB rejection
+        if (
+            low <= bbl * 1.003          # touches/pierces lower BB
+            and close > bbl             # closes back above lower BB
+            and candle_range > 0
+            and (min(open_, close) - low) > 0.3 * candle_range   # lower wick
+            and abs(close - open_) < atr * 0.6                    # body not too large
+            and prev_rsi < 38
+            and rsi > prev_rsi + 1.0
+            and rsi < 48
+        ):
+            buy_setup = True
+
+        # SELL setup: upper BB rejection
+        if (
+            high >= bbu * 0.997         # touches/pierces upper BB
+            and close < bbu             # closes back below upper BB
+            and candle_range > 0
+            and (high - max(open_, close)) > 0.3 * candle_range   # upper wick
+            and abs(close - open_) < atr * 0.6
+            and prev_rsi > 62
+            and rsi < prev_rsi - 1.0
+            and rsi > 52
+        ):
+            sell_setup = True
+
+        if not (buy_setup or sell_setup):
+            return None
+        if buy_setup and sell_setup:
+            buy_setup = (rsi < 50)
+            sell_setup = not buy_setup
+
+        side = "BUY" if buy_setup else "SELL"
+        entry = close
+
+        # ── SL / TP ──────────────────────────────────────────────────────────
+        if side == "BUY":
+            sl_price = min(float(df.iloc[-12:]["low"].min()), low) - atr * 0.20
+            tp_price = bbm
+        else:
+            sl_price = max(float(df.iloc[-12:]["high"].max()), high) + atr * 0.20
+            tp_price = bbm
+
+        # ── RISK CHECKS ──────────────────────────────────────────────────────
+        risk   = abs(entry - sl_price)
+        reward = abs(tp_price - entry)
+        if risk <= 0:
+            return None
+        rr = reward / risk
+        risk_pct = risk / entry * 100
+
+        if risk_pct < 0.18 or risk_pct > 0.75 or rr < 1.55:
             return None
 
-        # confidence: вклад подтверждений + бонус за приоритетные паттерны
-        conf = conf_count / 8.0
-        if checks["fake_breakout"]: conf = min(1.0, conf + 0.15)
-        if checks["wick"]:          conf = min(1.0, conf + 0.10)
+        filters_passed = {
+            "tradable_atr":  tradable_atr,
+            "flat_ema":      flat_ema,
+            "flat_slope":    flat_slope,
+            "range_width":   range_width,
+            "adx_flat":      adx_flat,
+            "normal_volume": normal_volume,
+            "rsi_reversion": True,
+            "rr":            round(rr, 2),
+        }
 
-        parts = []
-        if checks["fake_breakout"]: parts.append("FakeBO")
-        if checks["wick"]:          parts.append(f"Wick({wick})")
-        parts.append(f"Lvl@{lvl:.5g}")
-        parts.append(f"{conf_count}/8conf")
-        parts.append(f"RSI={rsi:.0f}")
-        if self.consecutive_losses >= 3:
-            parts.append(f"SAFE(loss={self.consecutive_losses})")
+        reason = (
+            f"Strict range rejection {'BUY lower BB' if buy_setup else 'SELL upper BB'} "
+            f"| ATR {atr_pct:.2f}% | ADX {adx:.1f} | RR {rr:.2f}"
+        )
 
         return TradingSignal(
             action=side,
             symbol=self.symbol,
-            confidence=round(conf, 2),
-            entry_price=price,
-            stop_loss=round(sl, 8),
-            take_profit=round(tp, 8),
-            reason=" | ".join(parts),
-            filters_passed=checks,
+            confidence=0.74,
+            entry_price=entry,
+            stop_loss=round(sl_price, 8),
+            take_profit=round(tp_price, 8),
+            reason=reason,
+            filters_passed=filters_passed,
         )
 
 
@@ -944,8 +897,8 @@ class MultiConfirmStrategy(BaseStrategy):
         long_score  = sum(long_filters.values())
         short_score = sum(short_filters.values())
 
-        long_setup  = long_score >= 5
-        short_setup = short_score >= 5
+        long_setup  = long_score >= 6
+        short_setup = short_score >= 6
 
         if not (long_setup or short_setup):
             return None
@@ -978,7 +931,7 @@ class MultiConfirmStrategy(BaseStrategy):
         if rr < 2.2:
             return None
 
-        conf = 0.80 + 0.03 * (score - 5)
+        conf = 0.80 + 0.03 * (score - 6)
         if wick == ("bullish" if side == "BUY" else "bearish"):
             conf = min(0.95, conf + 0.05)
 
@@ -1251,14 +1204,14 @@ class OverboughtShortStrategy(BaseStrategy):
 
         # ── SELL: RSI разворачивается вниз от перегрева ────────────
         sell = (
-            rsi0 > 58 and rsi0 < rsi1          # RSI высокий и начинает падать
+            rsi0 > 62 and rsi0 < rsi1          # RSI высокий и начинает падать
             and c >= bbu * 0.997               # цена у верхней BB или выше
             and last["MACDh_12_26_9"] < prev["MACDh_12_26_9"]  # MACD гистограмма падает
         )
 
         # ── BUY: зеркально — RSI разворачивается вверх от перепроданности ──
         buy = (
-            rsi0 < 42 and rsi0 > rsi1          # RSI низкий и начинает расти
+            rsi0 < 38 and rsi0 > rsi1          # RSI низкий и начинает расти
             and c <= bbl * 1.003               # цена у нижней BB или ниже
             and last["MACDh_12_26_9"] > prev["MACDh_12_26_9"]  # MACD гистограмма растёт
         )
@@ -1268,7 +1221,7 @@ class OverboughtShortStrategy(BaseStrategy):
 
         # Если оба — выбираем более сильный сигнал
         if sell and buy:
-            sell_strength = rsi0 - 62
+            sell_strength = rsi0 - 62   # thresholds 62 for sell, 38 for buy
             buy_strength  = 38 - rsi0
             if sell_strength >= buy_strength:
                 buy = False

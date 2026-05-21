@@ -171,15 +171,45 @@ class TradeJournal:
     def update_trade_close(self, trade_id: int, exit_price: float, pnl_usd: float,
                            pnl_pct: float, exit_reason: str, fees: float = 0,
                            r_multiple: float = 0):
+        closed_at = datetime.utcnow()
+
+        # Compute duration_sec from opened_at stored in DB
+        duration_sec = 0
+        try:
+            row_sql = self.pool.adapt(
+                "SELECT opened_at FROM trades WHERE id = ?"
+            )
+            with self.pool.connection() as conn:
+                if self.pool.is_mysql:
+                    with conn.cursor() as cur:
+                        cur.execute(row_sql, [trade_id])
+                        row = cur.fetchone()
+                        opened_at_raw = row["opened_at"] if row else None
+                else:
+                    row = conn.execute(row_sql, [trade_id]).fetchone()
+                    opened_at_raw = row[0] if row else None
+
+            if opened_at_raw:
+                opened_dt = datetime.fromisoformat(
+                    str(opened_at_raw).replace("Z", "+00:00")
+                )
+                # Ensure both datetimes are naive (UTC) for subtraction
+                if opened_dt.tzinfo is not None:
+                    opened_dt = opened_dt.replace(tzinfo=None)
+                duration_sec = max(0, int((closed_at - opened_dt).total_seconds()))
+        except Exception as _dur_err:
+            logger.debug(f"[Journal] duration_sec calc error for trade {trade_id}: {_dur_err}")
+
         sql = self.pool.adapt("""
             UPDATE trades
             SET exit_price=?, pnl_usd=?, pnl_pct=?,
-                exit_reason=?, fees=?, r_multiple=?, closed_at=?
+                exit_reason=?, fees=?, r_multiple=?, closed_at=?, duration_sec=?
             WHERE id=?
         """)
         with self.pool.cursor() as c:
             c.execute(sql, (exit_price, pnl_usd, pnl_pct, exit_reason,
-                            fees, r_multiple, datetime.utcnow().isoformat(), trade_id))
+                            fees, r_multiple, closed_at.isoformat(),
+                            duration_sec, trade_id))
 
     # ── чтение ────────────────────────────────────────────────
 

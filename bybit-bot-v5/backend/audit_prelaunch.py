@@ -8,9 +8,12 @@ import subprocess
 import traceback
 import importlib
 import stat
+from pathlib import Path
 
-sys.path.insert(0, '/home/user/Baibit/bybit-bot-v5/backend/')
-os.chdir('/home/user/Baibit/bybit-bot-v5/backend/')
+# Use paths relative to this script's directory
+BASE_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(BASE_DIR))
+os.chdir(str(BASE_DIR))
 
 import pandas as pd
 import numpy as np
@@ -48,7 +51,7 @@ print("CHECK 1: Syntax check all .py files")
 print("="*60)
 
 import glob
-py_files = glob.glob('/home/user/Baibit/bybit-bot-v5/backend/**/*.py', recursive=True)
+py_files = glob.glob(str(BASE_DIR / '**' / '*.py'), recursive=True)
 syntax_errors = []
 for f in sorted(py_files):
     try:
@@ -343,7 +346,7 @@ print("\n" + "="*60)
 print("CHECK 10: main.py references")
 print("="*60)
 
-main_py = open('/home/user/Baibit/bybit-bot-v5/backend/main.py').read()
+main_py = open(str(BASE_DIR / 'main.py')).read()
 
 checks_main = {
     "ALL_STRATEGIES":    "ALL_STRATEGIES" in main_py,
@@ -368,8 +371,8 @@ print("CHECK 11: deploy.sh")
 print("="*60)
 
 deploy_paths = [
-    "/home/user/Baibit/bybit-bot-v5/deploy.sh",
-    "/home/user/Baibit/deploy.sh",
+    str(BASE_DIR.parent / "deploy.sh"),
+    str(BASE_DIR.parent.parent / "deploy.sh"),
 ]
 
 for dpath in deploy_paths:
@@ -390,7 +393,7 @@ print("\n" + "="*60)
 print("CHECK 12: .gitignore coverage")
 print("="*60)
 
-gitignore_path = "/home/user/Baibit/.gitignore"
+gitignore_path = str(BASE_DIR.parent.parent / ".gitignore")
 try:
     gitignore = open(gitignore_path).read()
     runtime_checks = {

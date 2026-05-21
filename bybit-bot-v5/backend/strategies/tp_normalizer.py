@@ -2,12 +2,15 @@
 normalize_take_profit() — общий модуль нормализации TP для всех стратегий.
 Применяется ПОСЛЕ генерации сигнала, ДО открытия позиции.
 
-Правила:
-  1. TP = min(ATR*0.5, distance_to_level*0.6, avg_body*1.5)   [scalp: ATR*0.35, level*0.5]
-  2. Кеп: TP не дальше ATR*0.7   [scalp: ATR*0.35]
-  3. Блокирует вход если до resistance/support < ATR*0.5
-  4. Минимум: TP не ближе чем 0.5R (risk)
-  5. Логирует детали по каждому решению
+Правила (RR enforcement):
+  1. sl_dist = abs(entry - stop_loss)
+  2. min_rr: scalp-like = 1.2, normal = 1.5
+  3. min_tp_dist = sl_dist * min_rr
+  4. Find nearest resistance (BUY) or support (SELL) in last 100 candles
+  5. max_allowed_dist = dist_to_level * (0.70 for scalp, 0.80 for normal)
+  6. new_tp_dist = min(original_tp_dist, max_allowed_dist)
+  7. If new_tp_dist < min_tp_dist: log reason and return None (block trade)
+  8. Otherwise adjust TP only if it makes it more conservative
 """
 import logging
 from typing import Optional
@@ -39,19 +42,14 @@ def _calc_atr(df: pd.DataFrame, length: int = 14) -> float:
     return float(hl.mean()) if len(hl) > 0 else 0.0
 
 
-def _find_levels(df: pd.DataFrame, n_bars: int = 50) -> tuple:
-    """Ближайший resistance (max high) и support (min low) за последние n_bars свечей."""
-    recent = df.iloc[-n_bars:-1]  # исключаем текущую свечу
+def _find_levels(df: pd.DataFrame, n_bars: int = 100) -> tuple:
+    """Nearest resistance (max high) and support (min low) over last n_bars candles."""
+    recent = df.iloc[-n_bars:-1]  # exclude current candle
     if recent.empty:
         recent = df.iloc[-n_bars:]
     resistance = float(recent["high"].max())
     support = float(recent["low"].min())
     return resistance, support
-
-
-def _avg_candle_body(df: pd.DataFrame, n: int = 20) -> float:
-    bodies = abs(df["close"] - df["open"]).iloc[-n:]
-    return float(bodies.mean()) if len(bodies) > 0 else 0.0
 
 
 def normalize_take_profit(
@@ -60,85 +58,89 @@ def normalize_take_profit(
     scalp_mode: bool = False,
 ) -> Optional[TradingSignal]:
     """
-    Нормализует TP сигнала по общим правилам.
+    Normalises TP using RR enforcement.
 
-    Возвращает None если вход заблокирован (слишком близко к уровню).
-    Возвращает сигнал с скорректированным take_profit.
+    Returns None if the trade should be blocked (RR cannot be met).
+    Returns the signal with an adjusted take_profit otherwise.
     """
     if df is None or len(df) < 20:
         return signal
 
     entry = signal.entry_price
     side = signal.action  # "BUY" or "SELL"
+    sl_dist = abs(entry - signal.stop_loss)
 
-    atr = _calc_atr(df)
-    if atr <= 0:
+    if sl_dist <= 0:
         return signal
 
-    resistance, support = _find_levels(df)
-    avg_body = _avg_candle_body(df)
-    sl_dist = abs(entry - signal.stop_loss)
-    original_tp = signal.take_profit
+    # RR minimums
+    min_rr = 1.2 if scalp_mode else 1.5
+    min_tp_dist = sl_dist * min_rr
 
-    # Мультипликаторы ATR для скальп-режима vs обычного
-    atr_tp_mult = 0.35 if scalp_mode else 0.5
-    atr_cap_mult = 0.35 if scalp_mode else 0.7
-    level_dist_mult = 0.5 if scalp_mode else 0.6
+    # Level proximity factor
+    level_mult = 0.70 if scalp_mode else 0.80
+
+    resistance, support = _find_levels(df, n_bars=100)
+    original_tp = signal.take_profit
+    original_tp_dist = abs(original_tp - entry)
 
     if side == "BUY":
         dist_to_level = resistance - entry
-
-        # Фильтр качества входа: слишком близко к resistance
-        if dist_to_level <= 0 or dist_to_level < atr * 0.5:
+        if dist_to_level <= 0:
             logger.info(
-                f"[TP_NORM] {signal.symbol} LONG заблокирован — "
-                f"до resistance {dist_to_level:.6f} < ATR*0.5={atr*0.5:.6f}"
+                f"[TP_NORM] {signal.symbol} LONG blocked — "
+                f"price already above resistance {resistance:.6f}"
             )
             return None
 
-        # Кандидаты TP (дистанция от entry)
-        candidates = [atr * atr_tp_mult, dist_to_level * level_dist_mult]
-        if not scalp_mode and avg_body > 0:
-            candidates.append(avg_body * 1.5)
+        max_allowed_dist = dist_to_level * level_mult
+        new_tp_dist = min(original_tp_dist, max_allowed_dist)
 
-        new_tp_dist = min(c for c in candidates if c > 0)
-        new_tp_dist = min(new_tp_dist, atr * atr_cap_mult)  # кеп
-        new_tp_dist = max(new_tp_dist, sl_dist * 0.5)       # минимум 0.5R
+        if new_tp_dist < min_tp_dist:
+            logger.info(
+                f"[TP_NORM] {signal.symbol} LONG blocked — "
+                f"new_tp_dist={new_tp_dist:.6f} < min_tp_dist={min_tp_dist:.6f} "
+                f"(RR={new_tp_dist/sl_dist:.2f} < {min_rr}) "
+                f"dist_to_res={dist_to_level:.6f} scalp={scalp_mode}"
+            )
+            return None
 
         new_tp = entry + new_tp_dist
-
-        # Корректируем только если новый TP ближе (консервативнее) чем оригинал
+        # Only adjust if new TP is more conservative (closer)
         if new_tp < original_tp:
             signal.take_profit = round(new_tp, 8)
 
     else:  # SELL
         dist_to_level = entry - support
-
-        if dist_to_level <= 0 or dist_to_level < atr * 0.5:
+        if dist_to_level <= 0:
             logger.info(
-                f"[TP_NORM] {signal.symbol} SHORT заблокирован — "
-                f"до support {dist_to_level:.6f} < ATR*0.5={atr*0.5:.6f}"
+                f"[TP_NORM] {signal.symbol} SHORT blocked — "
+                f"price already below support {support:.6f}"
             )
             return None
 
-        candidates = [atr * atr_tp_mult, dist_to_level * level_dist_mult]
-        if not scalp_mode and avg_body > 0:
-            candidates.append(avg_body * 1.5)
+        max_allowed_dist = dist_to_level * level_mult
+        new_tp_dist = min(original_tp_dist, max_allowed_dist)
 
-        new_tp_dist = min(c for c in candidates if c > 0)
-        new_tp_dist = min(new_tp_dist, atr * atr_cap_mult)
-        new_tp_dist = max(new_tp_dist, sl_dist * 0.5)
+        if new_tp_dist < min_tp_dist:
+            logger.info(
+                f"[TP_NORM] {signal.symbol} SHORT blocked — "
+                f"new_tp_dist={new_tp_dist:.6f} < min_tp_dist={min_tp_dist:.6f} "
+                f"(RR={new_tp_dist/sl_dist:.2f} < {min_rr}) "
+                f"dist_to_sup={dist_to_level:.6f} scalp={scalp_mode}"
+            )
+            return None
 
         new_tp = entry - new_tp_dist
-
+        # Only adjust if new TP is more conservative (closer to entry for short)
         if new_tp > original_tp:
             signal.take_profit = round(new_tp, 8)
 
-    rr = abs(signal.take_profit - entry) / sl_dist if sl_dist > 0 else 0
+    actual_rr = abs(signal.take_profit - entry) / sl_dist if sl_dist > 0 else 0
     logger.debug(
         f"[TP_NORM] {signal.symbol} {side} entry={entry:.6f} "
         f"tp_orig={original_tp:.6f} → tp_adj={signal.take_profit:.6f} "
-        f"RR={rr:.2f} ATR={atr:.6f} "
+        f"RR={actual_rr:.2f} sl_dist={sl_dist:.6f} "
         f"res={resistance:.6f} sup={support:.6f} scalp={scalp_mode}"
     )
 

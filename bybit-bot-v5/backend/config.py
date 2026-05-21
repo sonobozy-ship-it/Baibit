@@ -30,24 +30,24 @@ def _bool(key: str, default: bool) -> bool:
 MONITOR_INTERVAL_SECONDS: int   = _int("MONITOR_INTERVAL_SECONDS", 5)
 
 # Close at X% of planned TP profit (USDT)
-TP_CLOSE_PERCENT: float         = _float("TP_CLOSE_PERCENT", 50.0)
+TP_CLOSE_PERCENT: float         = _float("TP_CLOSE_PERCENT", 80.0)
 
 # Arm trailing profit protection after reaching this PnL (USDT)
-MIN_PROFIT_ARM_USDT: float      = _float("MIN_PROFIT_ARM_USDT", 0.25)
+MIN_PROFIT_ARM_USDT: float      = _float("MIN_PROFIT_ARM_USDT", 0.75)
 
 # Close if PnL drops X% from its max after being armed
-TRAILING_DROP_PERCENT: float    = _float("TRAILING_DROP_PERCENT", 30.0)
+TRAILING_DROP_PERCENT: float    = _float("TRAILING_DROP_PERCENT", 45.0)
 
 # Close if price has travelled X% of the way to TP
-CLOSE_NEAR_TP: float            = _float("CLOSE_NEAR_TP", 80.0)
+CLOSE_NEAR_TP: float            = _float("CLOSE_NEAR_TP", 90.0)
 
 # Close timed-out positions if PnL < this (USDT)
 MAX_POSITION_MINUTES: int       = _int("MAX_POSITION_MINUTES", 360)
 MIN_EXPECTED_PROFIT: float      = _float("MIN_EXPECTED_PROFIT", 0.10)
 
 # Anti profit-return: if PnL was > this threshold, then drops X% → close
-ANTI_RETURN_ARM_USDT: float     = _float("ANTI_RETURN_ARM_USDT", 0.50)
-ANTI_RETURN_DROP_PCT: float     = _float("ANTI_RETURN_DROP_PCT", 40.0)
+ANTI_RETURN_ARM_USDT: float     = _float("ANTI_RETURN_ARM_USDT", 1.00)
+ANTI_RETURN_DROP_PCT: float     = _float("ANTI_RETURN_DROP_PCT", 50.0)
 
 # ── Risk Management ──────────────────────────────────────────────────────────
 MAX_RISK_PER_TRADE_USDT: float  = _float("MAX_RISK_PER_TRADE_USDT", 5.0)

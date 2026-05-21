@@ -23,14 +23,18 @@ except ImportError:
 try:
     import xgboost as xgb
     XGB_AVAILABLE = True
-except ImportError:
+except Exception:
+    xgb = None
     XGB_AVAILABLE = False
+    logger.warning("XGBoost недоступен. Модель отключена.")
 
 try:
     import lightgbm as lgb
     LGB_AVAILABLE = True
-except ImportError:
+except Exception:
+    lgb = None
     LGB_AVAILABLE = False
+    logger.warning("LightGBM недоступен (возможно, нет libomp). Модель отключена.")
 
 
 class AnomalyDetector:
@@ -161,14 +165,14 @@ class EnsembleTrainer:
 
         # Базовые модели
         estimators = []
-        if XGB_AVAILABLE:
+        if XGB_AVAILABLE and xgb is not None:
             estimators.append(("xgb", xgb.XGBClassifier(
                 max_depth=4, learning_rate=0.05, n_estimators=150,
                 min_child_weight=3, subsample=0.8, colsample_bytree=0.8,
                 scale_pos_weight=scale_pos, eval_metric="logloss",
                 random_state=42, verbosity=0,
             )))
-        if LGB_AVAILABLE:
+        if LGB_AVAILABLE and lgb is not None:
             estimators.append(("lgb", lgb.LGBMClassifier(
                 max_depth=4, learning_rate=0.05, n_estimators=150,
                 min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
