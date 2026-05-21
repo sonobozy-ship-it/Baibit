@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 class RiskManager:
     def __init__(
         self,
-        daily_max_loss_pct: float = 2.0,        # 2% дневной лимит
+        daily_max_loss_pct: float = 2.0,        # 2% дневной лимит (жёсткий стоп)
+        daily_pause_loss_pct: float = 0.0,       # % для паузы (0 = выключено), напр. 3.0
+        daily_pause_hours: float = 1.0,          # длина паузы в часах при -3%
         weekly_max_loss_pct: float = 5.0,        # 5% недельный лимит
         max_open_positions: int = 4,
         risk_per_trade_pct: float = 0.5,         # 0.5% риска на сделку
@@ -37,6 +39,8 @@ class RiskManager:
         min_trade_usdt: float = 5.0,             # мин. размер сделки в USDT
     ):
         self.daily_max_loss_pct        = daily_max_loss_pct
+        self.daily_pause_loss_pct      = daily_pause_loss_pct
+        self.daily_pause_hours         = daily_pause_hours
         self.weekly_max_loss_pct       = weekly_max_loss_pct
         self.max_open_positions        = max_open_positions
         self.risk_per_trade_pct        = risk_per_trade_pct
@@ -68,6 +72,9 @@ class RiskManager:
         self.weekly_pnl       = 0.0
         self.weekly_reset_at  = self._next_monday()
 
+        # Пауза при -3% (мягкий стоп)
+        self.daily_pause_until: Optional[datetime] = None
+
         # Общее состояние
         self.kill_switch        = False
         self.kill_switch_reason = ""
@@ -92,6 +99,7 @@ class RiskManager:
         self.daily_losses_count  = 0
         self.kill_switch         = False
         self.kill_switch_reason  = ""
+        self.daily_pause_until   = None
         self.strategy_losses.clear()
         self.strategy_daily_losses.clear()
         self.daily_reset_at = (
@@ -228,9 +236,29 @@ class RiskManager:
         if self.kill_switch:
             return {"allowed": False, "reason": f"🛑 KILL SWITCH: {self.kill_switch_reason}"}
 
-        # 2. Дневной лимит убытков 2%
+        # 1b. Мягкая пауза при -3% (временная, до конца часа)
+        if self.daily_pause_until is not None and datetime.utcnow() < self.daily_pause_until:
+            remaining_min = int((self.daily_pause_until - datetime.utcnow()).total_seconds() / 60)
+            return {"allowed": False, "reason": f"⏸ Пауза −3% дневного PnL, осталось {remaining_min} мин"}
+
+        # 2. Дневной лимит убытков (жёсткий стоп)
         if self.daily_start_balance is not None and self.daily_start_balance > 0:
             dd_pct = (balance - self.daily_start_balance) / self.daily_start_balance * 100
+
+            # 2a. Мягкий порог −3%: пауза на daily_pause_hours
+            if (
+                self.daily_pause_loss_pct > 0
+                and dd_pct <= -self.daily_pause_loss_pct
+                and self.daily_pause_until is None
+            ):
+                self.daily_pause_until = datetime.utcnow() + timedelta(hours=self.daily_pause_hours)
+                msg = (
+                    f"⏸ Дневной убыток {dd_pct:.2f}% ≤ -{self.daily_pause_loss_pct}%: "
+                    f"пауза на {self.daily_pause_hours:.0f}ч до {self.daily_pause_until.strftime('%H:%M')} UTC"
+                )
+                logger.warning(msg)
+                return {"allowed": False, "reason": msg}
+
             if dd_pct <= -self.daily_max_loss_pct:
                 self.kill_switch = True
                 self.kill_switch_reason = (
@@ -366,6 +394,8 @@ class RiskManager:
             "max_positions": effective_max_positions,
             "max_positions_configured": self.max_open_positions,
             "effective_balance": effective_balance,
+            "daily_pause_loss_pct": self.daily_pause_loss_pct,
+            "daily_pause_until": self.daily_pause_until.isoformat() if self.daily_pause_until else None,
             "kill_switch": self.kill_switch,
             "kill_switch_reason": self.kill_switch_reason,
             "cooldowns": {

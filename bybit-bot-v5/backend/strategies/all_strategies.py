@@ -1445,17 +1445,17 @@ class MemeReversalS14Strategy(OverboughtShortStrategy):
 ALL_STRATEGIES = {
     "S1": EMACrossoverStrategy,
     "S2": BollingerBandsStrategy,
-    "S3": RSIDivergenceStrategy,
+    # "S3": RSIDivergenceStrategy,  # ОТКЛЮЧЕНА: 0% WR, -$32 за 8 сделок (8 подряд убытков)
     "S4": BreakoutHunterStrategy,
-    "S5": ScalperGridStrategy,
+    # "S5": ScalperGridStrategy,    # ОТКЛЮЧЕНА: инвертированный R:R — avg win $0.49 vs avg SL $6.59
     "S6": TrendFollowerStrategy,
-    "S7": MultiConfirmStrategy,
+    # "S7": MultiConfirmStrategy,   # ОТКЛЮЧЕНА: 22% WR, -$8.84 за 9 сделок
     "S8": TrendMomentumStrategy,
     "S9": TrendFibonacciStrategy,
     "S10": ScalperProStrategy,
     "S11": DragonflyGoldStrategy,
-    "S12": OverboughtShortStrategy,
-    "S13": MemeReversalS13Strategy,   # кулдаун 30/45 мин, SAFE после 3 убытков
-    "S14": MemeReversalS14Strategy,   # 4+ подтверждений, запрет догонять движение
+    # "S12": OverboughtShortStrategy,  # ОТКЛЮЧЕНА: слабые показатели
+    # "S13": MemeReversalS13Strategy,  # ОТКЛЮЧЕНА: 14 подряд убытков, баг с cooldown
+    # "S14": MemeReversalS14Strategy,  # ОТКЛЮЧЕНА: слабые показатели
     "S15": AggressiveMomentumStrategy,
 }

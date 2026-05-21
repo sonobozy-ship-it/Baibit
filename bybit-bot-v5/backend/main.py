@@ -80,6 +80,8 @@ class BotState:
         self.bybit: Optional[BybitClient] = None
         self.risk_manager = RiskManager(
             daily_max_loss_pct=float(os.getenv("DAILY_MAX_LOSS_PCT", "5.0")),
+            daily_pause_loss_pct=float(os.getenv("DAILY_PAUSE_LOSS_PCT", "3.0")),
+            daily_pause_hours=float(os.getenv("DAILY_PAUSE_HOURS", "1.0")),
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "20")),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             cooldown_after_loss_min=int(os.getenv("COOLDOWN_AFTER_LOSS_MIN", "15")),
