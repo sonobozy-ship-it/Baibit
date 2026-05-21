@@ -43,19 +43,34 @@ CREATE TABLE IF NOT EXISTS trades (
     ai_score        {real},
     paper_trading   TINYINT DEFAULT 0,
     opened_at       VARCHAR(32),
-    closed_at       VARCHAR(32)
+    closed_at       VARCHAR(32),
+    -- Контекст входа (для аналитики)
+    market_regime   VARCHAR(16),
+    consecutive_losses_at_entry TINYINT DEFAULT 0,
+    entry_gap_sec   INT,
+    rsi_at_entry    {real},
+    volume_ratio    {real},
+    htf_bias        VARCHAR(8),
+    entry_hour      TINYINT
 )
 """
 
 # Новые колонки для миграции существующих БД
 _MIGRATION_COLUMNS = [
-    ("initial_sl",          "{real}"),
-    ("initial_tp",          "{real}"),
-    ("atr_at_entry",        "{real}"),
-    ("be_triggered",        "TINYINT DEFAULT 0"),
-    ("trailing_triggered",  "TINYINT DEFAULT 0"),
-    ("r_multiple",          "{real}"),
-    ("signal_reason",       "TEXT"),
+    ("initial_sl",                    "{real}"),
+    ("initial_tp",                    "{real}"),
+    ("atr_at_entry",                  "{real}"),
+    ("be_triggered",                  "TINYINT DEFAULT 0"),
+    ("trailing_triggered",            "TINYINT DEFAULT 0"),
+    ("r_multiple",                    "{real}"),
+    ("signal_reason",                 "TEXT"),
+    ("market_regime",                 "VARCHAR(16)"),
+    ("consecutive_losses_at_entry",   "TINYINT DEFAULT 0"),
+    ("entry_gap_sec",                 "INT"),
+    ("rsi_at_entry",                  "{real}"),
+    ("volume_ratio",                  "{real}"),
+    ("htf_bias",                      "VARCHAR(8)"),
+    ("entry_hour",                    "TINYINT"),
 ]
 
 
@@ -105,8 +120,89 @@ class TradeJournal:
 
     # ── запись ────────────────────────────────────────────────
 
+    def _compute_entry_gap(self, strategy_id: str, symbol: str) -> Optional[int]:
+        """Секунды с момента закрытия предыдущей сделки (та же стратегия + символ)."""
+        try:
+            q = self.pool.adapt(
+                "SELECT closed_at FROM trades "
+                "WHERE strategy_id=? AND symbol=? AND exit_price IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1"
+            )
+            with self.pool.connection() as conn:
+                if self.pool.is_mysql:
+                    with conn.cursor() as c:
+                        c.execute(q, [strategy_id, symbol])
+                        row = c.fetchone()
+                        raw = row["closed_at"] if row else None
+                else:
+                    row = conn.execute(q, [strategy_id, symbol]).fetchone()
+                    raw = row[0] if row else None
+            if not raw:
+                return None
+            closed_dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if closed_dt.tzinfo is not None:
+                closed_dt = closed_dt.replace(tzinfo=None)
+            gap = int((datetime.utcnow() - closed_dt).total_seconds())
+            return max(0, gap)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_context(filters_passed: dict) -> dict:
+        """Вытаскивает rsi_at_entry, volume_ratio, htf_bias из filters_passed."""
+        rsi = (
+            filters_passed.get("rsi_value")
+            or filters_passed.get("rsi")
+            or filters_passed.get("rsi_at_entry")
+        )
+        vol = (
+            filters_passed.get("vol_ratio")
+            or filters_passed.get("volume_ratio")
+            or filters_passed.get("vol_spike_ratio")
+        )
+        htf_raw = (
+            filters_passed.get("h1_trend")
+            or filters_passed.get("htf_trend")
+            or filters_passed.get("htf_bias")
+        )
+        # Нормализуем htf_bias → 'bullish'/'bearish'/'neutral'
+        htf_bias = None
+        if htf_raw is not None:
+            h = str(htf_raw).upper()
+            if h in ("1", "TRUE", "BULLISH", "UP"):
+                htf_bias = "bullish"
+            elif h in ("-1", "FALSE", "BEARISH", "DOWN"):
+                htf_bias = "bearish"
+            elif h in ("0", "NEUTRAL", "FLAT"):
+                htf_bias = "neutral"
+        return {
+            "rsi_at_entry": float(rsi) if rsi is not None else None,
+            "volume_ratio": float(vol) if vol is not None else None,
+            "htf_bias":     htf_bias,
+        }
+
     def log_trade(self, trade: Dict) -> int:
         """Записать сделку. Возвращает trade_id."""
+        # ── Авто-вычисляемые поля контекста ──────────────────────────
+        filters_raw = trade.get("filters_passed", {})
+        if isinstance(filters_raw, str):
+            try:
+                filters_raw = json.loads(filters_raw)
+            except Exception:
+                filters_raw = {}
+        ctx = self._extract_context(filters_raw)
+
+        entry_gap = (
+            trade.get("entry_gap_sec")
+            or self._compute_entry_gap(trade["strategy_id"], trade["symbol"])
+        )
+
+        ts = trade.get("timestamp", datetime.utcnow().isoformat())
+        try:
+            entry_hour = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).hour
+        except Exception:
+            entry_hour = None
+
         sql = self.pool.adapt("""
             INSERT INTO trades (
                 timestamp, strategy_id, strategy_name, symbol, side,
@@ -114,11 +210,14 @@ class TradeJournal:
                 initial_sl, initial_tp, atr_at_entry,
                 be_triggered, trailing_triggered, r_multiple, signal_reason,
                 pnl_usd, pnl_pct, exit_reason, duration_sec, fees,
-                filters_passed, ai_score, paper_trading, opened_at, closed_at
-            ) VALUES (?,?,?,?,?, ?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?,?,?)
+                filters_passed, ai_score, paper_trading, opened_at, closed_at,
+                market_regime, consecutive_losses_at_entry, entry_gap_sec,
+                rsi_at_entry, volume_ratio, htf_bias, entry_hour
+            ) VALUES (?,?,?,?,?, ?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,
+                      ?,?,?, ?,?,?,?)
         """)
         values = (
-            trade.get("timestamp", datetime.utcnow().isoformat()),
+            ts,
             trade["strategy_id"],
             trade.get("strategy_name", ""),
             trade["symbol"],
@@ -129,9 +228,8 @@ class TradeJournal:
             trade.get("leverage", 1),
             trade.get("stop_loss"),
             trade.get("take_profit"),
-            # Начальные уровни (до BE/trailing)
-            trade.get("initial_sl",   trade.get("stop_loss")),
-            trade.get("initial_tp",   trade.get("take_profit")),
+            trade.get("initial_sl",  trade.get("stop_loss")),
+            trade.get("initial_tp",  trade.get("take_profit")),
             trade.get("atr_at_entry"),
             1 if trade.get("be_triggered")       else 0,
             1 if trade.get("trailing_triggered") else 0,
@@ -142,11 +240,19 @@ class TradeJournal:
             trade.get("exit_reason", ""),
             trade.get("duration_sec", 0),
             trade.get("fees", 0),
-            json.dumps(trade.get("filters_passed", {}), default=str),
+            json.dumps(filters_raw, default=str),
             trade.get("ai_score"),
             1 if trade.get("paper_trading") else 0,
             trade.get("opened_at"),
             trade.get("closed_at"),
+            # Контекст входа
+            trade.get("market_regime"),
+            trade.get("consecutive_losses_at_entry", 0),
+            entry_gap,
+            ctx["rsi_at_entry"],
+            ctx["volume_ratio"],
+            ctx["htf_bias"],
+            entry_hour,
         )
         with self.pool.cursor() as c:
             c.execute(sql, values)

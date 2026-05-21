@@ -1609,6 +1609,8 @@ async def trading_loop():
                             "ai_score":      ai_score,
                             "paper_trading": True,
                             "opened_at":     strat.current_position["opened_at"],
+                            "market_regime": current_regime_name,
+                            "consecutive_losses_at_entry": strat.consecutive_losses,
                         })
                         strat.current_position["journal_trade_id"] = _ptid
                         state.paper.set_journal_id(signal.symbol, _ptid)
@@ -1656,6 +1658,8 @@ async def trading_loop():
                                 "filters_passed": signal.filters_passed,
                                 "ai_score":      ai_score,
                                 "opened_at":     datetime.utcnow().isoformat(),
+                                "market_regime": current_regime_name,
+                                "consecutive_losses_at_entry": strat.consecutive_losses,
                             })
                             strat.current_position["journal_trade_id"] = trade_id
 
