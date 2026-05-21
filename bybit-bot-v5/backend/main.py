@@ -91,8 +91,8 @@ class BotState:
         self.correlation = CorrelationFilter()
         self.ai = AIAnalyzer()
         # Ранний TP: закрыть когда цена прошла X% пути к TP (0 = выключено)
-        # Пол 50% — EARLY_TP_PCT=0 или любое маленькое значение не должно закрывать сделку у входа
-        self.early_tp_pct = max(50.0, float(os.getenv("EARLY_TP_PCT", "85")))
+        self.early_tp_enabled = os.getenv("EARLY_TP_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+        self.early_tp_pct = float(os.getenv("EARLY_TP_PCT", "85"))
         self.paper = PaperTrader(
             initial_balance=float(os.getenv("PAPER_INITIAL_BALANCE", "1000")),
         )
@@ -713,6 +713,14 @@ async def _close_position_early(
     if hasattr(opened_at, "isoformat"):
         opened_at = opened_at.isoformat()
 
+    monitor_labels = {
+        "tp_progress":    "TPProgress",
+        "near_tp":        "NearTP",
+        "trailing_profit":"TrailingProfit",
+        "profit_return":  "ProfitReturn",
+        "timeout":        "Timeout",
+    }
+
     if reason == "MaxHold":
         held_min = 0.0
         if opened_at:
@@ -728,7 +736,15 @@ async def _close_position_early(
             f"Позиция {held_min:.0f} мин → принудительное закрытие\n"
             f"Выход: {exit_price:.6f} | PnL: <b>{{pnl:+.2f}} USDT</b>"
         )
+    elif reason in monitor_labels:
+        reason_str = monitor_labels[reason]
+        tg_msg = (
+            f"📊 <b>Умное закрытие: {sid} {strat.symbol}</b>\n"
+            f"Причина: {reason_str}\n"
+            f"Выход: {exit_price:.6f} | PnL: <b>{{pnl:+.2f}} USDT</b>"
+        )
     else:
+        # Empty reason — called from check_early_tp path
         tp_dist  = (tp - entry) if side == "Buy" else (entry - tp)
         progress = ((exit_price - entry) / tp_dist * 100) if (side == "Buy" and tp_dist > 0) \
                    else ((entry - exit_price) / tp_dist * 100) if tp_dist > 0 else 0
@@ -933,7 +949,7 @@ async def _execute_fusion_signal(
         df_h1=chart_df,
         ml_probability=(ml_prediction.get("probability") if ml_prediction and ml_prediction.get("available") else None),
         signal_confidence=fused.confidence,
-        scalp_mode=state.scalp_active,
+        scalp_mode=False,
     )
     if not _fusion_guard.approved:
         logger.info(f"[Fusion] 🛡 Guard BLOCKED {fused.action} {sym}: {_fusion_guard.blocked_by}")
@@ -1217,13 +1233,14 @@ async def trading_loop():
                             continue
 
                         # Ранний TP — закрыть если цена прошла early_tp_pct% пути к TP
-                        early_exit = strat.check_early_tp(current_price, state.early_tp_pct)
-                        if early_exit:
-                            await _close_position_early(sid, strat, current_price, klines_data)
-                            state.position_monitor.reset_state(sid)
+                        if state.early_tp_enabled:
+                            early_exit = strat.check_early_tp(current_price, state.early_tp_pct)
+                            if early_exit:
+                                await _close_position_early(sid, strat, current_price, klines_data)
+                                state.position_monitor.reset_state(sid)
 
                         # Таймаут позиции (max_hold_minutes) — скальперы закрываются принудительно
-                        elif strat.check_max_hold():
+                        if strat.check_max_hold():
                             await _close_position_early(sid, strat, current_price, klines_data, reason="MaxHold")
                             state.position_monitor.reset_state(sid)
 
@@ -1271,6 +1288,7 @@ async def trading_loop():
 
                     # Скальперы SC_* торгуют независимо — не ограничиваем общим лимитом позиций
                     _is_scalper = sid.startswith("SC_")
+                    _scalp_like = _is_scalper or sid == "S15"
 
                     # Проверка риск-менеджера
                     if not state.training_mode and not _is_scalper:
@@ -1502,7 +1520,7 @@ async def trading_loop():
                             if ml_prediction and ml_prediction.get("available") else None
                         ),
                         signal_confidence=signal.confidence,
-                        scalp_mode=state.scalp_active,
+                        scalp_mode=_scalp_like,
                     )
                     if not _guard_result.approved and not state.training_mode:
                         logger.info(
@@ -1513,7 +1531,7 @@ async def trading_loop():
 
                     # ── Нормализация TP + фильтр качества входа ─────────────
                     _sig_pre_norm = signal   # сохраняем до нормализации
-                    signal = normalize_take_profit(signal, df, state.scalp_active)
+                    signal = normalize_take_profit(signal, df, _scalp_like)
                     if signal is None:
                         if state.training_mode:
                             signal = _sig_pre_norm   # в обучении не блокируем
@@ -1524,7 +1542,7 @@ async def trading_loop():
                     # ── Подтверждение входа: нет ножей, есть разворот ──────────
                     # В режиме обучения пропускаем — собираем любые данные
                     if not state.training_mode:
-                        _entry_check = validate_entry_confirmation(df, signal.action, state.scalp_active)
+                        _entry_check = validate_entry_confirmation(df, signal.action, _scalp_like)
                         if not _entry_check["entry_allowed"]:
                             reason_code = _entry_check["entry_block_reason"]
                             candles_dir = _entry_check.get("last_3_candles_direction", "?")

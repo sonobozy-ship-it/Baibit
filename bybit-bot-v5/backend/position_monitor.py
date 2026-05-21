@@ -59,11 +59,14 @@ def calc_unrealized_pnl(
     leverage: int = 1,
 ) -> float:
     """
-    Считает unrealized PnL с учётом плеча.
+    Считает unrealized PnL без учёта плеча (PnL в USDT на контракт).
     side: "Buy" или "Sell" (или "BUY"/"SELL")
+    leverage: параметр сохранён для обратной совместимости сигнатуры, не используется.
     """
-    direction = 1 if side.lower() in ("buy", "long") else -1
-    return direction * (current_price - entry_price) * qty * leverage
+    if side.lower() in ("buy", "long"):
+        return qty * (current_price - entry_price)
+    else:
+        return qty * (entry_price - current_price)
 
 
 def calc_tp_profit_usdt(
@@ -73,8 +76,10 @@ def calc_tp_profit_usdt(
     qty: float,
     leverage: int = 1,
 ) -> float:
-    """Планируемая прибыль при достижении TP."""
-    return abs(take_profit - entry_price) * qty * leverage
+    """Планируемая прибыль при достижении TP (без множителя плеча).
+    leverage: параметр сохранён для обратной совместимости сигнатуры, не используется.
+    """
+    return abs(take_profit - entry_price) * qty
 
 
 # ─────────────────────────────────────────────────────────────────────────────
