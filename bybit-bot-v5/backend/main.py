@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import pandas as pd
 
 # Локальные модули
+import config as cfg
 from bybit_client import BybitClient
 from risk_manager import RiskManager
 from backtester import Backtester
@@ -205,10 +206,10 @@ def init_strategies():
         "S4":  "BNBUSDT",
         "S5":  "DOGEUSDT",
         "S6":  "XRPUSDT",
-        "S7":  "LINKUSDT",        # отдельный символ — не конфликтует с S1 (BTCUSDT)
-        "S8":  "DOTUSDT",         # отдельный символ — не конфликтует с S2 (ETHUSDT)
-        "S9":  "NEARUSDT",        # отдельный символ — не конфликтует с S3 (SOLUSDT)
-        "S10": "LINKUSDT",        # ScalperPro — S7 (MultiConfirm) отключена, символ свободен
+        "S7":  "UNIUSDT",         # MultiConfirm (отключена) — LINKUSDT теперь у S10
+        "S8":  "DOTUSDT",
+        "S9":  "NEARUSDT",
+        "S10": "LINKUSDT",        # ScalperPro 3m — S7 отключена, символ свободен
         "S11": "AVAXUSDT",        # DragonflyGold
         "S12": "ADAUSDT",
         "S13": "1000PEPEUSDT",
@@ -861,16 +862,13 @@ async def _execute_fusion_signal(
         return
 
     # Глобальный R:R фильтр: минимум 2.0
-    if fused.entry_price and fused.stop_loss and fused.take_profit:
-        _rr_risk   = abs(fused.entry_price - fused.stop_loss)
-        _rr_reward = abs(fused.take_profit  - fused.entry_price)
-        _rr_ratio  = _rr_reward / max(_rr_risk, 1e-9)
-        if _rr_ratio < 2.0:
-            logger.info(
-                f"[Fusion] ❌ R:R слишком мал: {_rr_ratio:.2f} < 2.0 "
-                f"({sym} TP={fused.take_profit} SL={fused.stop_loss})"
-            )
-            return
+    _fusion_rr = GlobalTradeGuard._calc_rr(fused.action, fused.entry_price, fused.stop_loss, fused.take_profit)
+    if _fusion_rr is None or _fusion_rr < 2.0:
+        logger.info(
+            f"[Fusion] ❌ R:R {_fusion_rr} < 2.0 "
+            f"({sym} TP={fused.take_profit} SL={fused.stop_loss})"
+        )
+        return
 
     # Свечи для ML и графика
     chart_df = None
@@ -950,15 +948,13 @@ async def _execute_fusion_signal(
     if qty <= 0:
         return
 
-    # Кап риска в USD на сделку (MAX_RISK_USD_PER_TRADE, default 5.0)
-    _max_risk_usd = float(os.getenv("MAX_RISK_USD_PER_TRADE", "5.0"))
-    if _max_risk_usd > 0 and fused.entry_price and fused.stop_loss:
+    # Кап риска в USD на сделку
+    if cfg.MAX_RISK_PER_TRADE_USDT > 0 and fused.entry_price and fused.stop_loss:
         _sl_dist = abs(fused.entry_price - fused.stop_loss)
-        _trade_risk_usd = qty * _sl_dist
-        if _trade_risk_usd > _max_risk_usd:
-            qty = round(_max_risk_usd / max(_sl_dist, 1e-9), 6)
+        if _sl_dist > 0 and qty * _sl_dist > cfg.MAX_RISK_PER_TRADE_USDT:
+            qty = round(cfg.MAX_RISK_PER_TRADE_USDT / _sl_dist, 6)
             logger.info(
-                f"[Fusion] 💰 Риск скейлирован до ${_max_risk_usd}: "
+                f"[Fusion] 💰 Риск скейлирован до ${cfg.MAX_RISK_PER_TRADE_USDT}: "
                 f"qty={qty} ({sym})"
             )
 
@@ -1291,9 +1287,6 @@ async def trading_loop():
                     _is_scalper = sid.startswith("SC_")
                     _scalp_like = _is_scalper or sid in ("S15", "S10")
 
-                    # Добавляем в буфер для fusion-анализа (до адаптивного SL/TP)
-                    state.signal_buffer.update(sid, signal, strat.timeframe)
-
                     _entry_atr: Optional[float] = None  # ATR на момент входа (для журнала)
 
                     # Адаптивный SL/TP по ATR (множители зависят от режима и статистики)
@@ -1318,34 +1311,38 @@ async def trading_loop():
                         except Exception as e:
                             logger.debug(f"Adaptive SL skip: {e}")
 
-                    # Глобальный R:R фильтр:
-                    #   - Свинг/тренд стратегии: >= 2.0 (основное требование промта)
-                    #   - Скальперы SC_*/S15: >= 1.2 (GlobalTradeGuard также проверяет)
-                    if signal.entry_price and signal.stop_loss and signal.take_profit:
-                        _s_rr_risk   = abs(signal.entry_price - signal.stop_loss)
-                        _s_rr_reward = abs(signal.take_profit  - signal.entry_price)
-                        _s_rr = _s_rr_reward / max(_s_rr_risk, 1e-9)
-                        _rr_min_for_sid = 1.2 if _scalp_like else 2.0
-                        if _s_rr < _rr_min_for_sid:
-                            logger.info(
-                                f"{sid}: ❌ R:R {_s_rr:.2f} < {_rr_min_for_sid} "
-                                f"(TP={signal.take_profit:.6g} SL={signal.stop_loss:.6g})"
-                            )
-                            continue
+                    # Глобальный R:R фильтр (после adaptive SL/TP — проверяем финальные значения):
+                    #   Свинг/тренд >= 2.0 | Скальперы SC_*/S10/S15 >= 1.2
+                    _rr_min_for_sid = 1.2 if _scalp_like else 2.0
+                    _s_rr = GlobalTradeGuard._calc_rr(
+                        signal.action, signal.entry_price, signal.stop_loss, signal.take_profit
+                    )
+                    if _s_rr is None or _s_rr < _rr_min_for_sid:
+                        logger.info(
+                            f"{sid}: ❌ R:R {_s_rr} < {_rr_min_for_sid} "
+                            f"(TP={signal.take_profit:.6g} SL={signal.stop_loss:.6g})"
+                        )
+                        continue
+
+                    # Добавляем в буфер для fusion-анализа — только сигналы прошедшие R:R
+                    state.signal_buffer.update(sid, signal, strat.timeframe)
 
                     # Проверка риск-менеджера
                     # Скальперы SC_* обходят лимит позиций, но уважают дневные стопы
                     if not state.training_mode:
                         if _is_scalper:
-                            # Только kill switch и pause (без лимита позиций)
+                            # Kill switch и pause проверяются по состоянию,
+                            # которое _check_drawdown_limits() установил в начале тика.
                             if state.risk_manager.kill_switch:
                                 logger.info(f"{sid}: ❌ KILL SWITCH: {state.risk_manager.kill_switch_reason}")
                                 continue
                             _pause = state.risk_manager.daily_pause_until
-                            if _pause is not None and datetime.utcnow() < _pause:
-                                _rem = int((_pause - datetime.utcnow()).total_seconds() / 60)
-                                logger.info(f"{sid}: ⏸ Дневная пауза, осталось {_rem} мин")
-                                continue
+                            if _pause is not None:
+                                _now_ts = datetime.utcnow()
+                                if _now_ts < _pause:
+                                    _rem = int((_pause - _now_ts).total_seconds() / 60)
+                                    logger.info(f"{sid}: ⏸ Дневная пауза, осталось {_rem} мин")
+                                    continue
                         else:
                             check = state.risk_manager.can_open_trade(sid, balance)
                             if not check["allowed"]:
@@ -1535,17 +1532,8 @@ async def trading_loop():
                             continue
                         logger.info(f"{sid}: 📐 Kelly size: qty={qty}, risk={kelly_res['risk_pct']}%")
                     else:
-                        # ATR из текущих свечей для рыночно-адаптивного размера позиции
-                        _atr_val = 0.0
-                        try:
-                            import pandas_ta as _ta
-                            _atr_s = _ta.atr(df["high"], df["low"], df["close"], length=14)
-                            if _atr_s is not None and len(_atr_s) > 0 and not _atr_s.iloc[-1] != _atr_s.iloc[-1]:
-                                _atr_val = float(_atr_s.iloc[-1])
-                        except Exception:
-                            pass
-                        if _atr_val:
-                            _entry_atr = _atr_val
+                        # Используем ATR уже вычисленный в блоке adaptive SL/TP
+                        _atr_val = _entry_atr or 0.0
                         qty = state.risk_manager.calculate_position_size(
                             balance=balance,
                             entry_price=signal.entry_price,
@@ -1557,19 +1545,17 @@ async def trading_loop():
                         if _atr_val:
                             logger.debug(f"{sid}: ATR={_atr_val:.6f} → qty={qty}")
 
-                        # Кап риска в USD на сделку
-                        _max_risk_usd_s = float(os.getenv("MAX_RISK_USD_PER_TRADE", "5.0"))
-                        if _max_risk_usd_s > 0 and signal.entry_price and signal.stop_loss:
+                        # Кап риска в USD на сделку (cfg.MAX_RISK_PER_TRADE_USDT из config.py)
+                        if cfg.MAX_RISK_PER_TRADE_USDT > 0 and signal.entry_price and signal.stop_loss:
                             _sl_d = abs(signal.entry_price - signal.stop_loss)
-                            if _sl_d > 0 and qty * _sl_d > _max_risk_usd_s:
-                                qty = round(_max_risk_usd_s / _sl_d, 6)
-                                logger.info(f"{sid}: 💰 Риск скейлирован до ${_max_risk_usd_s}")
+                            if _sl_d > 0 and qty * _sl_d > cfg.MAX_RISK_PER_TRADE_USDT:
+                                qty = round(cfg.MAX_RISK_PER_TRADE_USDT / _sl_d, 6)
+                                logger.info(f"{sid}: 💰 Риск скейлирован до ${cfg.MAX_RISK_PER_TRADE_USDT}")
 
                         # Reversal Engine: уменьшаем объём если size_factor < 1.0
-                        _sfactor = getattr(signal, "size_factor", 1.0)
-                        if _sfactor < 1.0:
-                            qty = round(qty * _sfactor, 6)
-                            logger.info(f"{sid}: 🔄 Reversal объём ×{_sfactor:.0%} → qty={qty}")
+                        if signal.size_factor < 1.0:
+                            qty = round(qty * signal.size_factor, 6)
+                            logger.info(f"{sid}: 🔄 Reversal объём ×{signal.size_factor:.0%} → qty={qty}")
 
                     # ============== GlobalTradeGuard ==============
                     _guard_h1 = _get_h1_cached(strat.symbol) if state.bybit else None

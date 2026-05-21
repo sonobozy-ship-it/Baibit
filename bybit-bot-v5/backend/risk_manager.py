@@ -114,6 +114,30 @@ class RiskManager:
         self.weekly_reset_at      = self._next_monday()
         logger.info(f"📅 Недельный сброс. Старт баланс: {current_balance} USDT")
 
+    def _check_drawdown_limits(self, balance: float):
+        """Evaluate kill-switch and soft-pause thresholds. Called every loop tick
+        so SC_* scalpers are protected even when can_open_trade() is never invoked."""
+        if not self.daily_start_balance or self.daily_start_balance <= 0:
+            return
+        dd_pct = (balance - self.daily_start_balance) / self.daily_start_balance * 100
+
+        if (self.daily_pause_loss_pct > 0
+                and dd_pct <= -self.daily_pause_loss_pct
+                and self.daily_pause_until is None):
+            self.daily_pause_until = datetime.utcnow() + timedelta(hours=self.daily_pause_hours)
+            logger.warning(
+                f"⏸ Дневной убыток {dd_pct:.2f}% ≤ -{self.daily_pause_loss_pct}%: "
+                f"пауза на {self.daily_pause_hours:.0f}ч до "
+                f"{self.daily_pause_until.strftime('%H:%M')} UTC"
+            )
+
+        if dd_pct <= -self.daily_max_loss_pct and not self.kill_switch:
+            self.kill_switch = True
+            self.kill_switch_reason = (
+                f"Дневной убыток {dd_pct:.2f}% > лимит {self.daily_max_loss_pct}%"
+            )
+            logger.critical(self.kill_switch_reason)
+
     def check_daily_reset(self, current_balance: float):
         """Проверяет, не нужно ли сделать дневной/недельный сброс."""
         self.last_balance = current_balance
@@ -121,6 +145,7 @@ class RiskManager:
             self.reset_daily(current_balance)
         if datetime.utcnow() >= self.weekly_reset_at or self.weekly_start_balance is None:
             self.reset_weekly(current_balance)
+        self._check_drawdown_limits(current_balance)
 
     def check_leverage(self, strategy_id: str, leverage: int, balance: float) -> Dict:
         """Проверяет плечо на превышение лимита и суммарную notional экспозицию."""
@@ -236,36 +261,15 @@ class RiskManager:
         if self.kill_switch:
             return {"allowed": False, "reason": f"🛑 KILL SWITCH: {self.kill_switch_reason}"}
 
-        # 1b. Мягкая пауза при -3% (временная, до конца часа)
-        if self.daily_pause_until is not None and datetime.utcnow() < self.daily_pause_until:
-            remaining_min = int((self.daily_pause_until - datetime.utcnow()).total_seconds() / 60)
-            return {"allowed": False, "reason": f"⏸ Пауза −3% дневного PnL, осталось {remaining_min} мин"}
+        # 1b. Мягкая пауза при -3% и жёсткий kill switch при -5%
+        # Состояние уже обновлено в check_daily_reset() → _check_drawdown_limits(),
+        # но вызываем ещё раз на случай изменения баланса внутри итерации.
+        self._check_drawdown_limits(balance)
 
-        # 2. Дневной лимит убытков (жёсткий стоп)
-        if self.daily_start_balance is not None and self.daily_start_balance > 0:
-            dd_pct = (balance - self.daily_start_balance) / self.daily_start_balance * 100
-
-            # 2a. Мягкий порог −3%: пауза на daily_pause_hours
-            if (
-                self.daily_pause_loss_pct > 0
-                and dd_pct <= -self.daily_pause_loss_pct
-                and self.daily_pause_until is None
-            ):
-                self.daily_pause_until = datetime.utcnow() + timedelta(hours=self.daily_pause_hours)
-                msg = (
-                    f"⏸ Дневной убыток {dd_pct:.2f}% ≤ -{self.daily_pause_loss_pct}%: "
-                    f"пауза на {self.daily_pause_hours:.0f}ч до {self.daily_pause_until.strftime('%H:%M')} UTC"
-                )
-                logger.warning(msg)
-                return {"allowed": False, "reason": msg}
-
-            if dd_pct <= -self.daily_max_loss_pct:
-                self.kill_switch = True
-                self.kill_switch_reason = (
-                    f"Дневной убыток {dd_pct:.2f}% > лимит {self.daily_max_loss_pct}%"
-                )
-                logger.critical(self.kill_switch_reason)
-                return {"allowed": False, "reason": self.kill_switch_reason}
+        _now = datetime.utcnow()
+        if self.daily_pause_until is not None and _now < self.daily_pause_until:
+            _rem = int((self.daily_pause_until - _now).total_seconds() / 60)
+            return {"allowed": False, "reason": f"⏸ Пауза −3% дневного PnL, осталось {_rem} мин"}
 
         # 2b. Недельный лимит убытков 5%
         weekly_dd = self._weekly_drawdown_pct(balance)

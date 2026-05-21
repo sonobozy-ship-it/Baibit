@@ -134,27 +134,31 @@ def compute_reversal_score(df: pd.DataFrame, reverse_side: str) -> int:
     prev  = df.iloc[-2]
     prev2 = df.iloc[-3]
 
-    close   = float(last["close"])
-    ema20   = float(last.get("ema20") or close)
-    ema50   = float(last.get("ema50") or close)
-    rsi     = float(last.get("rsi")   or 50)
-    volume  = float(last["volume"])
-    vol_ma  = float(last.get("vol_ma") or volume)
+    def _sf(val, default):
+        return default if (val is None or pd.isna(val)) else float(val)
 
-    vol_ratio = volume / max(vol_ma, 1e-9)
+    close   = float(last["close"])
+    volume  = float(last["volume"])
+    ema20   = _sf(last.get("ema20"),  close)
+    ema50   = _sf(last.get("ema50"),  close)
+    rsi     = _sf(last.get("rsi"),    50.0)
+    vol_ma  = _sf(last.get("vol_ma"), volume)
+
+    vol_ratio  = volume / max(vol_ma, 1e-9)
+    prev_ema20 = _sf(prev.get("ema20"), ema20)
 
     score = 0
 
     # ── 1. Trend Change (30 pts) ──────────────────────────────────────
     if reverse_side == "BUY":
         if ema20 > ema50:
-            score += 30   # EMA20 уже выше EMA50 — тренд сменился
-        elif ema20 > float(prev.get("ema20") or ema20):
-            score += 12   # EMA20 растёт, разворот начался
+            score += 30
+        elif ema20 > prev_ema20:
+            score += 12
     else:  # SELL
         if ema20 < ema50:
             score += 30
-        elif ema20 < float(prev.get("ema20") or ema20):
+        elif ema20 < prev_ema20:
             score += 12
 
     # ── 2. Volume Confirmation (25 pts) ──────────────────────────────
@@ -166,17 +170,14 @@ def compute_reversal_score(df: pd.DataFrame, reverse_side: str) -> int:
         score += 5
 
     # ── 3. Structure Break (25 pts) ───────────────────────────────────
-    # Проверяем, что 2 свечи подряд подтверждают разворот
     prev_close  = float(prev["close"])
     prev2_close = float(prev2["close"])
     if reverse_side == "BUY":
-        # Два закрытия вверх
         if close > prev_close > prev2_close:
             score += 25
         elif close > prev_close:
             score += 12
     else:  # SELL
-        # Два закрытия вниз
         if close < prev_close < prev2_close:
             score += 25
         elif close < prev_close:
@@ -188,15 +189,12 @@ def compute_reversal_score(df: pd.DataFrame, reverse_side: str) -> int:
             score += 20
         elif rsi > 50:
             score += 8
-        elif rsi > 45:
-            score += 0   # мёртвая зона
+        # rsi 45-50: dead zone, no points
     else:  # SELL
         if rsi < 45:
             score += 20
         elif rsi < 50:
             score += 8
-        else:
-            score += 0
 
     return min(score, 100)
 
@@ -764,8 +762,11 @@ class ScalperGridStrategy(BaseStrategy):
         normal_volume = (vol_ma > 0) and (volume >= 0.5 * vol_ma)
 
         # 8. ATR must be >= 0.8 × 20-period average (reject ultra-low volatility)
-        atr_mean20 = float(df["atr"].iloc[-20:].mean()) if len(df) >= 20 else atr
-        atr_above_avg = (atr_mean20 > 0) and (atr >= 0.8 * atr_mean20)
+        if len(df) >= 20:
+            atr_mean20 = float(df["atr"].iloc[-20:].mean())
+            atr_above_avg = (atr_mean20 > 0) and (atr >= 0.8 * atr_mean20)
+        else:
+            atr_above_avg = True  # insufficient data — skip filter
 
         flat_filters_pass = (
             tradable_atr and flat_ema and flat_slope
@@ -844,17 +845,13 @@ class ScalperGridStrategy(BaseStrategy):
         # — ждём cooldown (уже есть). Если сигнал ПРОТИВ последнего SL (разворот)
         # — требуем подтверждения reversal score >= 75.
         reversal_factor = 1.0
-        if self._last_sl_side is not None:
-            # Переводим 'Buy'/'Sell' → 'BUY'/'SELL' для сравнения
-            last_sl_std = self._last_sl_side.upper()
-            if last_sl_std == "BUY" and side == "SELL":
-                # Разворот: LONG SL → пробуем SHORT
+        if self._last_sl_side is not None:  # already normalized to "BUY"/"SELL" in base.py
+            if self._last_sl_side == "BUY" and side == "SELL":
                 rev_score = compute_reversal_score(df, "SELL")
                 if rev_score < 75:
-                    return None   # Нет подтверждения разворота — ЖДЁМ
-                reversal_factor = 0.35  # Открываем 35% от нормального объёма
-            elif last_sl_std == "SELL" and side == "BUY":
-                # Разворот: SHORT SL → пробуем LONG
+                    return None
+                reversal_factor = 0.35
+            elif self._last_sl_side == "SELL" and side == "BUY":
                 rev_score = compute_reversal_score(df, "BUY")
                 if rev_score < 75:
                     return None
@@ -1180,8 +1177,6 @@ class DragonflyGoldStrategy(BaseStrategy):
         # Ichimoku требует 52 бара Senkou B + запас
         if len(df) < 65:
             return None
-        df = df.copy()
-
         df = df.copy()
 
         # ── Расчёт индикаторов ────────────────────────────────────────────────

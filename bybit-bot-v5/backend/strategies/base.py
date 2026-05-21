@@ -260,12 +260,11 @@ class BaseStrategy(ABC):
         if pnl_usd > 0:
             self.wins += 1
             self.consecutive_losses = 0
-            self._last_sl_side = None   # сброс — прибыльная сделка снимает ограничение
+            self._last_sl_side = None
         else:
             self.losses += 1
             self.consecutive_losses += 1
-            # Запоминаем сторону убыточной сделки для Reversal Engine
-            self._last_sl_side = side
+            self._last_sl_side = side.upper()  # canonical "BUY"/"SELL" for Reversal Engine
             self._last_sl_time = datetime.now(timezone.utc)
 
         self.current_position = None
