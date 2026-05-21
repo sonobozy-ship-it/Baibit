@@ -22,6 +22,7 @@ class TradingSignal:
         take_profit: float,
         reason: str,            # почему открываем
         filters_passed: Dict,   # какие фильтры сработали
+        size_factor: float = 1.0,  # множитель объёма (0.35 = reversal, 1.0 = нормальный)
     ):
         self.action = action
         self.symbol = symbol
@@ -31,6 +32,7 @@ class TradingSignal:
         self.take_profit = take_profit
         self.reason = reason
         self.filters_passed = filters_passed
+        self.size_factor = size_factor
         self.timestamp = pd.Timestamp.now()
 
 
@@ -81,7 +83,7 @@ class BaseStrategy(ABC):
 
         # Reversal Engine: отслеживаем последний SL для проверки перед разворотом
         self._last_sl_side: Optional[str] = None   # 'Buy' или 'Sell' — последняя убыточная сделка
-        self._last_sl_time: Optional[object] = None
+        self._last_sl_time: Optional[datetime] = None
 
         # Параметры стратегии (переопределяются в наследниках)
         self.params = kwargs

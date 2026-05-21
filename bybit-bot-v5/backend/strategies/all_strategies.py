@@ -667,6 +667,14 @@ class ScalperGridStrategy(BaseStrategy):
         # Минимум 5 мин между входами (1 свеча на TF5)
         if self._last_entry_at and (now - self._last_entry_at).total_seconds() < 300:
             return None
+        # Срок действия Reversal Engine: сбрасываем _last_sl_side после 4 часов
+        if (
+            self._last_sl_side is not None
+            and self._last_sl_time is not None
+            and (now - self._last_sl_time).total_seconds() > 4 * 3600
+        ):
+            self._last_sl_side = None
+            self._last_sl_time = None
 
         df = df.copy()
 
@@ -854,34 +862,34 @@ class ScalperGridStrategy(BaseStrategy):
 
         vol_ratio_val = round(volume / max(vol_ma, 1e-9), 2)
         filters_passed = {
-            "tradable_atr":     tradable_atr,
-            "flat_ema":         flat_ema,
-            "flat_slope":       flat_slope,
-            "range_width":      range_width,
-            "adx_flat":         adx_flat,
-            "volume_confirms":  volume_confirms,
-            "atr_above_avg":    atr_above_avg,
-            "rsi_reversion":    True,
-            "volume_ratio":     vol_ratio_val,
-            "rr":               round(rr, 2),
-            "reversal_factor":  reversal_factor,
+            "tradable_atr":    tradable_atr,
+            "flat_ema":        flat_ema,
+            "flat_slope":      flat_slope,
+            "range_width":     range_width,
+            "adx_flat":        adx_flat,
+            "volume_confirms": volume_confirms,
+            "atr_above_avg":   atr_above_avg,
+            "rsi_reversion":   True,
+            "volume_ratio":    vol_ratio_val,
+            "rr":              round(rr, 2),
         }
 
         reason = (
             f"S5 {'BUY lower BB' if buy_setup else 'SELL upper BB'} "
             f"| ATR {atr_pct:.2f}% | ADX {adx:.1f} | RR {rr:.2f} | Vol×{vol_ratio_val}"
-            + (f" | REVERSAL×{reversal_factor}" if reversal_factor < 1.0 else "")
+            + (f" | REVERSAL×{reversal_factor:.0%}" if reversal_factor < 1.0 else "")
         )
 
         return TradingSignal(
             action=side,
             symbol=self.symbol,
-            confidence=0.74 * reversal_factor + 0.74 * (1 - reversal_factor) * 0.5,
+            confidence=0.74,
             entry_price=entry,
             stop_loss=round(sl_price, 8),
             take_profit=round(tp_price, 8),
             reason=reason,
             filters_passed=filters_passed,
+            size_factor=reversal_factor,   # ← 0.35 при развороте, 1.0 при нормальном входе
         )
 
 

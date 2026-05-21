@@ -1285,7 +1285,7 @@ async def trading_loop():
                     if not signal or signal.action not in ("BUY", "SELL"):
                         continue
 
-                    # Добавляем в буфер для fusion-анализа
+                    # Добавляем в буфер для fusion-анализа (до адаптивного SL/TP)
                     state.signal_buffer.update(sid, signal, strat.timeframe)
 
                     _entry_atr: Optional[float] = None  # ATR на момент входа (для журнала)
@@ -1311,6 +1311,18 @@ async def trading_loop():
                                 signal.take_profit = adaptive["take_profit"]
                         except Exception as e:
                             logger.debug(f"Adaptive SL skip: {e}")
+
+                    # Глобальный R:R фильтр >= 2.0 — после adaptive SL/TP чтобы проверять финальные значения
+                    if signal.entry_price and signal.stop_loss and signal.take_profit:
+                        _s_rr_risk   = abs(signal.entry_price - signal.stop_loss)
+                        _s_rr_reward = abs(signal.take_profit  - signal.entry_price)
+                        _s_rr = _s_rr_reward / max(_s_rr_risk, 1e-9)
+                        if _s_rr < 2.0:
+                            logger.info(
+                                f"{sid}: ❌ R:R {_s_rr:.2f} < 2.0 "
+                                f"(TP={signal.take_profit:.6g} SL={signal.stop_loss:.6g})"
+                            )
+                            continue
 
                     # Скальперы SC_* торгуют независимо — не ограничиваем общим лимитом позиций
                     _is_scalper = sid.startswith("SC_")
@@ -1535,6 +1547,12 @@ async def trading_loop():
                             if _sl_d > 0 and qty * _sl_d > _max_risk_usd_s:
                                 qty = round(_max_risk_usd_s / _sl_d, 6)
                                 logger.info(f"{sid}: 💰 Риск скейлирован до ${_max_risk_usd_s}")
+
+                        # Reversal Engine: уменьшаем объём если size_factor < 1.0
+                        _sfactor = getattr(signal, "size_factor", 1.0)
+                        if _sfactor < 1.0:
+                            qty = round(qty * _sfactor, 6)
+                            logger.info(f"{sid}: 🔄 Reversal объём ×{_sfactor:.0%} → qty={qty}")
 
                     # ============== GlobalTradeGuard ==============
                     _guard_h1 = _get_h1_cached(strat.symbol) if state.bybit else None
