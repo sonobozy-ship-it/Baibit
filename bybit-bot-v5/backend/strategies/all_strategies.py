@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from .base import BaseStrategy, TradingSignal
 from .trend_fib import TrendMomentumStrategy, TrendFibonacciStrategy
 from .scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
@@ -230,10 +230,24 @@ class BollingerBandsStrategy(BaseStrategy):
             timeframe="15",
             **kwargs,
         )
+        self._last_entry_at: Optional[datetime] = None
+
+    def register_position(self, side: str, entry: float, sl: float, tp: float):
+        super().register_position(side, entry, sl, tp)
+        self._last_entry_at = datetime.now(timezone.utc)
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 60:
             return None
+
+        # Минимальный интервал между входами: 15 мин (1 свеча) по умолчанию
+        # После 3+ убытков подряд: 30 мин
+        if self._last_entry_at:
+            min_gap = 1800 if self.consecutive_losses >= 3 else 900
+            elapsed = (datetime.now(timezone.utc) - self._last_entry_at).total_seconds()
+            if elapsed < min_gap:
+                return None
+
         df = df.copy()
 
         bb = ta.bbands(df["close"], length=20, std=2)
@@ -532,10 +546,32 @@ class ScalperGridStrategy(BaseStrategy):
             **kwargs,
         )
         self.max_hold_minutes = 45
+        self._last_entry_at: Optional[datetime] = None
+        self._sl_cooldown_until: Optional[datetime] = None
+
+    def register_position(self, side: str, entry: float, sl: float, tp: float):
+        super().register_position(side, entry, sl, tp)
+        self._last_entry_at = datetime.now(timezone.utc)
+
+    def close_position(self, exit_price: float, qty: float = 1.0, fees_pct: float = 0.06):
+        result = super().close_position(exit_price, qty, fees_pct)
+        # После убытка — 10-минутный кулдаун, чтобы не входить сразу после SL
+        if result.get("pnl_usd", 0) < -0.05:
+            self._sl_cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=10)
+        return result
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 80:
             return None
+
+        now = datetime.now(timezone.utc)
+        # Кулдаун после SL: 10 мин
+        if self._sl_cooldown_until and now < self._sl_cooldown_until:
+            return None
+        # Минимум 5 мин между входами (1 свеча на TF5)
+        if self._last_entry_at and (now - self._last_entry_at).total_seconds() < 300:
+            return None
+
         df = df.copy()
 
         # ── Indicators ──────────────────────────────────────────────────────
@@ -809,10 +845,22 @@ class MultiConfirmStrategy(BaseStrategy):
             timeframe="60",
             **kwargs,
         )
+        self._last_entry_at: Optional[datetime] = None
+
+    def register_position(self, side: str, entry: float, sl: float, tp: float):
+        super().register_position(side, entry, sl, tp)
+        self._last_entry_at = datetime.now(timezone.utc)
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 80:
             return None
+
+        # Минимум 60 мин между входами (1 H1-свеча) — стратегия не для скальпинга
+        if self._last_entry_at:
+            elapsed = (datetime.now(timezone.utc) - self._last_entry_at).total_seconds()
+            if elapsed < 3600:
+                return None
+
         df = df.copy()
 
         df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
@@ -1266,7 +1314,7 @@ class OverboughtShortStrategy(BaseStrategy):
 class MemeReversalS13Strategy(OverboughtShortStrategy):
     """
     OverboughtShort для мем-монет (PEPEUSDT) с кулдауном после убытков.
-    После 1 убытка: 30 мин паузы. После 2 подряд: 45 мин. После 3+: SAFE.
+    После 1 убытка: 30 мин паузы. После 2 подряд: 45 мин. После 2+: SAFE.
     """
     ID   = "S13"
     NAME = "MEME REVERSAL S13"
@@ -1278,9 +1326,9 @@ class MemeReversalS13Strategy(OverboughtShortStrategy):
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         now = datetime.now(timezone.utc)
 
-        # Кулдаун по серии убытков
-        if self.consecutive_losses >= 3:
-            return None   # SAFE: ждём пока серия не прервётся
+        # SAFE режим: 2+ убытка подряд — мем-монета не разворачивается
+        if self.consecutive_losses >= 2:
+            return None
 
         if self.consecutive_losses >= 1 and self._last_loss_time:
             cooldown_min = 45 if self.consecutive_losses >= 2 else 30
@@ -1292,15 +1340,15 @@ class MemeReversalS13Strategy(OverboughtShortStrategy):
         if sig is None:
             return None
 
-        # В SAFE режиме (2 убытка) требуем более высокий confidence
-        if self.consecutive_losses >= 2 and sig.confidence < 0.72:
+        # После убытка требуем более высокий confidence
+        if self.consecutive_losses >= 1 and sig.confidence < 0.72:
             return None
 
         return sig
 
     def close_position(self, exit_price: float, qty: float = 1.0, fees_pct: float = 0.06):
         result = super().close_position(exit_price, qty, fees_pct)
-        if result.get("pnl", 0) < 0:
+        if result.get("pnl_usd", 0) < 0:   # ИСПРАВЛЕНО: был "pnl" — неверный ключ
             self._last_loss_time = datetime.now(timezone.utc)
         return result
 
@@ -1310,7 +1358,8 @@ class MemeReversalS13Strategy(OverboughtShortStrategy):
 # ============================================================
 class MemeReversalS14Strategy(OverboughtShortStrategy):
     """
-    OverboughtShort для мем-монет (WIFUSDT) с усиленными фильтрами.
+    OverboughtShort для мем-монет (WIFUSDT) с усиленными фильтрами и кулдауном.
+    После 1 убытка: 15 мин паузы. После 2 подряд: 30 мин. После 3+: SAFE.
     Требует 4+ подтверждений, запрещает входить если движение >70% ATR уже прошло.
     """
     ID   = "S14"
@@ -1318,10 +1367,28 @@ class MemeReversalS14Strategy(OverboughtShortStrategy):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._last_loss_time: Optional[datetime] = None
+
+    def close_position(self, exit_price: float, qty: float = 1.0, fees_pct: float = 0.06):
+        result = super().close_position(exit_price, qty, fees_pct)
+        if result.get("pnl_usd", 0) < 0:
+            self._last_loss_time = datetime.now(timezone.utc)
+        return result
 
     def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
         if len(df) < 60:
             return None
+
+        now = datetime.now(timezone.utc)
+        # SAFE режим: 3+ убытка подряд
+        if self.consecutive_losses >= 3:
+            return None
+        # Кулдаун после убытков
+        if self.consecutive_losses >= 1 and self._last_loss_time:
+            cooldown_min = 30 if self.consecutive_losses >= 2 else 15
+            if (now - self._last_loss_time).total_seconds() / 60 < cooldown_min:
+                return None
+
         df_copy = df.copy()
 
         df_copy["atr"]    = ta.atr(df_copy["high"], df_copy["low"], df_copy["close"], length=14)
