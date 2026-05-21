@@ -859,6 +859,18 @@ async def _execute_fusion_signal(
         logger.info(f"[Fusion] ❌ {corr['reason']}")
         return
 
+    # Глобальный R:R фильтр: минимум 2.0
+    if fused.entry_price and fused.stop_loss and fused.take_profit:
+        _rr_risk   = abs(fused.entry_price - fused.stop_loss)
+        _rr_reward = abs(fused.take_profit  - fused.entry_price)
+        _rr_ratio  = _rr_reward / max(_rr_risk, 1e-9)
+        if _rr_ratio < 2.0:
+            logger.info(
+                f"[Fusion] ❌ R:R слишком мал: {_rr_ratio:.2f} < 2.0 "
+                f"({sym} TP={fused.take_profit} SL={fused.stop_loss})"
+            )
+            return
+
     # Свечи для ML и графика
     chart_df = None
     if state.bybit:
@@ -936,6 +948,18 @@ async def _execute_fusion_signal(
     qty = round(base_qty * fused.size_multiplier, 6)
     if qty <= 0:
         return
+
+    # Кап риска в USD на сделку (MAX_RISK_USD_PER_TRADE, default 5.0)
+    _max_risk_usd = float(os.getenv("MAX_RISK_USD_PER_TRADE", "5.0"))
+    if _max_risk_usd > 0 and fused.entry_price and fused.stop_loss:
+        _sl_dist = abs(fused.entry_price - fused.stop_loss)
+        _trade_risk_usd = qty * _sl_dist
+        if _trade_risk_usd > _max_risk_usd:
+            qty = round(_max_risk_usd / max(_sl_dist, 1e-9), 6)
+            logger.info(
+                f"[Fusion] 💰 Риск скейлирован до ${_max_risk_usd}: "
+                f"qty={qty} ({sym})"
+            )
 
     # GlobalTradeGuard проверяет Fusion-сигнал
     _fusion_guard = state.trade_guard.check(
@@ -1503,6 +1527,14 @@ async def trading_loop():
                         )
                         if _atr_val:
                             logger.debug(f"{sid}: ATR={_atr_val:.6f} → qty={qty}")
+
+                        # Кап риска в USD на сделку
+                        _max_risk_usd_s = float(os.getenv("MAX_RISK_USD_PER_TRADE", "5.0"))
+                        if _max_risk_usd_s > 0 and signal.entry_price and signal.stop_loss:
+                            _sl_d = abs(signal.entry_price - signal.stop_loss)
+                            if _sl_d > 0 and qty * _sl_d > _max_risk_usd_s:
+                                qty = round(_max_risk_usd_s / _sl_d, 6)
+                                logger.info(f"{sid}: 💰 Риск скейлирован до ${_max_risk_usd_s}")
 
                     # ============== GlobalTradeGuard ==============
                     _guard_h1 = _get_h1_cached(strat.symbol) if state.bybit else None

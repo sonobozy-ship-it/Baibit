@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Optional
 import pandas as pd
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,10 @@ class BaseStrategy(ABC):
         self.consecutive_losses = 0
         self.current_position = None       # {'side': 'Buy', 'entry': 67000, 'sl': 66000, 'tp': 69000, 'be_moved': False}
         self.history = []                  # последние PnL для графика
+
+        # Reversal Engine: отслеживаем последний SL для проверки перед разворотом
+        self._last_sl_side: Optional[str] = None   # 'Buy' или 'Sell' — последняя убыточная сделка
+        self._last_sl_time: Optional[object] = None
 
         # Параметры стратегии (переопределяются в наследниках)
         self.params = kwargs
@@ -253,9 +258,13 @@ class BaseStrategy(ABC):
         if pnl_usd > 0:
             self.wins += 1
             self.consecutive_losses = 0
+            self._last_sl_side = None   # сброс — прибыльная сделка снимает ограничение
         else:
             self.losses += 1
             self.consecutive_losses += 1
+            # Запоминаем сторону убыточной сделки для Reversal Engine
+            self._last_sl_side = side
+            self._last_sl_time = datetime.now(timezone.utc)
 
         self.current_position = None
         return {

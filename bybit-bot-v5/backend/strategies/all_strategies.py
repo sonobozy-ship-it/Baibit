@@ -106,6 +106,101 @@ def _atr_ok(last, df: pd.DataFrame, max_mult: float = 1.5) -> bool:
     return atr_mean == 0 or float(last.get("atr", 0)) <= atr_mean * max_mult
 
 
+def compute_reversal_score(df: pd.DataFrame, reverse_side: str) -> int:
+    """
+    Reversal Engine: оценка качества разворота (0-100).
+    reverse_side: 'BUY' (входим лонг после SHORT-SL) или 'SELL' (входим шорт после LONG-SL).
+    Нужно >= 75 чтобы разрешить разворотный вход с уменьшенным объёмом.
+
+    Компоненты:
+      Trend Change  30% — EMA20/EMA50 выровнены в направлении разворота
+      Volume        25% — объём >= 1.5x от MA на свечах разворота
+      Structure     25% — цена закрылась по другую сторону уровня
+      Momentum      20% — RSI в зоне разворота (< 45 для SELL, > 55 для BUY)
+    """
+    if len(df) < 55:
+        return 0
+
+    # Считаем индикаторы только если их нет
+    if "ema20" not in df.columns:
+        df = df.copy()
+        df["ema20"] = ta.ema(df["close"], length=20)
+        df["ema50"] = ta.ema(df["close"], length=50)
+        df["rsi"]   = ta.rsi(df["close"], length=14)
+        df["atr"]   = ta.atr(df["high"], df["low"], df["close"], length=14)
+        df["vol_ma"] = df["volume"].rolling(20).mean()
+
+    last  = df.iloc[-1]
+    prev  = df.iloc[-2]
+    prev2 = df.iloc[-3]
+
+    close   = float(last["close"])
+    ema20   = float(last.get("ema20") or close)
+    ema50   = float(last.get("ema50") or close)
+    rsi     = float(last.get("rsi")   or 50)
+    volume  = float(last["volume"])
+    vol_ma  = float(last.get("vol_ma") or volume)
+
+    vol_ratio = volume / max(vol_ma, 1e-9)
+
+    score = 0
+
+    # ── 1. Trend Change (30 pts) ──────────────────────────────────────
+    if reverse_side == "BUY":
+        if ema20 > ema50:
+            score += 30   # EMA20 уже выше EMA50 — тренд сменился
+        elif ema20 > float(prev.get("ema20") or ema20):
+            score += 12   # EMA20 растёт, разворот начался
+    else:  # SELL
+        if ema20 < ema50:
+            score += 30
+        elif ema20 < float(prev.get("ema20") or ema20):
+            score += 12
+
+    # ── 2. Volume Confirmation (25 pts) ──────────────────────────────
+    if vol_ratio >= 1.5:
+        score += 25
+    elif vol_ratio >= 1.2:
+        score += 15
+    elif vol_ratio >= 1.0:
+        score += 5
+
+    # ── 3. Structure Break (25 pts) ───────────────────────────────────
+    # Проверяем, что 2 свечи подряд подтверждают разворот
+    prev_close  = float(prev["close"])
+    prev2_close = float(prev2["close"])
+    if reverse_side == "BUY":
+        # Два закрытия вверх
+        if close > prev_close > prev2_close:
+            score += 25
+        elif close > prev_close:
+            score += 12
+    else:  # SELL
+        # Два закрытия вниз
+        if close < prev_close < prev2_close:
+            score += 25
+        elif close < prev_close:
+            score += 12
+
+    # ── 4. Momentum / RSI (20 pts) ────────────────────────────────────
+    if reverse_side == "BUY":
+        if rsi > 55:
+            score += 20
+        elif rsi > 50:
+            score += 8
+        elif rsi > 45:
+            score += 0   # мёртвая зона
+    else:  # SELL
+        if rsi < 45:
+            score += 20
+        elif rsi < 50:
+            score += 8
+        else:
+            score += 0
+
+    return min(score, 100)
+
+
 
 # ============================================================
 # S1: EMA CROSSOVER — точный вход за структурой, R:R ≥ 2.5
@@ -303,7 +398,7 @@ class BollingerBandsStrategy(BaseStrategy):
             return None
 
         # EMA50 наклон совпадает (для BUY — ema50 растёт, для SELL — падает)
-        ema50_slope = float(last["ema50"]) - float(df.iloc[-5]["ema50"])
+        ema50_slope = float(last["ema50"]) - float(df["ema50"].iloc[-5] if len(df) >= 5 else last["ema50"])
         if side == "BUY" and ema50_slope < -atr * 0.5:
             return None
         if side == "SELL" and ema50_slope > atr * 0.5:
@@ -397,7 +492,8 @@ class RSIDivergenceStrategy(BaseStrategy):
         macd_bear_cross = prev["MACD_12_26_9"] > prev["MACDs_12_26_9"] and last["MACD_12_26_9"] < last["MACDs_12_26_9"]
 
         # Касание уровня: цена у EMA50 (зона поддержки/сопротивления)
-        near_ema50 = abs(last["close"] - last["ema50"]) / last["ema50"] < 0.012
+        _ema50_val = float(last["ema50"]) if not pd.isna(last.get("ema50", float("nan"))) else 0.0
+        near_ema50 = (_ema50_val > 0) and abs(last["close"] - _ema50_val) / _ema50_val < 0.012
 
         if not ((bull_div and macd_bull_cross) or (bear_div and macd_bear_cross)):
             return None
@@ -656,12 +752,17 @@ class ScalperGridStrategy(BaseStrategy):
         else:
             adx_not_rising = True
 
-        # 7. Volume in normal range: 0.45 to 1.25 of MA
-        normal_volume = (vol_ma > 0) and (0.45 * vol_ma <= volume <= 1.25 * vol_ma)
+        # 7. Volume in normal range (not dead market)
+        normal_volume = (vol_ma > 0) and (volume >= 0.5 * vol_ma)
+
+        # 8. ATR must be >= 0.8 × 20-period average (reject ultra-low volatility)
+        atr_mean20 = float(df["atr"].iloc[-20:].mean()) if len(df) >= 20 else atr
+        atr_above_avg = (atr_mean20 > 0) and (atr >= 0.8 * atr_mean20)
 
         flat_filters_pass = (
             tradable_atr and flat_ema and flat_slope
-            and range_width and adx_flat and adx_not_rising and normal_volume
+            and range_width and adx_flat and adx_not_rising
+            and normal_volume and atr_above_avg
         )
         if not flat_filters_pass:
             return None
@@ -670,6 +771,9 @@ class ScalperGridStrategy(BaseStrategy):
         candle_range = high - low
         buy_setup  = False
         sell_setup = False
+
+        # Объём должен подтверждать разворот: > 1.3x MA
+        volume_confirms = (vol_ma > 0) and (volume >= 1.3 * vol_ma)
 
         # BUY setup: lower BB rejection
         if (
@@ -681,6 +785,7 @@ class ScalperGridStrategy(BaseStrategy):
             and prev_rsi < 38
             and rsi > prev_rsi + 1.0
             and rsi < 48
+            and volume_confirms
         ):
             buy_setup = True
 
@@ -694,6 +799,7 @@ class ScalperGridStrategy(BaseStrategy):
             and prev_rsi > 62
             and rsi < prev_rsi - 1.0
             and rsi > 52
+            and volume_confirms
         ):
             sell_setup = True
 
@@ -722,29 +828,55 @@ class ScalperGridStrategy(BaseStrategy):
         rr = reward / risk
         risk_pct = risk / entry * 100
 
-        if risk_pct < 0.18 or risk_pct > 0.75 or rr < 1.55:
+        if risk_pct < 0.18 or risk_pct > 0.75 or rr < 2.0:
             return None
 
+        # ── REVERSAL ENGINE ───────────────────────────────────────────────────
+        # Если последняя сделка была убыточная в ТОМ ЖЕ направлении что текущий сигнал
+        # — ждём cooldown (уже есть). Если сигнал ПРОТИВ последнего SL (разворот)
+        # — требуем подтверждения reversal score >= 75.
+        reversal_factor = 1.0
+        if self._last_sl_side is not None:
+            # Переводим 'Buy'/'Sell' → 'BUY'/'SELL' для сравнения
+            last_sl_std = self._last_sl_side.upper()
+            if last_sl_std == "BUY" and side == "SELL":
+                # Разворот: LONG SL → пробуем SHORT
+                rev_score = compute_reversal_score(df, "SELL")
+                if rev_score < 75:
+                    return None   # Нет подтверждения разворота — ЖДЁМ
+                reversal_factor = 0.35  # Открываем 35% от нормального объёма
+            elif last_sl_std == "SELL" and side == "BUY":
+                # Разворот: SHORT SL → пробуем LONG
+                rev_score = compute_reversal_score(df, "BUY")
+                if rev_score < 75:
+                    return None
+                reversal_factor = 0.35
+
+        vol_ratio_val = round(volume / max(vol_ma, 1e-9), 2)
         filters_passed = {
-            "tradable_atr":  tradable_atr,
-            "flat_ema":      flat_ema,
-            "flat_slope":    flat_slope,
-            "range_width":   range_width,
-            "adx_flat":      adx_flat,
-            "normal_volume": normal_volume,
-            "rsi_reversion": True,
-            "rr":            round(rr, 2),
+            "tradable_atr":     tradable_atr,
+            "flat_ema":         flat_ema,
+            "flat_slope":       flat_slope,
+            "range_width":      range_width,
+            "adx_flat":         adx_flat,
+            "volume_confirms":  volume_confirms,
+            "atr_above_avg":    atr_above_avg,
+            "rsi_reversion":    True,
+            "volume_ratio":     vol_ratio_val,
+            "rr":               round(rr, 2),
+            "reversal_factor":  reversal_factor,
         }
 
         reason = (
-            f"Strict range rejection {'BUY lower BB' if buy_setup else 'SELL upper BB'} "
-            f"| ATR {atr_pct:.2f}% | ADX {adx:.1f} | RR {rr:.2f}"
+            f"S5 {'BUY lower BB' if buy_setup else 'SELL upper BB'} "
+            f"| ATR {atr_pct:.2f}% | ADX {adx:.1f} | RR {rr:.2f} | Vol×{vol_ratio_val}"
+            + (f" | REVERSAL×{reversal_factor}" if reversal_factor < 1.0 else "")
         )
 
         return TradingSignal(
             action=side,
             symbol=self.symbol,
-            confidence=0.74,
+            confidence=0.74 * reversal_factor + 0.74 * (1 - reversal_factor) * 0.5,
             entry_price=entry,
             stop_loss=round(sl_price, 8),
             take_profit=round(tp_price, 8),
@@ -794,7 +926,8 @@ class TrendFollowerStrategy(BaseStrategy):
         supert_val = last.get("SUPERT_10_3.0", float("nan"))
         if pd.isna(supert_val):
             supert_val = last.get("SUPERT_10_3", float("nan"))
-        touch_supert = not pd.isna(supert_val) and abs(last["close"] - supert_val) / supert_val < 0.015
+        touch_supert = (not pd.isna(supert_val) and float(supert_val) > 0
+                        and abs(last["close"] - float(supert_val)) / float(supert_val) < 0.015)
 
         # Дополнительно: RSI не перекуплен/перепродан (пуллбэк, а не экстремум)
         df["rsi"] = ta.rsi(df["close"], length=14)
@@ -897,7 +1030,8 @@ class MultiConfirmStrategy(BaseStrategy):
             return None   # без структуры — WAIT
 
         # Касание EMA21 (pullback к динамической поддержке)
-        touch_ema21 = abs(price - float(last["ema_21"])) / float(last["ema_21"]) < 0.010
+        _ema21_val = float(last["ema_21"]) if not pd.isna(last.get("ema_21", float("nan"))) else 0.0
+        touch_ema21 = (_ema21_val > 0) and abs(price - _ema21_val) / _ema21_val < 0.010
 
         ema_bull = price > float(last["ema_21"]) > float(last["ema_50"])
         ema_bear = price < float(last["ema_21"]) < float(last["ema_50"])
@@ -1447,7 +1581,7 @@ ALL_STRATEGIES = {
     "S2": BollingerBandsStrategy,
     # "S3": RSIDivergenceStrategy,  # ОТКЛЮЧЕНА: 0% WR, -$32 за 8 сделок (8 подряд убытков)
     "S4": BreakoutHunterStrategy,
-    # "S5": ScalperGridStrategy,    # ОТКЛЮЧЕНА: инвертированный R:R — avg win $0.49 vs avg SL $6.59
+    "S5": ScalperGridStrategy,        # SAFE MODE: R:R≥2.0, vol>1.3x, ATR>0.8avg, Reversal Engine
     "S6": TrendFollowerStrategy,
     # "S7": MultiConfirmStrategy,   # ОТКЛЮЧЕНА: 22% WR, -$8.84 за 9 сделок
     "S8": TrendMomentumStrategy,
