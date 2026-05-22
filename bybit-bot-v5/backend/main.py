@@ -56,6 +56,8 @@ from position_monitor import PositionMonitor
 from global_trade_guard import GlobalTradeGuard
 from strategies.tp_normalizer import normalize_take_profit
 from strategies.entry_filter import validate_entry_confirmation
+from strategies.time_rate import TimeRateManager
+from strategies.market_filters import calc_quality_score
 
 # ============================================================
 # Загрузка конфига
@@ -170,6 +172,11 @@ class BotState:
 
         # Единый защитный слой перед открытием сделок
         self.trade_guard = GlobalTradeGuard()
+
+        # TimeRate — кулдауны и anti-overtrade для скальперов
+        self.time_rate = TimeRateManager()
+        self.max_parallel_scalps     = int(os.getenv("MAX_PARALLEL_SCALPS", "2"))
+        self.scalper_priority_weight = float(os.getenv("SCALPER_PRIORITY_WEIGHT", "1.8"))
 
         # Режим сбора данных: убирает все лимиты (лосс-лимиты, кулдауны, Guard-блоки)
         self.training_mode: bool = False
@@ -783,6 +790,8 @@ async def _close_position_early(
     state.risk_manager.register_position_close(sid)
     _early_r = close_res.get("r_multiple", 0)
     state.adaptive.record(sid, _early_r)
+    if sid.startswith("SC_") or sid in ("S5", "S10", "S15"):
+        state.time_rate.register_close(sid, strat.symbol, pnl)
     if pnl > 0:
         state.trade_guard.record_win(sid)
     else:
@@ -1333,6 +1342,17 @@ async def trading_loop():
                     # Добавляем в буфер для fusion-анализа — только сигналы прошедшие R:R
                     state.signal_buffer.update(sid, signal, strat.timeframe)
 
+                    # TimeRate / anti-overtrade — только для скальп-стратегий
+                    if _scalp_like and not state.training_mode:
+                        _tr = state.time_rate.can_trade(sid, strat.symbol)
+                        if not _tr["ok"]:
+                            logger.info(f"{sid}: ⏳ TimeRate: {_tr['reason']}")
+                            continue
+                        _ot = state.time_rate.check_overtrade(sid, strat.symbol)
+                        if not _ot["ok"]:
+                            logger.info(f"{sid}: ⛔ Overtrade: {_ot['reason']}")
+                            continue
+
                     # Проверка риск-менеджера
                     # Скальперы SC_* обходят лимит позиций, но уважают дневные стопы
                     if not state.training_mode:
@@ -1506,6 +1526,39 @@ async def trading_loop():
                                 "info",
                             )
 
+                    # ── Quality score для скальп-стратегий ─────────────────────────────
+                    if _scalp_like and not state.training_mode:
+                        try:
+                            _ml_prob   = (ml_prediction.get("probability")
+                                          if ml_prediction and ml_prediction.get("available")
+                                          else None)
+                            _sp_pct    = (signal.filters_passed.get("spread_pct", 0.0)
+                                          if signal.filters_passed else 0.0)
+                            _atr_q_pct = (_entry_atr / signal.entry_price * 100
+                                          if _entry_atr and signal.entry_price else 0.0)
+                            _quality   = calc_quality_score(df, signal.action, _sp_pct, _ml_prob, _atr_q_pct)
+                            _min_q     = 8.0 if _is_scalper else 7.5
+                            if _quality < _min_q:
+                                logger.info(f"{sid}: 📊 Quality {_quality:.1f} < {_min_q} → skip")
+                                continue
+                            if signal.filters_passed is not None:
+                                signal.filters_passed["quality_score"] = round(_quality, 2)
+                        except Exception as _qe:
+                            logger.debug(f"Quality score error: {_qe}")
+
+                    # ── Ограничение параллельных скальперов SC_* ────────────────────────
+                    if _is_scalper and not state.training_mode:
+                        _active_scalps = sum(
+                            1 for _k2, _s2 in state.strategies.items()
+                            if _k2.startswith("SC_") and _s2.current_position
+                        )
+                        if _active_scalps >= state.max_parallel_scalps:
+                            logger.info(
+                                f"{sid}: 🚫 Лимит параллельных скальпов "
+                                f"({_active_scalps}/{state.max_parallel_scalps})"
+                            )
+                            continue
+
                     # Boost-режим: переопределить SL/TP и leverage
                     boost_params = state.boost.get_risk_params()
                     effective_boost_leverage = strat.leverage  # дефолт — собственное плечо стратегии
@@ -1562,6 +1615,19 @@ async def trading_loop():
                         if signal.size_factor < 1.0:
                             qty = round(qty * signal.size_factor, 6)
                             logger.info(f"{sid}: 🔄 Reversal объём ×{signal.size_factor:.0%} → qty={qty}")
+
+                    # ML protection: уменьшаем объём при низком WR (≥20 сделок)
+                    if strat.trades >= 20:
+                        _wr20 = strat.rolling_wr_20
+                        if _wr20 < 0.35:
+                            qty = round(qty * 0.25, 6)
+                            logger.warning(f"{sid}: 🔴 ML protect qty×0.25 (WR={_wr20:.0%})")
+                        elif _wr20 < 0.40:
+                            qty = round(qty * 0.50, 6)
+                            logger.info(f"{sid}: 🟡 ML protect qty×0.50 (WR={_wr20:.0%})")
+                        elif _wr20 < 0.45:
+                            qty = round(qty * 0.75, 6)
+                            logger.info(f"{sid}: 🟡 ML protect qty×0.75 (WR={_wr20:.0%})")
 
                     # ============== GlobalTradeGuard ==============
                     _guard_h1 = _get_h1_cached(strat.symbol) if state.bybit else None
@@ -1650,6 +1716,8 @@ async def trading_loop():
                         strat.current_position["qty"] = qty
                         strat.current_position["leverage"] = effective_leverage
                         strat.current_position["opened_at"] = state.paper.positions[signal.symbol]["opened_at"]
+                        if _scalp_like:
+                            state.time_rate.register_trade_open(sid, strat.symbol)
                         notional = qty * signal.entry_price
                         state.risk_manager.register_position_open(sid, notional)
                         _ptid = state.journal.log_trade({
@@ -1699,6 +1767,8 @@ async def trading_loop():
                             )
                             strat.current_position["qty"] = qty
                             strat.current_position["leverage"] = effective_leverage
+                            if _scalp_like:
+                                state.time_rate.register_trade_open(sid, strat.symbol)
                             notional = qty * signal.entry_price
                             state.risk_manager.register_position_open(sid, notional)
 
@@ -1786,6 +1856,8 @@ async def trading_loop():
                                 )
                                 state.risk_manager.register_trade_result(_sid, pnl)
                                 state.risk_manager.register_position_close(_sid)
+                                if _sid.startswith("SC_") or _sid in ("S5", "S10", "S15"):
+                                    state.time_rate.register_close(_sid, _strat.symbol, pnl)
                                 _paper_r = close_res.get("r_multiple", 0)
                                 state.adaptive.record(_sid, _paper_r)
                                 if _paper_jtid:
@@ -1854,6 +1926,8 @@ async def trading_loop():
 
                                 state.risk_manager.register_trade_result(sid, pnl_usd)
                                 state.risk_manager.register_position_close(sid)
+                                if sid.startswith("SC_") or sid in ("S5", "S10", "S15"):
+                                    state.time_rate.register_close(sid, strat.symbol, pnl_usd)
                                 # Адаптивное самообучение: записываем результат в R-multiple
                                 state.adaptive.record(sid, r_multiple)
                                 # AI-советы каждые 10 закрытых сделок стратегии

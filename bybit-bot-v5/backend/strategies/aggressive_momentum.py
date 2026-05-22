@@ -24,6 +24,7 @@ SHORT: зеркально
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -156,6 +157,12 @@ class AggressiveMomentumStrategy(BaseStrategy):
     _TP2_PCT = 1.5   # 30% позиции
     _TP3_PCT = 2.5   # 30% позиции
 
+    # Защита от потерь
+    _MAX_DAILY_TRADES   = 6      # максимум сделок в день
+    _MIN_WR_THRESHOLD   = 0.58   # минимальный WR за 20 сделок (иначе пауза)
+    _BLOCK_LOSSES       = 3      # убытков подряд → 180мин блок
+    _BLOCK_MIN          = 180    # минут блокировки
+
     def __init__(self, symbol: str = "OPUSDT", **kwargs):
         super().__init__(
             symbol=symbol,
@@ -169,6 +176,10 @@ class AggressiveMomentumStrategy(BaseStrategy):
             edge_wr_target=0.60,
             **kwargs,
         )
+        from datetime import datetime, timezone
+        self._daily_trades: int = 0
+        self._daily_date:   Optional[str]      = None
+        self._blocked_until: Optional[datetime] = None
 
     def analyze(
         self,
@@ -182,6 +193,38 @@ class AggressiveMomentumStrategy(BaseStrategy):
         df_h1  — не используется (для совместимости)
         """
         if df is None or len(df) < self._MIN_BARS:
+            return None
+
+        # ── Защита S15: блок / дневной лимит / min WR ─────────────────────
+        _now = datetime.now(timezone.utc)
+
+        if self._blocked_until and _now < self._blocked_until:
+            _rem = int((self._blocked_until - _now).total_seconds() / 60)
+            logger.info(f"S15: заблокирован ещё {_rem} мин (3 убытка подряд)")
+            return None
+
+        # Сброс дневного счётчика при смене даты
+        _today = _now.strftime("%Y-%m-%d")
+        if self._daily_date != _today:
+            self._daily_date   = _today
+            self._daily_trades = 0
+
+        if self._daily_trades >= self._MAX_DAILY_TRADES:
+            logger.info(f"S15: дневной лимит {self._MAX_DAILY_TRADES} сделок исчерпан")
+            return None
+
+        # Минимальный WR после накопления статистики (≥20 сделок)
+        if self.trades >= 20 and self.rolling_wr_20 < self._MIN_WR_THRESHOLD:
+            logger.info(
+                f"S15: WR {self.rolling_wr_20:.0%} < {self._MIN_WR_THRESHOLD:.0%} → пауза"
+            )
+            return None
+
+        # Блокировка после N убытков подряд
+        if self.consecutive_losses >= self._BLOCK_LOSSES:
+            self._blocked_until     = _now + timedelta(minutes=self._BLOCK_MIN)
+            self.consecutive_losses = 0
+            logger.warning(f"S15: {self._BLOCK_LOSSES} убытка подряд → блок {self._BLOCK_MIN} мин")
             return None
 
         close  = df["close"].astype(float)
@@ -297,6 +340,7 @@ class AggressiveMomentumStrategy(BaseStrategy):
         ]
         reason = " | ".join(reason_parts)
 
+        self._daily_trades += 1
         return TradingSignal(
             action=action,
             symbol=self.symbol,

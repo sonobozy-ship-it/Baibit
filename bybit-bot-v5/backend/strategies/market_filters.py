@@ -336,6 +336,96 @@ class PerSymbolGuard:
 # 5. calc_ai_score — мультифакторный скоринг сделки
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 5a. calc_quality_score — оценка качества сделки 0-10
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calc_quality_score(
+    df:            pd.DataFrame,
+    signal_action: str,
+    spread_pct:    float = 0.0,
+    ml_prob:       Optional[float] = None,
+    atr_pct:       float = 0.0,
+) -> float:
+    """
+    Trade quality score 0-10. Min 7.5 (scalper: 8.0) to trade.
+
+    Weights: Trend=25%, Momentum=20%, Volume=20%, Spread=15%, Volatility=10%, ML=10%
+    """
+    if len(df) < 50:
+        return 5.0
+
+    close  = df["close"].astype(float)
+    volume = df["volume"].astype(float)
+    c0     = float(close.iloc[-1])
+
+    score = 0.0
+
+    # Trend (2.5 pts): EMA stack alignment
+    e8  = float(close.ewm(span=8,  adjust=False).mean().iloc[-1])
+    e21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
+    e50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+    if signal_action == "BUY":
+        if e8 > e21 > e50 and c0 > e8:
+            score += 2.5
+        elif e21 > e50 and c0 > e21:
+            score += 1.0
+    else:
+        if e8 < e21 < e50 and c0 < e8:
+            score += 2.5
+        elif e21 < e50 and c0 < e21:
+            score += 1.0
+
+    # Momentum (2.0 pts): RSI zone
+    rsi = _simple_rsi(close, 14)
+    if signal_action == "BUY":
+        if 50 <= rsi <= 70:
+            score += 2.0
+        elif 40 <= rsi < 50 or 70 < rsi <= 76:
+            score += 1.0
+    else:
+        if 30 <= rsi <= 50:
+            score += 2.0
+        elif 24 <= rsi < 30 or 50 < rsi <= 60:
+            score += 1.0
+
+    # Volume (2.0 pts): current vs 20-bar avg
+    vol_avg   = float(volume.rolling(20).mean().iloc[-1])
+    vol_ratio = float(volume.iloc[-1]) / (vol_avg + 1e-9)
+    if vol_ratio >= 1.5:
+        score += 2.0
+    elif vol_ratio >= 1.0:
+        score += 1.0
+
+    # Spread (1.5 pts)
+    if spread_pct <= 0.03:
+        score += 1.5
+    elif spread_pct <= 0.06:
+        score += 0.8
+    elif spread_pct <= 0.09:
+        score += 0.3
+
+    # Volatility (1.0 pts): ATR % in healthy range
+    if 0.2 <= atr_pct <= 1.5:
+        score += 1.0
+    elif (0.1 <= atr_pct < 0.2) or (1.5 < atr_pct <= 2.0):
+        score += 0.5
+
+    # ML probability (1.0 pts)
+    if ml_prob is None:
+        score += 0.5
+    elif ml_prob >= 0.65:
+        score += 1.0
+    elif ml_prob >= 0.55:
+        score += 0.5
+
+    return round(min(score, 10.0), 2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. calc_ai_score — мультифакторный скоринг сделки
+# ─────────────────────────────────────────────────────────────────────────────
+
 def calc_ai_score(
     trend:      bool,
     volume:     bool,

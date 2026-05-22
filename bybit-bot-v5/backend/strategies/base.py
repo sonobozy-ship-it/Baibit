@@ -123,25 +123,47 @@ class BaseStrategy(ABC):
 
     def check_trailing_stop(self, current_price: float) -> Optional[float]:
         """
-        Трейлинг-стоп. Активируется после переноса в безубыток.
+        Трейлинг-стоп. Активируется после BE ИЛИ если пройдено ≥65% пути к TP.
+        Требует минимум 0.12% прибыли. Не трейлит в минус (floor = entry).
         Возвращает новый SL или None.
         """
-        if not self.current_position or not self.current_position.get("be_moved"):
+        if not self.current_position:
             return None
 
-        entry = self.current_position["entry"]
-        side = self.current_position["side"]
+        entry      = self.current_position["entry"]
+        side       = self.current_position["side"]
+        tp         = self.current_position["tp"]
         current_sl = self.current_position["sl"]
+        be_moved   = self.current_position.get("be_moved", False)
+
+        _TRAIL_ACTIVATE_PROGRESS = 0.65
+        _MIN_PROFIT_PCT          = 0.12
 
         if side == "Buy":
-            # Трейлинг для лонга: SL подтягивается за ценой
+            tp_dist    = tp - entry
+            progress   = (current_price - entry) / tp_dist if tp_dist > 0 else 0.0
+            profit_pct = (current_price - entry) / entry * 100 if entry > 0 else 0.0
+        else:
+            tp_dist    = entry - tp
+            progress   = (entry - current_price) / tp_dist if tp_dist > 0 else 0.0
+            profit_pct = (entry - current_price) / entry * 100 if entry > 0 else 0.0
+
+        if not be_moved and progress < _TRAIL_ACTIVATE_PROGRESS:
+            return None
+
+        if profit_pct < _MIN_PROFIT_PCT:
+            return None
+
+        if side == "Buy":
             new_sl = current_price * (1 - self.trailing_stop_pct / 100)
+            new_sl = max(new_sl, entry)
             if new_sl > current_sl:
                 self.current_position["sl"] = new_sl
                 logger.info(f"{self.ID} {self.symbol}: 🎯 Trailing SL → {new_sl:.4f}")
                 return new_sl
-        else:  # Sell
+        else:
             new_sl = current_price * (1 + self.trailing_stop_pct / 100)
+            new_sl = min(new_sl, entry)
             if new_sl < current_sl:
                 self.current_position["sl"] = new_sl
                 logger.info(f"{self.ID} {self.symbol}: 🎯 Trailing SL → {new_sl:.4f}")

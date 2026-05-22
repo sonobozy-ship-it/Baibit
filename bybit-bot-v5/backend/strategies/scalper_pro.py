@@ -255,7 +255,7 @@ class ScalperProStrategy(BaseStrategy):
             stop_loss_pct=kwargs.pop("stop_loss_pct", 0.12),
             take_profit_pct=kwargs.pop("take_profit_pct", 0.30),
             breakeven_pct=kwargs.pop("breakeven_pct", 0.15),
-            trailing_stop_pct=kwargs.pop("trailing_stop_pct", 0.08),
+            trailing_stop_pct=kwargs.pop("trailing_stop_pct", 0.18),
             max_hold_minutes=kwargs.pop("max_hold_minutes", 30.0),
             **kwargs,
         )
