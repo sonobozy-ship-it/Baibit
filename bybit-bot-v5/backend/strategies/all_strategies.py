@@ -12,6 +12,7 @@ from .base import BaseStrategy, TradingSignal
 from .trend_fib import TrendMomentumStrategy, TrendFibonacciStrategy
 from .scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
 from .aggressive_momentum import AggressiveMomentumStrategy
+from .market_filters import MarketFilter, HTFFilter, LevelBuilder, calc_ai_score
 
 
 # ============================================================
@@ -623,63 +624,150 @@ class BreakoutHunterStrategy(BaseStrategy):
 
 
 # ============================================================
-# S5: STRICT MEAN-REVERSION — BB rejection in flat market
+# S5: TREND-MOMENTUM SCALPER — 4/6 подтверждений, RR≥2.0
 # ============================================================
 class ScalperGridStrategy(BaseStrategy):
+    """
+    S5 — трендовый скальпер на DOGE 5m.
+    Торгует ТОЛЬКО по тренду, НЕ во флэте.
+
+    6 подтверждений (нужно минимум 4):
+      trend      — EMA20 > EMA50 (BUY) / EMA20 < EMA50 (SELL)
+      momentum   — RSI 55-72 (BUY) / RSI 28-45 (SELL)
+      volume     — спайк >= 1.3× MA20
+      volatility — ATR в диапазоне 0.15-2.0%
+      htf        — H1 EMA50 > EMA200 (BUY) / EMA50 < EMA200 (SELL)
+      liquidity  — расстояние до ближайшего S/R > 0.25%
+
+    Торговля:
+      - Нет Early TP (ПОЛНОСТЬЮ отключён)
+      - Трейлинг активируется при >= 70% пути к TP, дистанция = ATR × 0.7
+      - После SL: 5 свечей кулдаун (25 мин на 5m TF)
+      - После 3 подряд SL: монета заблокирована 2 часа
+      - Не торговать если рынок флэтовый (MarketFilter)
+    """
+
     ID = "S5"
     NAME = "SCALPER GRID"
-    DESCRIPTION = "Строгий mean-reversion: отказ от края Bollinger в плоском рынке"
-    REGIME_PREFERENCE = ["flat"]
+    DESCRIPTION = "Trend-Momentum скальпер: EMA+RSI+Volume+ATR+HTF, 4/6 confirms, RR≥2.0"
+    REGIME_PREFERENCE = ["uptrend", "downtrend"]
+
+    _MIN_CONFIRMS    = 4
+    _MIN_RR          = 2.0
+    _TP_TRAIL_THRESH = 70.0  # % прогресса к TP для активации ATR trailing
+    _ATR_TRAIL_MULT  = 0.7
 
     def __init__(self, **kwargs):
         super().__init__(
-            stop_loss_pct=0.5,
-            take_profit_pct=1.0,
+            stop_loss_pct=1.0,
+            take_profit_pct=2.5,
             edge_wr_target=0.60,
             timeframe="5",
+            breakeven_pct=0.8,
+            trailing_stop_pct=0.5,
             **kwargs,
         )
-        self.max_hold_minutes = 45
-        self._last_entry_at: Optional[datetime] = None
+        self.max_hold_minutes = 60
+        self._entry_atr: float = 0.0
         self._sl_cooldown_until: Optional[datetime] = None
-
-    def register_position(self, side: str, entry: float, sl: float, tp: float):
-        super().register_position(side, entry, sl, tp)
-        self._last_entry_at = datetime.now(timezone.utc)
+        self._block_until: Optional[datetime] = None
+        self._consec_sl_count: int = 0
 
     def close_position(self, exit_price: float, qty: float = 1.0, fees_pct: float = 0.06):
         result = super().close_position(exit_price, qty, fees_pct)
-        # После убытка — 10-минутный кулдаун, чтобы не входить сразу после SL
         if result.get("pnl_usd", 0) < -0.05:
-            self._sl_cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=10)
+            # 5 свечей по 5 мин = 25 мин кулдаун
+            self._sl_cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=25)
+            self._consec_sl_count += 1
+            if self._consec_sl_count >= 3:
+                self._block_until = datetime.now(timezone.utc) + timedelta(hours=2)
+                self._consec_sl_count = 0
+                import logging as _l
+                _l.getLogger(__name__).warning(
+                    f"[S5] {self.symbol}: 3 подряд SL → заблокирован на 2ч"
+                )
+        else:
+            self._consec_sl_count = 0
         return result
 
-    def analyze(self, df: pd.DataFrame) -> Optional[TradingSignal]:
-        if len(df) < 80:
+    def check_early_tp(self, current_price: float, threshold_pct: float = 85.0) -> None:
+        """S5: Early TP ПОЛНОСТЬЮ ОТКЛЮЧЁН. Только SL, TP или trailing."""
+        return None
+
+    def check_trailing_stop(self, current_price: float) -> Optional[float]:
+        """
+        Трейлинг активируется только при >= 70% пути к TP.
+        Дистанция = ATR(14 на входе) × 0.7.
+        """
+        if not self.current_position:
+            return None
+
+        entry      = self.current_position["entry"]
+        side       = self.current_position["side"]
+        tp         = self.current_position["tp"]
+        current_sl = self.current_position["sl"]
+
+        if side == "Buy":
+            tp_dist  = tp - entry
+            progress = (current_price - entry) / tp_dist * 100 if tp_dist > 0 else 0
+        else:
+            tp_dist  = entry - tp
+            progress = (entry - current_price) / tp_dist * 100 if tp_dist > 0 else 0
+
+        if progress < self._TP_TRAIL_THRESH:
+            return None
+
+        trail_dist = (
+            self._entry_atr * self._ATR_TRAIL_MULT
+            if self._entry_atr > 0
+            else current_price * self.trailing_stop_pct / 100
+        )
+
+        if side == "Buy":
+            new_sl = current_price - trail_dist
+            if new_sl > current_sl:
+                self.current_position["sl"] = new_sl
+                return new_sl
+        else:
+            new_sl = current_price + trail_dist
+            if new_sl < current_sl:
+                self.current_position["sl"] = new_sl
+                return new_sl
+        return None
+
+    def analyze(
+        self,
+        df: pd.DataFrame,
+        df_h1: Optional[pd.DataFrame] = None,
+    ) -> Optional[TradingSignal]:
+        if len(df) < 220:
             return None
 
         now = datetime.now(timezone.utc)
-        # Кулдаун после SL: 10 мин
+
+        # ── Блокировка ─────────────────────────────────────────────────────────
+        if self._block_until and now < self._block_until:
+            rem = int((self._block_until - now).total_seconds() / 60)
+            import logging as _l
+            _l.getLogger(__name__).debug(f"[S5] {self.symbol}: blocked {rem}min after 3 SLs")
+            return None
         if self._sl_cooldown_until and now < self._sl_cooldown_until:
             return None
-        # Минимум 5 мин между входами (1 свеча на TF5)
-        if self._last_entry_at and (now - self._last_entry_at).total_seconds() < 300:
+
+        # ── Глобальный рыночный фильтр ─────────────────────────────────────────
+        mkt = MarketFilter.check(df, self.symbol)
+        if not mkt["ok"]:
+            import logging as _l
+            _l.getLogger(__name__).debug(f"[S5] {self.symbol}: {mkt['reason']}")
             return None
-        # Срок действия Reversal Engine: сбрасываем _last_sl_side после 4 часов
-        if (
-            self._last_sl_side is not None
-            and self._last_sl_time is not None
-            and (now - self._last_sl_time).total_seconds() > 4 * 3600
-        ):
-            self._last_sl_side = None
-            self._last_sl_time = None
 
         df = df.copy()
 
-        # ── Indicators ──────────────────────────────────────────────────────
+        # ── Индикаторы ─────────────────────────────────────────────────────────
         df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=14)
         df["ema20"]  = ta.ema(df["close"], length=20)
         df["ema50"]  = ta.ema(df["close"], length=50)
+        df["ema200"] = ta.ema(df["close"], length=200)
         df["rsi"]    = ta.rsi(df["close"], length=14)
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
@@ -687,206 +775,155 @@ class ScalperGridStrategy(BaseStrategy):
         if adx_df is not None:
             df = df.join(adx_df)
 
-        bb = ta.bbands(df["close"], length=20, std=2)
-        if bb is not None:
-            df = df.join(bb)
+        last = df.iloc[-1]
 
-        last  = df.iloc[-1]
-        prev  = df.iloc[-2]
+        def _f(col: str, fallback: float) -> float:
+            v = last.get(col, float("nan"))
+            return fallback if pd.isna(v) else float(v)
 
-        # Extract values — guard NaN
         close  = float(last["close"])
-        open_  = float(last["open"])
-        high   = float(last["high"])
-        low    = float(last["low"])
-        atr    = float(last["atr"])   if not pd.isna(last.get("atr",   float("nan"))) else 0.0
-        ema20  = float(last["ema20"]) if not pd.isna(last.get("ema20", float("nan"))) else close
-        ema50  = float(last["ema50"]) if not pd.isna(last.get("ema50", float("nan"))) else close
-        rsi    = float(last["rsi"])   if not pd.isna(last.get("rsi",   float("nan"))) else 50.0
-        prev_rsi = float(prev["rsi"]) if not pd.isna(prev.get("rsi",   float("nan"))) else 50.0
+        high_  = float(last["high"])
+        low_   = float(last["low"])
+        atr    = _f("atr",    0.0)
+        ema20  = _f("ema20",  close)
+        ema50  = _f("ema50",  close)
+        ema200 = _f("ema200", close)
+        rsi    = _f("rsi",    50.0)
         volume = float(last["volume"])
-        vol_ma = float(last["vol_ma"]) if not pd.isna(last.get("vol_ma", float("nan"))) else volume
+        vol_ma = _f("vol_ma", volume)
 
-        # ADX
         adx_col = next((c for c in df.columns if c.startswith("ADX_")), None)
-        if adx_col is None:
-            return None
-        adx = float(last[adx_col]) if not pd.isna(last.get(adx_col, float("nan"))) else 99.0
+        adx = _f(adx_col, 0.0) if adx_col else 0.0
 
-        # BB columns
-        bbl_col = next((c for c in df.columns if c.startswith("BBL_")), None)
-        bbu_col = next((c for c in df.columns if c.startswith("BBU_")), None)
-        bbm_col = next((c for c in df.columns if c.startswith("BBM_")), None)
-        if not bbl_col or not bbu_col or not bbm_col:
-            return None
-        bbl = float(last[bbl_col]) if not pd.isna(last.get(bbl_col, float("nan"))) else 0.0
-        bbu = float(last[bbu_col]) if not pd.isna(last.get(bbu_col, float("nan"))) else 0.0
-        bbm = float(last[bbm_col]) if not pd.isna(last.get(bbm_col, float("nan"))) else close
-
-        if atr <= 0 or close <= 0 or bbl <= 0 or bbu <= 0:
+        if atr <= 0 or close <= 0:
             return None
 
-        # ── FLAT MARKET FILTERS ──────────────────────────────────────────────
         atr_pct = atr / close * 100
 
-        # 1. ATR range: 0.12% to 1.20%
-        tradable_atr = 0.12 <= atr_pct <= 1.20
+        # ── 6 подтверждений ────────────────────────────────────────────────────
+        buy_trend     = ema20 > ema50
+        sell_trend    = ema20 < ema50
+        buy_momentum  = 55 <= rsi <= 72
+        sell_momentum = 28 <= rsi <= 45
+        vol_spike     = vol_ma > 0 and volume >= 1.3 * vol_ma
+        good_atr      = 0.15 <= atr_pct <= 2.0
+        trend_adx     = adx >= 20
 
-        # 2. EMA20 and EMA50 close together
-        flat_ema = abs(ema20 - ema50) / close * 100 < 0.45
-
-        # 3. EMA50 slope < 0.35% over last 10 candles
-        if len(df) >= 11:
-            ema50_10 = float(df["ema50"].iloc[-11])
-            ema50_slope_pct = abs(ema50 - ema50_10) / max(ema50_10, 1e-9) * 100
+        # HTF: H1 EMA50 vs EMA200 (fallback — 5m собственный)
+        if df_h1 is not None and len(df_h1) >= 210:
+            c_h1  = df_h1["close"].astype(float)
+            e50h  = float(c_h1.ewm(span=50,  adjust=False).mean().iloc[-1])
+            e200h = float(c_h1.ewm(span=200, adjust=False).mean().iloc[-1])
+            buy_htf   = e50h > e200h
+            sell_htf  = e50h < e200h
+            htf_label = "H1"
         else:
-            ema50_slope_pct = 99.0
-        flat_slope = ema50_slope_pct < 0.35
+            buy_htf   = ema50 > ema200
+            sell_htf  = ema50 < ema200
+            htf_label = "5m_approx"
 
-        # 4. BB width in range
-        bbw = (bbu - bbl) / close
-        range_width = 0.006 <= bbw <= 0.045
+        levels            = LevelBuilder.build(df)
+        buy_liq_ok,  bdist  = LevelBuilder.distance_ok(close, "BUY",  levels, 0.25)
+        sell_liq_ok, sdist  = LevelBuilder.distance_ok(close, "SELL", levels, 0.25)
 
-        # 5. ADX < 16
-        adx_flat = adx < 16
+        buy_confirms  = sum([buy_trend,  buy_momentum,  vol_spike, good_atr, buy_htf,  buy_liq_ok])
+        sell_confirms = sum([sell_trend, sell_momentum, vol_spike, good_atr, sell_htf, sell_liq_ok])
 
-        # 6. ADX not accelerating: last ADX <= mean of previous 5 + 1.0
-        if adx_col and len(df) >= 7:
-            prev5_adx = df[adx_col].iloc[-7:-2].dropna()
-            adx_mean5 = float(prev5_adx.mean()) if len(prev5_adx) > 0 else adx
-            adx_not_rising = adx <= adx_mean5 + 1.0
-        else:
-            adx_not_rising = True
+        # Тренд — обязательное условие
+        buy_ok  = buy_trend  and trend_adx and buy_confirms  >= self._MIN_CONFIRMS
+        sell_ok = sell_trend and trend_adx and sell_confirms >= self._MIN_CONFIRMS
 
-        # 7. Volume in normal range (not dead market)
-        normal_volume = (vol_ma > 0) and (volume >= 0.5 * vol_ma)
-
-        # 8. ATR must be >= 0.8 × 20-period average (reject ultra-low volatility)
-        if len(df) >= 20:
-            atr_mean20 = float(df["atr"].iloc[-20:].mean())
-            atr_above_avg = (atr_mean20 > 0) and (atr >= 0.8 * atr_mean20)
-        else:
-            atr_above_avg = True  # insufficient data — skip filter
-
-        flat_filters_pass = (
-            tradable_atr and flat_ema and flat_slope
-            and range_width and adx_flat and adx_not_rising
-            and normal_volume and atr_above_avg
-        )
-        if not flat_filters_pass:
+        if not buy_ok and not sell_ok:
+            import logging as _l
+            _l.getLogger(__name__).debug(
+                f"[S5] {self.symbol}: confirms B={buy_confirms}/S={sell_confirms} < {self._MIN_CONFIRMS}"
+            )
             return None
+        if buy_ok and sell_ok:
+            buy_ok  = rsi > 50
+            sell_ok = not buy_ok
 
-        # ── REJECTION CANDLE DETECTION ───────────────────────────────────────
-        candle_range = high - low
-        buy_setup  = False
-        sell_setup = False
+        side     = "BUY" if buy_ok else "SELL"
+        entry    = close
+        confirms = buy_confirms if buy_ok else sell_confirms
 
-        # Объём должен подтверждать разворот: > 1.3x MA
-        volume_confirms = (vol_ma > 0) and (volume >= 1.3 * vol_ma)
-
-        # BUY setup: lower BB rejection
-        if (
-            low <= bbl * 1.003          # touches/pierces lower BB
-            and close > bbl             # closes back above lower BB
-            and candle_range > 0
-            and (min(open_, close) - low) > 0.3 * candle_range   # lower wick
-            and abs(close - open_) < atr * 0.6                    # body not too large
-            and prev_rsi < 38
-            and rsi > prev_rsi + 1.0
-            and rsi < 48
-            and volume_confirms
-        ):
-            buy_setup = True
-
-        # SELL setup: upper BB rejection
-        if (
-            high >= bbu * 0.997         # touches/pierces upper BB
-            and close < bbu             # closes back below upper BB
-            and candle_range > 0
-            and (high - max(open_, close)) > 0.3 * candle_range   # upper wick
-            and abs(close - open_) < atr * 0.6
-            and prev_rsi > 62
-            and rsi < prev_rsi - 1.0
-            and rsi > 52
-            and volume_confirms
-        ):
-            sell_setup = True
-
-        if not (buy_setup or sell_setup):
-            return None
-        if buy_setup and sell_setup:
-            buy_setup = (rsi < 50)
-            sell_setup = not buy_setup
-
-        side = "BUY" if buy_setup else "SELL"
-        entry = close
-
-        # ── SL / TP ──────────────────────────────────────────────────────────
+        # ── SL / TP ────────────────────────────────────────────────────────────
         if side == "BUY":
-            sl_price = min(float(df.iloc[-12:]["low"].min()), low) - atr * 0.20
-            tp_price = bbm
+            recent_low = float(df["low"].iloc[-20:].min())
+            sl_price   = min(recent_low, low_) - atr * 0.3
+            risk       = entry - sl_price
+            tp_price   = entry + risk * 2.5
         else:
-            sl_price = max(float(df.iloc[-12:]["high"].max()), high) + atr * 0.20
-            tp_price = bbm
+            recent_high = float(df["high"].iloc[-20:].max())
+            sl_price    = max(recent_high, high_) + atr * 0.3
+            risk        = sl_price - entry
+            tp_price    = entry - risk * 2.5
 
-        # ── RISK CHECKS ──────────────────────────────────────────────────────
-        risk   = abs(entry - sl_price)
-        reward = abs(tp_price - entry)
         if risk <= 0:
             return None
-        rr = reward / risk
-        risk_pct = risk / entry * 100
 
-        if risk_pct < 0.18 or risk_pct > 0.75 or rr < 2.0:
+        rr = abs(tp_price - entry) / risk
+        if rr < self._MIN_RR:
+            import logging as _l
+            _l.getLogger(__name__).debug(f"[S5] {self.symbol}: R:R {rr:.2f} < {self._MIN_RR}")
             return None
 
-        # ── REVERSAL ENGINE ───────────────────────────────────────────────────
-        # Если последняя сделка была убыточная в ТОМ ЖЕ направлении что текущий сигнал
-        # — ждём cooldown (уже есть). Если сигнал ПРОТИВ последнего SL (разворот)
-        # — требуем подтверждения reversal score >= 75.
-        reversal_factor = 1.0
-        if self._last_sl_side is not None:  # already normalized to "BUY"/"SELL" in base.py
-            if self._last_sl_side == "BUY" and side == "SELL":
-                rev_score = compute_reversal_score(df, "SELL")
-                if rev_score < 75:
-                    return None
-                reversal_factor = 0.35
-            elif self._last_sl_side == "SELL" and side == "BUY":
-                rev_score = compute_reversal_score(df, "BUY")
-                if rev_score < 75:
-                    return None
-                reversal_factor = 0.35
+        # ── AI Score ───────────────────────────────────────────────────────────
+        ai_score = calc_ai_score(
+            trend=(buy_trend if buy_ok else sell_trend),
+            volume=vol_spike,
+            htf=(buy_htf if buy_ok else sell_htf),
+            liquidity=(buy_liq_ok if buy_ok else sell_liq_ok),
+            rr=rr,
+            volatility=good_atr,
+        )
+        if ai_score < 80:
+            import logging as _l
+            _l.getLogger(__name__).debug(f"[S5] {self.symbol}: AI score {ai_score} < 80")
+            return None
 
-        vol_ratio_val = round(volume / max(vol_ma, 1e-9), 2)
-        filters_passed = {
-            "tradable_atr":    tradable_atr,
-            "flat_ema":        flat_ema,
-            "flat_slope":      flat_slope,
-            "range_width":     range_width,
-            "adx_flat":        adx_flat,
-            "volume_confirms": volume_confirms,
-            "atr_above_avg":   atr_above_avg,
-            "rsi_reversion":   True,
-            "volume_ratio":    vol_ratio_val,
-            "rr":              round(rr, 2),
-        }
+        # Сохраняем ATR для ATR-trailing
+        self._entry_atr = atr
+
+        dist_pct = bdist if buy_ok else sdist
+        vol_ratio = round(volume / max(vol_ma, 1e-9), 2)
 
         reason = (
-            f"S5 {'BUY lower BB' if buy_setup else 'SELL upper BB'} "
-            f"| ATR {atr_pct:.2f}% | ADX {adx:.1f} | RR {rr:.2f} | Vol×{vol_ratio_val}"
-            + (f" | REVERSAL×{reversal_factor:.0%}" if reversal_factor < 1.0 else "")
+            f"S5 {side} | {confirms}/6 confirms | RR={rr:.2f} | "
+            f"RSI={rsi:.0f} | ADX={adx:.0f} | ATR={atr_pct:.2f}% | "
+            f"HTF={htf_label} | AI={ai_score} | dist={dist_pct:.2f}%"
         )
 
         return TradingSignal(
             action=side,
             symbol=self.symbol,
-            confidence=0.74,
+            confidence=round(min(0.85, 0.60 + confirms * 0.04), 3),
             entry_price=entry,
             stop_loss=round(sl_price, 8),
             take_profit=round(tp_price, 8),
             reason=reason,
-            filters_passed=filters_passed,
-            size_factor=reversal_factor,   # ← 0.35 при развороте, 1.0 при нормальном входе
+            filters_passed={
+                "confirms":      confirms,
+                "min_confirms":  self._MIN_CONFIRMS,
+                "ai_score":      ai_score,
+                "ema_trend":     buy_trend if buy_ok else sell_trend,
+                "rsi_momentum":  buy_momentum if buy_ok else sell_momentum,
+                "rsi_value":     round(rsi, 1),
+                "volume_spike":  vol_spike,
+                "vol_ratio":     vol_ratio,
+                "volatility_ok": good_atr,
+                "atr_pct":       round(atr_pct, 3),
+                "adx":           round(adx, 1),
+                "htf_ok":        buy_htf if buy_ok else sell_htf,
+                "htf_source":    htf_label,
+                "liquidity_ok":  buy_liq_ok if buy_ok else sell_liq_ok,
+                "dist_pct":      dist_pct,
+                "rr":            round(rr, 2),
+                "early_tp":      "DISABLED",
+                "mkt_filter":    mkt["reason"],
+                "mkt_atr_pct":   mkt["atr_pct"],
+                "mkt_adx":       mkt["adx"],
+            },
         )
 
 

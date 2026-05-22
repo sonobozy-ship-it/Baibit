@@ -1271,11 +1271,17 @@ async def trading_loop():
 
                     # Поиск сигнала
                     # SC_*, S10 и S15 получают MTF данные для trend-фильтра
+                    # S5 получает df_h1 для HTF-проверки (EMA50 vs EMA200)
                     if sid.startswith("SC_") or sid in ("S15", "S10"):
                         signal = strat.analyze(
                             df,
                             df_h1  = _get_h1_cached(strat.symbol),
                             df_m15 = _get_m15_cached(strat.symbol),
+                        )
+                    elif sid == "S5":
+                        signal = strat.analyze(
+                            df,
+                            df_h1 = _get_h1_cached(strat.symbol),
                         )
                     else:
                         signal = strat.analyze(df)
