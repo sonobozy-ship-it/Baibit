@@ -187,6 +187,7 @@ class TelegramCommander:
             "/strategies": self._cmd_strategies,
             "/enable":     self._cmd_enable,
             "/disable":    self._cmd_disable,
+            "/reset":      self._cmd_reset,
             "/risk":       self._cmd_risk,
             "/ai":         self._cmd_ai,
             "/news":       self._cmd_news,
@@ -251,6 +252,25 @@ class TelegramCommander:
         if data.startswith("close_pos:"):
             sid = data[len("close_pos:"):]
             await self._cmd_close_one_position(fake_upd, sid)
+            return
+
+        # Включение/отключение/сброс стратегии
+        if data.startswith("enable:"):
+            await self._cb_toggle_strategy(fake_upd, data[len("enable:"):], True)
+            return
+        if data.startswith("disable:"):
+            await self._cb_toggle_strategy(fake_upd, data[len("disable:"):], False)
+            return
+        if data.startswith("reset:"):
+            await self._cb_reset_strategy(fake_upd, data[len("reset:"):])
+            return
+        if data == "enable_all":
+            await self._cmd_enable(fake_upd, "ALL")
+            await self._cmd_strategies(fake_upd, "")
+            return
+        if data == "disable_all":
+            await self._cmd_disable(fake_upd, "ALL")
+            await self._cmd_strategies(fake_upd, "")
             return
 
         # AI-советы по стратегии
@@ -524,7 +544,9 @@ class TelegramCommander:
             "/go — запустить  |  /stop — стоп\n"
             "/pause — пауза  |  /resume — продолжить\n"
             "/paper_on  |  /paper_off\n"
-            "/enable S1  |  /disable S1\n"
+            "/enable S1  |  /disable S1  |  /enable all\n"
+            "/reset S1 — сброс кулдауна  |  /reset all\n"
+            "/strategies — список с кнопками вкл/выкл/сброс\n"
             "/ai — AI рекомендации\n"
             "/news — новостной сентимент\n"
             "/advisor — AI-анализ всех стратегий + рекомендации\n"
@@ -823,25 +845,90 @@ class TelegramCommander:
         await self.reply(upd, "💰 Real Mode — реальная торговля!", reply_markup=self._main_menu())
 
     async def _cmd_strategies(self, upd, arg):
+        """Список стратегий с кнопками вкл/выкл/сброс."""
         s = self._get_state()
-        lines = ["<b>Стратегии</b>\n"]
-        improve_buttons = []
+        lines = ["<b>⚙️ Стратегии</b>\n"]
+
+        tr_status = {}
+        if hasattr(s, "time_rate"):
+            tr_status = s.time_rate.status()
+        cooled    = tr_status.get("cooled_symbols",      {})
+        blocked   = tr_status.get("blocked_strategies",  {})
+
         for sid, st in s.strategies.items():
-            icon = "🚫" if st.auto_disabled else ("✅" if st.enabled else "⏹")
-            pos  = "📌" if st.current_position else "  "
-            wr   = st.wins / st.trades * 100 if st.trades else 0
+            if st.auto_disabled:
+                icon = "🚫"
+            elif not st.enabled:
+                icon = "⏹"
+            else:
+                icon = "✅"
+            pos     = "📌" if st.current_position else ""
+            wr      = st.wins / st.trades * 100 if st.trades else 0
             pnl_str = f"{st.pnl:+.1f}$" if st.trades else "—"
-            lines.append(f"{icon}{pos} <code>{sid}</code> WR={wr:.0f}% PnL={pnl_str}")
-            if st.trades >= 5:
-                improve_buttons.append(_btn(f"🤖 {sid}", f"improve:{sid}"))
-        # Кнопки AI-советов (по 3 в ряд)
-        kb_rows = [
-            improve_buttons[i:i+3] for i in range(0, len(improve_buttons), 3)
+            cool_note = ""
+            if sid in blocked:
+                cool_note = f" 🚫{blocked[sid]:.0f}м"
+            elif st.symbol in cooled:
+                cool_note = f" ⏳{cooled[st.symbol]:.0f}м"
+            lines.append(
+                f"{icon}{pos} <code>{sid:<6}</code> WR={wr:.0f}% PnL={pnl_str}{cool_note}"
+            )
+
+        # Кнопки управления: строки по одной стратегии [вкл | выкл | сброс]
+        toggle_rows = []
+        for sid, st in s.strategies.items():
+            row = []
+            if st.enabled and not st.auto_disabled:
+                row.append(_btn(f"⏹ {sid}", f"disable:{sid}"))
+            else:
+                row.append(_btn(f"✅ {sid}", f"enable:{sid}"))
+            if st.auto_disabled or sid in blocked or st.symbol in cooled:
+                row.append(_btn(f"🔄 {sid}", f"reset:{sid}"))
+            toggle_rows.append(row)
+
+        # Групповые кнопки
+        bulk_row = [
+            _btn("✅ Все вкл", "enable_all"),
+            _btn("⏹ Все выкл", "disable_all"),
         ]
-        if improve_buttons:
-            lines.append("\n<i>Нажми кнопку — AI-советы по стратегии</i>")
-        kb_rows.append([_btn("🏠 Меню", "menu")])
+
+        kb_rows = toggle_rows + [bulk_row, [_btn("🏠 Меню", "menu")]]
+
+        lines.append(
+            "\n<i>✅/⏹ — вкл/выкл | 🔄 — сброс кулдауна</i>"
+        )
         await self.reply(upd, "\n".join(lines), reply_markup=_keyboard(kb_rows))
+
+    async def _cb_toggle_strategy(self, upd, sid: str, enable: bool):
+        """Вкл/выкл стратегию через кнопку, показывает обновлённый список."""
+        s = self._get_state()
+        strat = s.strategies.get(sid)
+        if not strat:
+            await self.reply(upd, f"❌ Стратегия <code>{sid}</code> не найдена")
+            return
+        strat.enabled = enable
+        if enable:
+            strat.auto_disabled = False
+        verb = "включена ✅" if enable else "отключена ⏹"
+        await self.reply(upd, f"<code>{sid}</code> {verb}")
+        await self._cmd_strategies(upd, "")
+
+    async def _cb_reset_strategy(self, upd, sid: str):
+        """Сброс кулдауна и авто-блокировки стратегии через кнопку."""
+        s = self._get_state()
+        strat = s.strategies.get(sid)
+        if not strat:
+            await self.reply(upd, f"❌ Стратегия <code>{sid}</code> не найдена")
+            return
+        strat.auto_disabled   = False
+        strat.enabled         = True
+        strat.consecutive_losses = 0
+        if hasattr(s, "time_rate"):
+            s.time_rate.reset_strategy(sid)
+            if hasattr(strat, "symbol"):
+                s.time_rate.reset_symbol(strat.symbol)
+        await self.reply(upd, f"🔄 <code>{sid}</code> — кулдаун и блокировка сброшены ✅")
+        await self._cmd_strategies(upd, "")
 
     async def _cmd_improve(self, upd, arg):
         """AI-советы по улучшению стратегии на основе закрытых сделок."""
@@ -1040,21 +1127,70 @@ class TelegramCommander:
     async def _cmd_enable(self, upd, arg):
         s   = self._get_state()
         sid = arg.upper().strip()
+        if not sid:
+            await self._cmd_strategies(upd, "")
+            return
+        if sid == "ALL":
+            for st in s.strategies.values():
+                st.enabled = True
+                st.auto_disabled = False
+            await self.reply(upd, f"✅ Все {len(s.strategies)} стратегий включены")
+            return
         if sid not in s.strategies:
-            await self.reply(upd, f"❌ Стратегия <code>{sid}</code> не найдена")
+            avail = ", ".join(s.strategies.keys())
+            await self.reply(upd, f"❌ <code>{sid}</code> не найдена\nДоступны: {avail}")
             return
         s.strategies[sid].enabled      = True
         s.strategies[sid].auto_disabled = False
-        await self.reply(upd, f"✅ {sid} включена")
+        await self.reply(upd, f"✅ <code>{sid}</code> включена")
 
     async def _cmd_disable(self, upd, arg):
         s   = self._get_state()
         sid = arg.upper().strip()
+        if not sid:
+            await self._cmd_strategies(upd, "")
+            return
+        if sid == "ALL":
+            n = sum(1 for st in s.strategies.values() if st.enabled)
+            for st in s.strategies.values():
+                st.enabled = False
+            await self.reply(upd, f"⏹ Отключено {n} стратегий")
+            return
         if sid not in s.strategies:
-            await self.reply(upd, f"❌ Стратегия <code>{sid}</code> не найдена")
+            avail = ", ".join(s.strategies.keys())
+            await self.reply(upd, f"❌ <code>{sid}</code> не найдена\nДоступны: {avail}")
             return
         s.strategies[sid].enabled = False
-        await self.reply(upd, f"⏹ {sid} отключена")
+        await self.reply(upd, f"⏹ <code>{sid}</code> отключена")
+
+    async def _cmd_reset(self, upd, arg):
+        """Сброс кулдауна и блокировки стратегии: /reset S10 или /reset all"""
+        s   = self._get_state()
+        sid = arg.upper().strip()
+        if not sid:
+            await self._cmd_strategies(upd, "")
+            return
+        if sid == "ALL":
+            for k, st in s.strategies.items():
+                st.auto_disabled      = False
+                st.enabled            = True
+                st.consecutive_losses = 0
+                if hasattr(s, "time_rate"):
+                    s.time_rate.reset_strategy(k)
+                    s.time_rate.reset_symbol(st.symbol)
+            await self.reply(upd, f"🔄 Кулдауны всех {len(s.strategies)} стратегий сброшены")
+            return
+        strat = s.strategies.get(sid)
+        if not strat:
+            await self.reply(upd, f"❌ <code>{sid}</code> не найдена")
+            return
+        strat.auto_disabled      = False
+        strat.enabled            = True
+        strat.consecutive_losses = 0
+        if hasattr(s, "time_rate"):
+            s.time_rate.reset_strategy(sid)
+            s.time_rate.reset_symbol(strat.symbol)
+        await self.reply(upd, f"🔄 <code>{sid}</code> — кулдаун и блокировка сброшены ✅")
 
     async def _cmd_risk(self, upd, arg):
         s  = self._get_state()
