@@ -9,7 +9,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -2095,11 +2095,12 @@ async def broadcast_log(message: str, level: str = "info"):
 
 
 # ============================================================
-# Часовой отчёт в Telegram
+# Часовой отчёт + ежедневный итог в Telegram
 # ─────────────────────────────────────────────────────────────
+
 async def _hourly_report_loop():
-    """Каждый час отправляет краткий отчёт в Telegram."""
-    await asyncio.sleep(60)  # небольшая задержка при старте
+    """Каждый час отправляет полный отчёт в Telegram."""
+    await asyncio.sleep(60)
     while True:
         try:
             await _send_hourly_report()
@@ -2108,50 +2109,211 @@ async def _hourly_report_loop():
         await asyncio.sleep(3600)
 
 
-async def _send_hourly_report():
-    """Формирует и отправляет часовой отчёт."""
-    rm = state.risk_manager
-    balance = 0.0
-    if state.paper_mode:
-        balance = state.paper.balance
-    elif state.bybit:
+async def _daily_summary_loop():
+    """В 00:00 UTC отправляет дневной итог за прошедший день."""
+    while True:
         try:
-            balance = state.bybit.get_balance("USDT")
-        except Exception:
-            balance = 0
-
-    # Открытые позиции
-    open_pos = []
-    for sid, strat in state.strategies.items():
-        if strat.current_position:
-            pos = strat.current_position
-            open_pos.append(
-                f"  • {sid} {strat.symbol} {pos['side']} @ {pos['entry']:.4f}"
+            now = datetime.now(timezone.utc)
+            next_midnight = (now + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc,
             )
+            wait_sec = (next_midnight - now).total_seconds()
+            await asyncio.sleep(wait_sec)
+            await _send_daily_summary()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[DailySummary] Ошибка: {e}")
+            await asyncio.sleep(3600)
 
-    # Статистика за сессию
-    total_trades = sum(s.trades for s in state.strategies.values())
-    total_wins   = sum(s.wins   for s in state.strategies.values())
-    total_losses = sum(s.losses for s in state.strategies.values())
-    total_pnl    = sum(s.pnl    for s in state.strategies.values())
-    win_rate     = (total_wins / total_trades * 100) if total_trades > 0 else 0
 
-    mode = "📄 Paper" if state.paper_mode else "💰 Real"
+def _get_balance() -> float:
+    if state.paper_mode:
+        return state.paper.balance
+    if state.bybit:
+        try:
+            return state.bybit.get_balance("USDT")
+        except Exception:
+            pass
+    return 0.0
+
+
+def _unrealized_pnl(pos: dict, current_price: float) -> float:
+    """Примерная нереализованная прибыль позиции."""
+    entry = pos.get("entry", 0.0)
+    qty   = pos.get("qty", 0.0)
+    side  = pos.get("side", "Buy")
+    if side == "Buy":
+        return (current_price - entry) * qty
+    return (entry - current_price) * qty
+
+
+async def _send_hourly_report():
+    """Полный часовой отчёт с дневной статистикой, позициями и кулдаунами."""
+    rm      = state.risk_manager
+    balance = _get_balance()
+    now_utc = datetime.now(timezone.utc)
+
+    # ── Дневные метрики (из risk_manager) ──────────────────────────────────
+    day_pnl    = rm.daily_pnl
+    day_trades = rm.daily_trades_count
+    day_losses = rm.daily_losses_count
+    day_wins   = day_trades - day_losses
+    day_wr     = (day_wins / day_trades * 100) if day_trades > 0 else 0.0
+    day_pct    = (day_pnl / rm.daily_start_balance * 100) if rm.daily_start_balance else 0.0
+
+    day_pnl_str  = f"{'+'if day_pnl>=0 else ''}{day_pnl:.2f} USDT ({day_pct:+.1f}%)"
+    day_trade_str = f"{day_trades} ({day_wins}↑ {day_losses}↓) | WR: {day_wr:.1f}%"
+
+    # ── Сессионные метрики (из стратегий) ──────────────────────────────────
+    all_pnls   = [round(p, 2) for s in state.strategies.values() for p in s.history]
+    sess_pnl   = sum(s.pnl    for s in state.strategies.values())
+    sess_trades= sum(s.trades  for s in state.strategies.values())
+    sess_wins  = sum(s.wins    for s in state.strategies.values())
+    sess_wr    = (sess_wins / sess_trades * 100) if sess_trades > 0 else 0.0
+    best_trade = max(all_pnls, default=0.0)
+    worst_trade= min(all_pnls, default=0.0)
+
+    # ── Открытые позиции с unrealized PnL ──────────────────────────────────
+    open_lines = []
+    for sid, strat in sorted(state.strategies.items()):
+        pos = strat.current_position
+        if not pos:
+            continue
+        cp = 0.0
+        try:
+            cp_raw = state.tickers.get(strat.symbol, {})
+            cp = float(cp_raw.get("price", pos["entry"]))
+        except Exception:
+            cp = pos.get("entry", 0.0)
+        upnl = _unrealized_pnl(pos, cp)
+        sign = "+" if upnl >= 0 else ""
+        arrow = "📈" if pos["side"] == "Buy" else "📉"
+        open_lines.append(
+            f"  {arrow} <code>{sid}</code> {strat.symbol} @ {pos['entry']:.4g} | uPnL: <b>{sign}{upnl:.2f}</b>"
+        )
+
+    pos_block = "\n".join(open_lines) if open_lines else "  нет открытых позиций"
+
+    # ── TimeRate кулдауны ──────────────────────────────────────────────────
+    tr_status   = state.time_rate.status()
+    cool_lines  = []
+    for sym, rem in tr_status.get("cooled_symbols", {}).items():
+        cool_lines.append(f"  ⏳ {sym}: {rem:.1f} мин (символ)")
+    for stid, rem in tr_status.get("blocked_strategies", {}).items():
+        cool_lines.append(f"  🚫 {stid}: {rem:.1f} мин (стратегия)")
+    cool_block = "\n".join(cool_lines) if cool_lines else "  нет активных кулдаунов"
+
+    # ── Топ-5 стратегий по PnL за сессию ────────────────────────────────────
+    strat_stats = [
+        (sid, s.pnl, s.trades, s.wins)
+        for sid, s in state.strategies.items()
+        if s.trades > 0
+    ]
+    strat_stats.sort(key=lambda x: x[1], reverse=True)
+    top_lines = []
+    for sid, pnl, tr, wr_n in strat_stats[:5]:
+        wr_pct = (wr_n / tr * 100) if tr else 0
+        sign   = "+" if pnl >= 0 else ""
+        top_lines.append(
+            f"  <code>{sid:<8}</code> {sign}{pnl:.2f} USDT | {tr} сд | WR {wr_pct:.0f}%"
+        )
+    top_block = "\n".join(top_lines) if top_lines else "  нет сделок"
+
+    # ── Статус защиты ──────────────────────────────────────────────────────
+    kill_str   = "🔴 KILL SWITCH" if rm.kill_switch else "🟢 активна"
+    pause_str  = ""
+    if rm.daily_pause_until and datetime.utcnow() < rm.daily_pause_until:
+        rem_p = int((rm.daily_pause_until - datetime.utcnow()).total_seconds() / 60)
+        pause_str = f" | ⏸ пауза {rem_p} мин"
+
+    mode   = "📄 Paper" if state.paper_mode else "💰 Real"
     status = "🟢 Работает" if state.bot_running else "🔴 Остановлен"
 
-    pos_block = "\n".join(open_pos) if open_pos else "  нет открытых позиций"
-
     text = (
-        f"⏰ <b>Часовой отчёт</b>\n\n"
-        f"Режим: {mode} | {status}\n"
-        f"Баланс: <b>{balance:.2f} USDT</b>\n\n"
-        f"📈 <b>Сессия:</b>\n"
-        f"  Сделок: {total_trades} | Побед: {total_wins} | Убытков: {total_losses}\n"
-        f"  Win Rate: <b>{win_rate:.1f}%</b>\n"
-        f"  PnL: <b>{'+'if total_pnl>=0 else ''}{total_pnl:.2f} USDT</b>\n\n"
-        f"📂 <b>Позиции ({len(open_pos)}):</b>\n{pos_block}\n\n"
-        f"🛡 Дневной PnL: {rm.daily_pnl:+.2f} USDT | "
-        f"Лимит: -{rm.daily_max_loss_pct}%"
+        f"⏰ <b>Часовой отчёт</b> — {now_utc.strftime('%H:%M UTC')}\n"
+        f"{'─'*30}\n"
+        f"{mode} | {status}\n"
+        f"💰 Баланс: <b>{balance:.2f} USDT</b>\n\n"
+        f"📅 <b>Сегодня:</b>\n"
+        f"  Сделок: {day_trade_str}\n"
+        f"  PnL: <b>{day_pnl_str}</b>\n"
+        f"  Лучшая: <code>{best_trade:+.2f}</code> | Худшая: <code>{worst_trade:+.2f}</code>\n\n"
+        f"📊 <b>Сессия всего:</b>\n"
+        f"  {sess_trades} сделок | WR {sess_wr:.1f}% | "
+        f"PnL <b>{'+'if sess_pnl>=0 else ''}{sess_pnl:.2f} USDT</b>\n\n"
+        f"📂 <b>Позиции ({len(open_lines)}):</b>\n{pos_block}\n\n"
+        f"⏳ <b>TimeRate:</b>\n{cool_block}\n\n"
+        f"🏆 <b>Топ стратегии:</b>\n{top_block}\n\n"
+        f"🛡 Защита: {kill_str}{pause_str} | "
+        f"Day PnL: {day_pnl:+.2f} USDT | Лимит: -{rm.daily_max_loss_pct}%"
+    )
+    await state.telegram.send(text)
+
+
+async def _send_daily_summary():
+    """Полный итог за прошедший день — отправляется в 00:00 UTC."""
+    rm      = state.risk_manager
+    balance = _get_balance()
+    now_utc = datetime.now(timezone.utc)
+
+    day_pnl    = rm.daily_pnl
+    day_trades = rm.daily_trades_count
+    day_losses = rm.daily_losses_count
+    day_wins   = day_trades - day_losses
+    day_wr     = (day_wins / day_trades * 100) if day_trades > 0 else 0.0
+    day_start  = rm.daily_start_balance or balance
+    day_pct    = (day_pnl / day_start * 100) if day_start else 0.0
+
+    # Статистика по стратегиям за сессию (лучшая / худшая / топ)
+    all_pnls    = [round(p, 2) for s in state.strategies.values() for p in s.history]
+    best_trade  = max(all_pnls, default=0.0)
+    worst_trade = min(all_pnls, default=0.0)
+    sess_pnl    = sum(s.pnl for s in state.strategies.values())
+
+    # Топ и аутсайдеры
+    by_pnl = sorted(
+        [(sid, s.pnl, s.trades, s.wins)
+         for sid, s in state.strategies.items() if s.trades > 0],
+        key=lambda x: x[1], reverse=True,
+    )
+    top_line  = ""
+    worst_line = ""
+    if by_pnl:
+        t = by_pnl[0]
+        top_line = (
+            f"  🥇 <code>{t[0]}</code>: {t[1]:+.2f} USDT | "
+            f"{t[2]} сд | WR {t[3]/t[2]*100:.0f}%"
+        )
+        w = by_pnl[-1]
+        worst_line = (
+            f"  ⚠️ <code>{w[0]}</code>: {w[1]:+.2f} USDT | "
+            f"{w[2]} сд | WR {w[3]/w[2]*100:.0f}%"
+        )
+
+    # Активные кулдауны на начало нового дня
+    tr_status  = state.time_rate.status()
+    n_cool     = len(tr_status.get("cooled_symbols", {}))
+    n_blocked  = len(tr_status.get("blocked_strategies", {}))
+    cool_note  = f"{n_cool} символов, {n_blocked} стратегий" if (n_cool or n_blocked) else "нет"
+
+    emoji = "🟢" if day_pnl >= 0 else "🔴"
+    text = (
+        f"{emoji} <b>Дневной итог — {now_utc.strftime('%d.%m.%Y')}</b>\n"
+        f"{'═'*30}\n\n"
+        f"💰 Баланс: <b>{balance:.2f} USDT</b>\n"
+        f"  Изменение за день: <b>{day_pnl:+.2f} USDT ({day_pct:+.1f}%)</b>\n\n"
+        f"📈 <b>Итоги дня:</b>\n"
+        f"  Сделок: <b>{day_trades}</b>  ({day_wins}↑ {day_losses}↓)\n"
+        f"  Win Rate: <b>{day_wr:.1f}%</b>\n"
+        f"  Лучшая: <code>{best_trade:+.2f} USDT</code>\n"
+        f"  Худшая: <code>{worst_trade:+.2f} USDT</code>\n\n"
+        f"🏆 <b>Рекорды дня:</b>\n"
+        f"{top_line or '  нет сделок'}\n"
+        f"{worst_line}\n\n"
+        f"📊 PnL сессии (всего): <b>{sess_pnl:+.2f} USDT</b>\n"
+        f"⏳ Кулдауны на старт: {cool_note}\n\n"
+        f"<i>Новый день начат. Удачной торговли! 🚀</i>"
     )
     await state.telegram.send(text)
 
@@ -2321,10 +2483,11 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("📱 Telegram Commander отключён — задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID")
 
-    # ── Часовой отчёт в Telegram ──────────────────────────────────────────────
+    # ── Часовой + дневной отчёт в Telegram ───────────────────────────────────
     if state.telegram.enabled:
         asyncio.create_task(_hourly_report_loop())
-        logger.info("📊 Часовой Telegram-отчёт запущен")
+        asyncio.create_task(_daily_summary_loop())
+        logger.info("📊 Часовой и ежедневный Telegram-отчёт запущен")
 
     logger.info("✅ Бэкенд готов")
     yield
