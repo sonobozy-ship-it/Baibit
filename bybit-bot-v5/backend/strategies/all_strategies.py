@@ -13,6 +13,7 @@ from .trend_fib import TrendMomentumStrategy, TrendFibonacciStrategy
 from .scalper_pro import ScalperProStrategy, SCALP_SYMBOLS
 from .aggressive_momentum import AggressiveMomentumStrategy
 from .market_filters import MarketFilter, HTFFilter, LevelBuilder, calc_ai_score
+from .candle_patterns import CandlestickPatternFilter, THRESHOLD_STRICT
 
 
 # ============================================================
@@ -885,44 +886,60 @@ class ScalperGridStrategy(BaseStrategy):
         # Сохраняем ATR для ATR-trailing
         self._entry_atr = atr
 
+        # ── Candle pattern filter ──────────────────────────────────────────────
+        _cpf = CandlestickPatternFilter.assess(df, side, levels, atr)
+        if _cpf["candle_score"] < THRESHOLD_STRICT:
+            import logging as _l
+            _l.getLogger(__name__).debug(
+                f"[S5] {self.symbol}: candle_score={_cpf['candle_score']} — {_cpf['reason']}"
+            )
+            return None
+
         dist_pct = bdist if buy_ok else sdist
         vol_ratio = round(volume / max(vol_ma, 1e-9), 2)
 
         reason = (
             f"S5 {side} | {confirms}/6 confirms | RR={rr:.2f} | "
             f"RSI={rsi:.0f} | ADX={adx:.0f} | ATR={atr_pct:.2f}% | "
-            f"HTF={htf_label} | AI={ai_score} | dist={dist_pct:.2f}%"
+            f"HTF={htf_label} | AI={ai_score} | dist={dist_pct:.2f}% | "
+            f"candle={_cpf['candle_score']}({_cpf['reason']})"
         )
 
         return TradingSignal(
             action=side,
             symbol=self.symbol,
-            confidence=round(min(0.85, 0.60 + confirms * 0.04), 3),
+            confidence=round(min(0.85, 0.60 + confirms * 0.04 + _cpf["confidence_modifier"]), 3),
             entry_price=entry,
             stop_loss=round(sl_price, 8),
             take_profit=round(tp_price, 8),
             reason=reason,
             filters_passed={
-                "confirms":      confirms,
-                "min_confirms":  self._MIN_CONFIRMS,
-                "ai_score":      ai_score,
-                "ema_trend":     buy_trend if buy_ok else sell_trend,
-                "rsi_momentum":  buy_momentum if buy_ok else sell_momentum,
-                "rsi_value":     round(rsi, 1),
-                "volume_spike":  vol_spike,
-                "vol_ratio":     vol_ratio,
-                "volatility_ok": good_atr,
-                "atr_pct":       round(atr_pct, 3),
-                "adx":           round(adx, 1),
-                "htf_ok":        buy_htf if buy_ok else sell_htf,
-                "htf_source":    htf_label,
-                "liquidity_ok":  buy_liq_ok if buy_ok else sell_liq_ok,
-                "dist_pct":      dist_pct,
-                "rr":            round(rr, 2),
-                "early_tp":      "DISABLED",
-                "mkt_filter":    mkt["reason"],
-                "mkt_atr_pct":   mkt["atr_pct"],
-                "mkt_adx":       mkt["adx"],
+                "confirms":        confirms,
+                "min_confirms":    self._MIN_CONFIRMS,
+                "ai_score":        ai_score,
+                "ema_trend":       buy_trend if buy_ok else sell_trend,
+                "rsi_momentum":    buy_momentum if buy_ok else sell_momentum,
+                "rsi_value":       round(rsi, 1),
+                "volume_spike":    vol_spike,
+                "vol_ratio":       vol_ratio,
+                "volatility_ok":   good_atr,
+                "atr_pct":         round(atr_pct, 3),
+                "adx":             round(adx, 1),
+                "htf_ok":          buy_htf if buy_ok else sell_htf,
+                "htf_source":      htf_label,
+                "liquidity_ok":    buy_liq_ok if buy_ok else sell_liq_ok,
+                "dist_pct":        dist_pct,
+                "rr":              round(rr, 2),
+                "early_tp":        "DISABLED",
+                "mkt_filter":      mkt["reason"],
+                "mkt_atr_pct":     mkt["atr_pct"],
+                "mkt_adx":         mkt["adx"],
+                "candle_score":    _cpf["candle_score"],
+                "candle_patterns": _cpf["patterns"],
+                "fake_breakout":   _cpf["fake_breakout"],
+                "near_support":    _cpf["near_support"],
+                "near_resistance": _cpf["near_resistance"],
+                "candle_reason":   _cpf["reason"],
             },
         )
 

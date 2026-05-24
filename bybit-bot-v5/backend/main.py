@@ -58,6 +58,7 @@ from strategies.tp_normalizer import normalize_take_profit
 from strategies.entry_filter import validate_entry_confirmation
 from strategies.time_rate import TimeRateManager
 from strategies.market_filters import calc_quality_score
+from strategies.candle_patterns import CandlestickPatternFilter, THRESHOLD_STRICT
 
 # ============================================================
 # Загрузка конфига
@@ -1271,6 +1272,35 @@ async def trading_loop():
                                 await _close_position_early(sid, strat, current_price, klines_data)
                                 state.position_monitor.reset_state(sid)
 
+                        # Candle early exit (≥50% к TP + контр-паттерн/Doji/FakeBreakout)
+                        _ce_scalp_like = sid.startswith("SC_") or sid in ("S15", "S10")
+                        if _ce_scalp_like and strat.current_position:
+                            _pos     = strat.current_position
+                            _pos_sid = _pos.get("side", "Buy")
+                            _ep      = float(_pos.get("entry_price", current_price))
+                            _tp      = float(_pos.get("take_profit", current_price))
+                            _tp_dist = abs(_tp - _ep)
+                            if _tp_dist > 0:
+                                if _pos_sid == "Buy":
+                                    _prog = (current_price - _ep) / _tp_dist * 100
+                                else:
+                                    _prog = (_ep - current_price) / _tp_dist * 100
+                                if _prog >= 50.0:
+                                    _ce_ok, _ce_reason = CandlestickPatternFilter.check_early_exit(
+                                        df, _pos_sid, _prog, None, None
+                                    )
+                                    if _ce_ok:
+                                        logger.info(
+                                            f"{sid}: 🕯 CandleEarlyTP {strat.symbol} "
+                                            f"prog={_prog:.1f}% reason={_ce_reason}"
+                                        )
+                                        await _close_position_early(
+                                            sid, strat, current_price, klines_data,
+                                            reason=f"CandleEarlyTP:{_ce_reason}",
+                                        )
+                                        state.position_monitor.reset_state(sid)
+                                        continue
+
                         # Таймаут позиции (max_hold_minutes) — скальперы закрываются принудительно
                         if strat.check_max_hold():
                             await _close_position_early(sid, strat, current_price, klines_data, reason="MaxHold")
@@ -1688,6 +1718,30 @@ async def trading_loop():
                             "ema9_pos":          _entry_check.get("ema9_position", "?"),
                             "reversal_detected": _entry_check.get("reversal_candle_detected", False),
                             "confirm_detected":  _entry_check.get("confirmation_candle_detected", False),
+                        })
+
+                    # ── Candle pattern gate (SC_* scalpers — STRICT threshold) ────
+                    # S5 и S10 уже проверяют паттерны внутри своих analyze().
+                    # Для SC_* применяем дополнительную проверку STRICT здесь.
+                    if _is_scalper and not state.training_mode:
+                        _cpf_atr    = getattr(strat, "_entry_atr", None)
+                        _cpf_levels = getattr(strat, "_levels",    None)
+                        _cpf = CandlestickPatternFilter.assess(
+                            df, signal.action, _cpf_levels, _cpf_atr
+                        )
+                        if _cpf["candle_score"] < THRESHOLD_STRICT:
+                            logger.info(
+                                f"{sid}: 🕯 CandleGate BLOCKED {signal.action} {strat.symbol} "
+                                f"score={_cpf['candle_score']} | {_cpf['reason']}"
+                            )
+                            continue
+                        if signal.filters_passed is None:
+                            signal.filters_passed = {}
+                        signal.filters_passed.update({
+                            "candle_score":    _cpf["candle_score"],
+                            "candle_patterns": _cpf["patterns"],
+                            "fake_breakout":   _cpf["fake_breakout"],
+                            "candle_reason":   _cpf["reason"],
                         })
 
                     # ============== Открытие позиции ==============

@@ -23,6 +23,7 @@ import pandas as pd
 
 from .base import BaseStrategy, TradingSignal
 from .market_filters import LevelBuilder, calc_ai_score
+from .candle_patterns import CandlestickPatternFilter, THRESHOLD_ADVISORY
 
 logger = logging.getLogger(__name__)
 
@@ -479,6 +480,20 @@ class ScalperProStrategy(BaseStrategy):
             logger.debug(f"[S10] {self.symbol}: AI score {ai_score} < 80")
             return None
 
+        # ── Candle pattern filter ──────────────────────────────────────────────
+        _cpf = CandlestickPatternFilter.assess(df, action, None, None)
+        if _cpf["candle_score"] < THRESHOLD_ADVISORY:
+            logger.debug(
+                f"[S10] {self.symbol}: candle_score={_cpf['candle_score']} < {THRESHOLD_ADVISORY} — {_cpf['reason']}"
+            )
+            return None
+        conf = round(min(0.92, conf + _cpf["confidence_modifier"]), 3)
+        if conf < min_conf:
+            logger.debug(
+                f"[S10] {self.symbol}: confidence {conf} < {min_conf} after candle modifier"
+            )
+            return None
+
         # ── Reason ─────────────────────────────────────────────────────────────
         parts = [
             f"S10/{self.mode} {action}",
@@ -487,6 +502,7 @@ class ScalperProStrategy(BaseStrategy):
             f"BB_{'LO' if buy else 'HI'}_reject{'_clean' if clean_rejection else ''}",
             f"RR={rr:.2f}",
             f"AI={ai_score}",
+            f"candle={_cpf['candle_score']}({_cpf['reason']})",
         ]
         if h1_ctx["direction"] != "NEUTRAL":
             parts.append(h1_ctx["reason"])
@@ -497,31 +513,35 @@ class ScalperProStrategy(BaseStrategy):
 
         # ── filters_passed (максимально подробно) ──────────────────────────────
         filters_passed = {
-            "mode":                 self.mode,
-            "ema_trend":            (ef0 > es0) if action == "BUY" else (ef0 < es0),
-            "rsi_cross":            True,
-            "rsi_prev":             round(r1, 1),
-            "rsi_current":          round(r0, 1),
-            "bb_rejection":         True,
-            "bb_prev_touch":        (l1 <= bbl1 * 1.003) if action == "BUY" else (h1 >= bbu1 * 0.997),
-            "bb_clean_rejection":   clean_rejection,
-            "volume_ratio":         round(vol_ratio, 2),
-            "candle_range_pct":     round(candle_range_pct, 3),
-            "candle_body_ratio":    round(body_ratio, 2),
-            "spread_pct":           spread_pct,
-            "funding_rate":         funding_rate,
-            "orderbook_imbalance":  orderbook_imbalance,
-            "h1_trend":             h1_ctx["direction"],
-            "h1_adx":               h1_ctx["strength"],
-            "h1_reason":            h1_ctx["reason"],
-            "m15_trend":            m15_ctx["direction"],
-            "m15_adx":              m15_ctx["strength"],
-            "rr_ratio":             round(rr, 2),
-            "fee_guard_passed":     True,
-            "ai_score":             ai_score,
+            "mode":                  self.mode,
+            "ema_trend":             (ef0 > es0) if action == "BUY" else (ef0 < es0),
+            "rsi_cross":             True,
+            "rsi_prev":              round(r1, 1),
+            "rsi_current":           round(r0, 1),
+            "bb_rejection":          True,
+            "bb_prev_touch":         (l1 <= bbl1 * 1.003) if action == "BUY" else (h1 >= bbu1 * 0.997),
+            "bb_clean_rejection":    clean_rejection,
+            "volume_ratio":          round(vol_ratio, 2),
+            "candle_range_pct":      round(candle_range_pct, 3),
+            "candle_body_ratio":     round(body_ratio, 2),
+            "spread_pct":            spread_pct,
+            "funding_rate":          funding_rate,
+            "orderbook_imbalance":   orderbook_imbalance,
+            "h1_trend":              h1_ctx["direction"],
+            "h1_adx":                h1_ctx["strength"],
+            "h1_reason":             h1_ctx["reason"],
+            "m15_trend":             m15_ctx["direction"],
+            "m15_adx":               m15_ctx["strength"],
+            "rr_ratio":              round(rr, 2),
+            "fee_guard_passed":      True,
+            "ai_score":              ai_score,
             "confidence_before_mtf": conf_before_mtf,
-            "confidence_final":     conf,
-            "confidence_min":       min_conf,
+            "confidence_final":      conf,
+            "confidence_min":        min_conf,
+            "candle_score":          _cpf["candle_score"],
+            "candle_patterns":       _cpf["patterns"],
+            "fake_breakout":         _cpf["fake_breakout"],
+            "candle_reason":         _cpf["reason"],
         }
 
         return TradingSignal(
