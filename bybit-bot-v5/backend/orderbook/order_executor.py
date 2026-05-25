@@ -347,7 +347,19 @@ class OrderExecutor:
             st.phase = Phase.EMERGENCY
             return None
 
-        exit_price = st.trade.exit_price
+        # Захват спреда: выход на текущем рынке, а не на цене из сканера.
+        # К моменту исполнения входа цена могла сдвинуться, обновляем.
+        # Для BUY: выходим на best_ask (мы лучший продавец внутри спреда).
+        # Минимальный выход: entry + 2×maker_fee (хотя бы покрыть комиссии).
+        if st.side == "Buy":
+            market_exit = snap.best_ask
+            min_exit    = st.trade.entry_price * (1 + 2 * cfg.maker_fee_pct / 100)
+            exit_price  = max(market_exit, min_exit)
+        else:
+            market_exit = snap.best_bid
+            max_exit    = st.trade.entry_price * (1 - 2 * cfg.maker_fee_pct / 100)
+            exit_price  = min(market_exit, max_exit)
+        st.trade.exit_price = exit_price
 
         if cfg.paper:
             st.paper_exit    = PaperOrder(exit_sd, exit_price, st.trade.qty)

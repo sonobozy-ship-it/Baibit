@@ -2618,9 +2618,9 @@ async def lifespan(app: FastAPI):
                 max_pump_pct     = float(os.getenv("OB_MAX_PUMP_PCT", "1.0")),
             ),
             scan_cfg        = ScanConfig(
-                min_spread_pct       = float(os.getenv("OB_MIN_SPREAD_PCT", "0.08")),
-                spread_to_fee_ratio_min = float(os.getenv("OB_FEE_RATIO", "3.0")),
-                min_net_profit_usdt  = float(os.getenv("OB_MIN_NET", "0.015")),
+                min_spread_pct       = float(os.getenv("OB_MIN_SPREAD_PCT", "0.10")),
+                spread_to_fee_ratio_min = float(os.getenv("OB_FEE_RATIO", "2.0")),
+                min_net_profit_usdt  = float(os.getenv("OB_MIN_NET", "0.005")),
                 max_position_usdt    = float(os.getenv("OB_MAX_POS", "25")),
                 enable_short         = os.getenv("OB_SHORT", "false").lower() == "true",
             ),
