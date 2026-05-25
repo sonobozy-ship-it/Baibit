@@ -129,7 +129,7 @@ class BookState:
             px, sz = float(px_s), float(sz_s)
             if sz > 0:
                 self._asks[px] = sz
-        return self._build()
+        return self._build(ts)
 
     def apply_delta(self, bids: list, asks: list, ts: int) -> Optional[OrderbookSnapshot]:
         for px_s, sz_s in bids:
@@ -144,9 +144,9 @@ class BookState:
                 self._asks.pop(px, None)
             else:
                 self._asks[px] = sz
-        return self._build()
+        return self._build(ts)
 
-    def _build(self) -> Optional[OrderbookSnapshot]:
+    def _build(self, ts_exchange: int = 0) -> Optional[OrderbookSnapshot]:
         if not self._bids or not self._asks:
             return None
         sorted_bids = sorted(self._bids.items(), key=lambda x: -x[0])
@@ -158,7 +158,7 @@ class BookState:
             symbol=self.symbol,
             bids=[BookLevel(p, s) for p, s in sorted_bids[:_DEPTH]],
             asks=[BookLevel(p, s) for p, s in sorted_asks[:_DEPTH]],
-            ts_exchange=0,
+            ts_exchange=ts_exchange,
             ts_local=time.time(),
         )
 

@@ -10,8 +10,9 @@ PairSelector — фильтрует пары из whitelist по ликвидн�
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 from .bybit_ws import OrderbookSnapshot
 from .risk_guard import RiskGuard
@@ -36,20 +37,20 @@ class PairSelector:
 
     def __init__(self, cfg: PairSelectorConfig):
         self._cfg = cfg
-        # История mid_price для pump detection
-        self._mid_hist: Dict[str, List[Tuple[float, float]]] = {
-            s: [] for s in cfg.whitelist
+        # История mid_price для pump detection (deque для O(1) удаления слева)
+        self._mid_hist: Dict[str, Deque[Tuple[float, float]]] = {
+            s: deque() for s in cfg.whitelist
         }  # [(timestamp, mid_price)]
 
     def update(self, snap: OrderbookSnapshot) -> None:
         """Вызывается при каждом обновлении стакана."""
-        hist = self._mid_hist.setdefault(snap.symbol, [])
+        hist = self._mid_hist.setdefault(snap.symbol, deque())
         now  = time.time()
         hist.append((now, snap.mid_price))
-        # Очищаем историю старше 2× pump_window_sec
+        # Очищаем историю старше 2× pump_window_sec (popleft — O(1))
         cutoff = now - self._cfg.pump_window_sec * 2
         while hist and hist[0][0] < cutoff:
-            hist.pop(0)
+            hist.popleft()
 
     def select(
         self,
@@ -96,15 +97,16 @@ class PairSelector:
 
     def _is_pumping(self, symbol: str, snap: OrderbookSnapshot) -> bool:
         cfg  = self._cfg
-        hist = self._mid_hist.get(symbol, [])
+        hist = self._mid_hist.get(symbol)
         if not hist:
             return False
         now  = time.time()
         window_start = now - cfg.pump_window_sec
-        old_entries  = [(t, p) for t, p in hist if t >= window_start]
-        if len(old_entries) < 2:
+        # Записи внутри окна pump_window_sec (deque отсортирован по времени)
+        window_entries = [(t, p) for t, p in hist if t >= window_start]
+        if len(window_entries) < 2:
             return False
-        oldest_price = old_entries[0][1]
+        oldest_price = window_entries[0][1]
         if oldest_price <= 0:
             return False
         change_pct = abs(snap.mid_price - oldest_price) / oldest_price * 100

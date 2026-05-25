@@ -459,8 +459,8 @@ class CandlestickPatternFilter:
         if progress_pct < 50.0:
             return False, ""
 
-        # Для Early TP оцениваем контр-направление
-        action = "BUY" if position_side == "Buy" else "SELL"
+        # Для Early TP оцениваем КОНТР-направление: ищем сигналы, противоположные позиции
+        action = "SELL" if position_side == "Buy" else "BUY"
         r      = cls.assess(df, action, levels, atr)
 
         if position_side == "Buy":

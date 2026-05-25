@@ -1429,11 +1429,6 @@ class TelegramCommander:
             return
         try:
             from orderbook import OrderbookEngine, ObEngineConfig
-            from orderbook.spread_scanner import ScanConfig
-            from orderbook.liquidity_filter import LiquidityConfig
-            from orderbook.risk_guard import RiskConfig
-            from orderbook.pair_selector import PairSelectorConfig
-            from orderbook.order_executor import ExecutorConfig
             import os
             _syms = [
                 x.strip() for x in
@@ -1446,20 +1441,35 @@ class TelegramCommander:
                 paper      = os.getenv("ORDERBOOK_PAPER",   "true").lower()  == "true",
                 ws_symbols = _syms,
             )
-            s.orderbook_engine = OrderbookEngine(
+            engine = OrderbookEngine(
                 cfg          = _ecfg,
                 bybit_client = s.bybit,
                 notify_fn    = lambda msg: _aio.create_task(s.telegram.send(msg)),
             )
-            s.orderbook_engine_task = _aio.create_task(s.orderbook_engine.start())
+            task = _aio.create_task(engine.start())
+
+            # Даём движку один тик event-loop, чтобы обнаружить немедленный сбой
+            await _aio.sleep(0)
+            if task.done():
+                exc = task.exception()
+                raise RuntimeError(f"Engine завершился сразу: {exc}")
+
+            # Только после проверки фиксируем в state и останавливаем торговлю
+            s.orderbook_engine      = engine
+            s.orderbook_engine_task = task
             s.orderbook_only_mode   = True
             if s.bot_running:
                 s.bot_running = False
                 if s.trading_loop_task and not s.trading_loop_task.done():
                     s.trading_loop_task.cancel()
+                    await _aio.sleep(0)   # дать cancel обработаться
             await self.reply(upd, "✅ OrderbookEngine запущен. Стратегии S1–S15 остановлены.")
         except Exception as exc:
-            await self.reply(upd, f"❌ Ошибка запуска: {exc}")
+            # Очищаем state при ошибке — bot остаётся в рабочем состоянии
+            s.orderbook_engine      = None
+            s.orderbook_engine_task = None
+            s.orderbook_only_mode   = False
+            await self.reply(upd, f"❌ Ошибка запуска OrderbookEngine: {exc}")
 
     async def _cmd_ob_mode_off(self, upd, arg):
         """Выключить ORDERBOOK_ONLY движок."""

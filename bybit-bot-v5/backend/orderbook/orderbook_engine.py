@@ -211,15 +211,25 @@ class OrderbookEngine:
         self._pair_sel.update(snap)
         self._liq_filter.update_history(snap)
 
-        # Диспатч тика в executor этого символа (fire-and-forget)
+        # Диспатч тика в executor этого символа (fire-and-forget с обработкой ошибок)
         if self._running and not self._paused:
-            asyncio.ensure_future(self._tick_executor(snap))
+            task = asyncio.ensure_future(self._tick_executor(snap))
+            task.add_done_callback(self._on_executor_task_done)
+
+    def _on_executor_task_done(self, task: "asyncio.Task[None]") -> None:
+        exc = task.exception() if not task.cancelled() else None
+        if exc:
+            logger.error(f"[OBEngine] _tick_executor failed: {exc}", exc_info=exc)
 
     async def _tick_executor(self, snap: OrderbookSnapshot) -> None:
         exc = self._executors.get(snap.symbol)
         if not exc:
             return
-        rec = await exc.on_tick(snap)
+        try:
+            rec = await exc.on_tick(snap)
+        except Exception as e:
+            logger.error(f"[OBEngine] on_tick {snap.symbol} error: {e}", exc_info=True)
+            return
         if rec is not None:
             await self._on_trade_closed(rec)
 
@@ -296,13 +306,17 @@ class OrderbookEngine:
                 continue
 
             # Paper / Live — открываем
-            opened = await exc.open(
-                side        = opp.side,
-                entry_price = opp.entry_price,
-                exit_price  = opp.exit_price,
-                qty         = qty,
-                snap        = snap,
-            )
+            try:
+                opened = await exc.open(
+                    side        = opp.side,
+                    entry_price = opp.entry_price,
+                    exit_price  = opp.exit_price,
+                    qty         = qty,
+                    snap        = snap,
+                )
+            except Exception as e:
+                logger.error(f"[OBEngine] exc.open {sym} error: {e}", exc_info=True)
+                continue
             if opened:
                 self._risk.register_open(sym, pos_usdt)
                 logger.info(

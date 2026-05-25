@@ -46,7 +46,7 @@ class RiskGuard:
     def __init__(self, cfg: RiskConfig):
         self._cfg         = cfg
         self._symbols:    Dict[str, SymbolRisk] = {}
-        self._daily_pnl:  float = 0.0
+        self._daily_loss:  float = 0.0
         self._daily_date: str   = ""
         self._daily_fees: float = 0.0
         self._total_exp:  float = 0.0   # текущая суммарная экспозиция
@@ -59,7 +59,7 @@ class RiskGuard:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != self._daily_date:
             self._daily_date = today
-            self._daily_pnl  = 0.0
+            self._daily_loss  = 0.0
             self._daily_fees = 0.0
 
     def _sym(self, symbol: str) -> SymbolRisk:
@@ -74,8 +74,8 @@ class RiskGuard:
         cfg = self._cfg
         sr  = self._sym(symbol)
 
-        if self._daily_pnl <= -cfg.daily_loss_limit_usdt:
-            return False, f"daily_loss_limit({self._daily_pnl:.2f})"
+        if self._daily_loss <= -cfg.daily_loss_limit_usdt:
+            return False, f"daily_loss_limit({self._daily_loss:.2f})"
         if self._open_count >= cfg.max_open_positions:
             return False, f"max_positions({self._open_count})"
         if self._total_exp + position_usdt > cfg.max_total_exposure_usdt:
@@ -119,7 +119,7 @@ class RiskGuard:
             sr.cooldown_until = time.time() + self._cfg.cooldown_cancel_sec
             return
 
-        self._daily_pnl  += min(0.0, net_pnl)
+        self._daily_loss  += min(0.0, net_pnl)
         self._daily_fees += fees
         sr.total_trades  += 1
         sr.total_pnl     += net_pnl
@@ -136,8 +136,9 @@ class RiskGuard:
 
     @property
     def daily_pnl(self) -> float:
+        """Накопленные убытки за день (≤ 0). Выигрыши не учитываются — это loss-accumulator."""
         self._reset_day()
-        return self._daily_pnl
+        return self._daily_loss
 
     @property
     def daily_fees(self) -> float:
@@ -161,7 +162,7 @@ class RiskGuard:
         return {
             "open_positions":    self._open_count,
             "total_exposure":    round(self._total_exp, 2),
-            "daily_pnl":         round(self._daily_pnl, 5),
+            "daily_pnl":         round(self._daily_loss, 5),
             "daily_fees":        round(self._daily_fees, 5),
             "total_trades":      total_trades,
             "winrate":           round(wr, 3),

@@ -168,6 +168,10 @@ class OrderExecutor:
     """
     Управляет жизненным циклом ордеров для одного символа.
     Работает в asyncio-контексте.
+
+    Все публичные методы защищены asyncio.Lock: высокочастотные WS-тики
+    могут запускать on_tick() параллельно через ensure_future(), поэтому
+    состояние стейт-машины должно обновляться атомарно.
     """
 
     def __init__(
@@ -180,6 +184,7 @@ class OrderExecutor:
         self._cfg    = cfg
         self._bybit  = bybit_client
         self._state  = ExecState(symbol=symbol)
+        self._lock   = asyncio.Lock()   # защита от конкурентных on_tick / open
 
     @property
     def phase(self) -> Phase:
@@ -204,9 +209,20 @@ class OrderExecutor:
         snap:        OrderbookSnapshot,
     ) -> bool:
         """Выставить ордер входа. Возвращает True если ордер создан."""
+        async with self._lock:
+            return await self._open_locked(side, entry_price, exit_price, qty, snap)
+
+    async def _open_locked(
+        self, side: str, entry_price: float,
+        exit_price: float, qty: float, snap: OrderbookSnapshot,
+    ) -> bool:
         st  = self._state
         cfg = self._cfg
         now = time.time()
+
+        # Повторная проверка под локом — avoid double-open
+        if st.phase != Phase.IDLE:
+            return False
 
         trade = TradeRecord(
             symbol=self._symbol, side=side,
@@ -219,33 +235,31 @@ class OrderExecutor:
             latency_ms=(now - snap.ts_local) * 1000,
             ts_open=now,
         )
-        st.trade = trade
-        st.side  = side
 
         if cfg.dry_run:
             logger.info(
                 f"[DRY_RUN] {self._symbol}: WOULD ENTER {side} @ {entry_price:.8f} "
                 f"exit={exit_price:.8f} qty={qty:.4f}"
             )
-            # В dry-run сразу "закрываем" с оценкой
             trade.finalize(exit_price, 0.0, ExecStatus.DRY_RUN, "dry_run")
-            st.reset()
             return False   # не считается настоящим открытием
 
+        # Устанавливаем trade и phase атомарно — phase=ENTRY сразу
+        st.trade = trade
+        st.side  = side
+        st.phase = Phase.ENTRY      # ← выставляем ДО любого await
+        st.entry_placed_at = now
+
         if cfg.paper:
-            st.paper_entry    = PaperOrder(side, entry_price, qty)
-            st.phase          = Phase.ENTRY
-            st.entry_placed_at = now
+            st.paper_entry = PaperOrder(side, entry_price, qty)
             return True
 
-        # Live
+        # Live — REST после установки phase, чтобы is_idle() уже видел ENTRY
         oid = await self._place_post_only(side, entry_price, qty)
         if not oid:
             st.reset()
             return False
-        st.entry_order_id  = oid
-        st.phase           = Phase.ENTRY
-        st.entry_placed_at = now
+        st.entry_order_id = oid
         return True
 
     # ── Обработка тика ────────────────────────────────────────────────────────
@@ -254,11 +268,15 @@ class OrderExecutor:
         """
         Обновляет стейт-машину на каждом тике.
         Возвращает TradeRecord если сделка завершена (для CSV-логирования).
+        Защищён локом — безопасен при параллельных вызовах из ensure_future.
         """
-        st  = self._state
-        cfg = self._cfg
-        sym = self._symbol
+        if self._state.phase == Phase.IDLE:
+            return None   # быстрый путь без лока
+        async with self._lock:
+            return await self._on_tick_locked(snap)
 
+    async def _on_tick_locked(self, snap: OrderbookSnapshot) -> Optional[TradeRecord]:
+        st = self._state
         if st.phase == Phase.IDLE:
             return None
 
