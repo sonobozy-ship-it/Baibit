@@ -406,6 +406,13 @@ class OrderExecutor:
             st.phase = Phase.EMERGENCY
             return None
 
+        # Emergency по общему времени с момента открытия сделки
+        # (elapsed от exit_placed_at сбрасывается при reprice — не годится для аварийного таймера)
+        total_hold = now - st.trade.ts_open
+        if total_hold >= cfg.emergency_exit_sec:
+            st.phase = Phase.EMERGENCY
+            return None
+
         # Переставляем выход ближе к рынку
         if elapsed >= cfg.max_exit_wait_sec:
             exit_sd   = "Sell" if st.side == "Buy" else "Buy"
@@ -421,8 +428,6 @@ class OrderExecutor:
             st.exit_placed_at   = now
             logger.info(f"[OB] {self._symbol}: exit repriced → {new_price:.8f}")
 
-        if elapsed >= cfg.emergency_exit_sec:
-            st.phase = Phase.EMERGENCY
         return None
 
     # ── Фаза EMERGENCY ────────────────────────────────────────────────────────

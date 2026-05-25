@@ -861,12 +861,11 @@ async def _execute_fusion_signal(
     sid = "FUSION"
 
     # Проверяем, нет ли уже открытой позиции на этом символе через любую стратегию
-    # Snapshot стратегий под локом чтобы избежать race condition
-    async with state.trading_loop_lock:
-        existing = any(
-            s.symbol == sym and s.current_position
-            for s in state.strategies.values()
-        )
+    # (вызывается из trading_loop, который уже держит trading_loop_lock — повторный захват не нужен)
+    existing = any(
+        s.symbol == sym and s.current_position
+        for s in state.strategies.values()
+    )
     if existing:
         logger.debug(f"[Fusion] {sym}: уже открыта позиция, пропускаем fusion")
         return

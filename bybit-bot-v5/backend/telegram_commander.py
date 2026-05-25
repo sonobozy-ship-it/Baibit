@@ -72,6 +72,8 @@ class TelegramCommander:
     async def send(self, chat_id: str, text: str,
                    parse_mode: str = "HTML",
                    reply_markup: Optional[Dict] = None) -> Optional[Dict]:
+        if not text or not text.strip():
+            return None
         kwargs = dict(chat_id=chat_id, text=text,
                       parse_mode=parse_mode, disable_web_page_preview=True)
         if reply_markup:
@@ -80,6 +82,8 @@ class TelegramCommander:
 
     async def edit(self, chat_id: str, message_id: int, text: str,
                    reply_markup: Optional[Dict] = None):
+        if not text or not text.strip():
+            return
         kwargs = dict(chat_id=chat_id, message_id=message_id,
                       text=text, parse_mode="HTML", disable_web_page_preview=True)
         if reply_markup:

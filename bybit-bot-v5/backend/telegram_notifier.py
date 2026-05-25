@@ -28,6 +28,9 @@ class TelegramNotifier:
         """Отправить сообщение."""
         if not self.enabled:
             return False
+        if not text or not text.strip():
+            logger.debug("Telegram send skipped: empty text")
+            return False
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
