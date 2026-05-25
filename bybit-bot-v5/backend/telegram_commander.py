@@ -198,8 +198,14 @@ class TelegramCommander:
             "/improve":    self._cmd_improve,
             "/advisor":    self._cmd_advisor,
             "/exportdb":   self._cmd_exportdb,
-            "/scalp":      self._cmd_scalp,
-            "/obs":        self._cmd_obs,
+            "/scalp":                 self._cmd_scalp,
+            "/obs":                   self._cmd_obs,
+            "/mode_orderbook_on":     self._cmd_ob_mode_on,
+            "/mode_orderbook_off":    self._cmd_ob_mode_off,
+            "/orderbook_status":      self._cmd_ob_status,
+            "/orderbook_pairs":       self._cmd_ob_pairs,
+            "/orderbook_pause":       self._cmd_ob_pause,
+            "/orderbook_resume":      self._cmd_ob_resume,
         }
 
         handler = handlers.get(cmd)
@@ -553,7 +559,14 @@ class TelegramCommander:
             "/advisor — AI-анализ всех стратегий + рекомендации\n"
             "/advisor S1 — детальный анализ стратегии\n"
             "/exportdb — скачать базу данных сделок\n"
-            "/obs — статус OB_SCALPER (Orderbook Spread Scalper)"
+            "/obs — статус OB_SCALPER (Orderbook Spread Scalper)\n\n"
+            "<b>ORDERBOOK_ONLY режим:</b>\n"
+            "/mode_orderbook_on — включить стаканный движок\n"
+            "/mode_orderbook_off — выключить, вернуть стратегии\n"
+            "/orderbook_status — метрики OrderbookEngine\n"
+            "/orderbook_pairs — состояние пар\n"
+            "/orderbook_pause — приостановить движок\n"
+            "/orderbook_resume — возобновить движок"
         )
 
     async def _cmd_status(self, upd, arg):
@@ -1401,6 +1414,103 @@ class TelegramCommander:
                 "Задайте ENABLE_OB_SCALPER=true и перезапустите бот.")
             return
         await self.reply(upd, s.ob_scalper.status_text())
+
+    # ── ORDERBOOK_ONLY команды ────────────────────────────────────────────────
+
+    def _ob_engine_check(self, s) -> bool:
+        return getattr(s, "orderbook_engine", None) is not None
+
+    async def _cmd_ob_mode_on(self, upd, arg):
+        """Включить ORDERBOOK_ONLY движок в рантайме."""
+        import asyncio as _aio
+        s = self._get_state()
+        if self._ob_engine_check(s):
+            await self.reply(upd, "ℹ️ OrderbookEngine уже запущен.")
+            return
+        try:
+            from orderbook import OrderbookEngine, ObEngineConfig
+            from orderbook.spread_scanner import ScanConfig
+            from orderbook.liquidity_filter import LiquidityConfig
+            from orderbook.risk_guard import RiskConfig
+            from orderbook.pair_selector import PairSelectorConfig
+            from orderbook.order_executor import ExecutorConfig
+            import os
+            _syms = [
+                x.strip() for x in
+                os.getenv("OB_SYMBOLS",
+                          "DOGEUSDT,XRPUSDT,TRXUSDT,ADAUSDT,SOLUSDT,BTCUSDT,ETHUSDT").split(",")
+                if x.strip()
+            ]
+            _ecfg = ObEngineConfig(
+                dry_run    = os.getenv("ORDERBOOK_DRY_RUN", "false").lower() == "true",
+                paper      = os.getenv("ORDERBOOK_PAPER",   "true").lower()  == "true",
+                ws_symbols = _syms,
+            )
+            s.orderbook_engine = OrderbookEngine(
+                cfg          = _ecfg,
+                bybit_client = s.bybit,
+                notify_fn    = lambda msg: _aio.create_task(s.telegram.send(msg)),
+            )
+            s.orderbook_engine_task = _aio.create_task(s.orderbook_engine.start())
+            s.orderbook_only_mode   = True
+            if s.bot_running:
+                s.bot_running = False
+                if s.trading_loop_task and not s.trading_loop_task.done():
+                    s.trading_loop_task.cancel()
+            await self.reply(upd, "✅ OrderbookEngine запущен. Стратегии S1–S15 остановлены.")
+        except Exception as exc:
+            await self.reply(upd, f"❌ Ошибка запуска: {exc}")
+
+    async def _cmd_ob_mode_off(self, upd, arg):
+        """Выключить ORDERBOOK_ONLY движок."""
+        import asyncio as _aio
+        s = self._get_state()
+        if not self._ob_engine_check(s):
+            await self.reply(upd, "ℹ️ OrderbookEngine не запущен.")
+            return
+        if s.orderbook_engine_task and not s.orderbook_engine_task.done():
+            s.orderbook_engine_task.cancel()
+        await s.orderbook_engine.stop()
+        s.orderbook_engine      = None
+        s.orderbook_engine_task = None
+        s.orderbook_only_mode   = False
+        await self.reply(upd,
+            "✅ OrderbookEngine остановлен.\n"
+            "Запустите /go чтобы вернуть стандартные стратегии.")
+
+    async def _cmd_ob_status(self, upd, arg):
+        """Метрики OrderbookEngine."""
+        s = self._get_state()
+        if not self._ob_engine_check(s):
+            await self.reply(upd, "⚠️ OrderbookEngine не запущен. /mode_orderbook_on")
+            return
+        await self.reply(upd, s.orderbook_engine.status_text())
+
+    async def _cmd_ob_pairs(self, upd, arg):
+        """Состояние пар по ликвидности."""
+        s = self._get_state()
+        if not self._ob_engine_check(s):
+            await self.reply(upd, "⚠️ OrderbookEngine не запущен. /mode_orderbook_on")
+            return
+        await self.reply(upd, s.orderbook_engine.pairs_status_text())
+
+    async def _cmd_ob_pause(self, upd, arg):
+        """Приостановить торговлю OrderbookEngine."""
+        s = self._get_state()
+        if not self._ob_engine_check(s):
+            await self.reply(upd, "⚠️ OrderbookEngine не запущен.")
+            return
+        s.orderbook_engine.pause()
+        await self.reply(upd, "⏸ OrderbookEngine приостановлен.")
+
+    async def _cmd_ob_resume(self, upd, arg):
+        """Возобновить торговлю OrderbookEngine."""
+        s = self._get_state()
+        if not self._ob_engine_check(s):
+            await self.reply(upd, "⚠️ OrderbookEngine не запущен.")
+            return
+        s.orderbook_engine.resume()
+        await self.reply(upd, "▶ OrderbookEngine возобновлён.")
 
     async def close(self):
         if self._session and not self._session.closed:

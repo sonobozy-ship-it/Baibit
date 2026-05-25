@@ -60,6 +60,12 @@ from strategies.time_rate import TimeRateManager
 from strategies.market_filters import calc_quality_score
 from strategies.candle_patterns import CandlestickPatternFilter, THRESHOLD_STRICT
 from strategies.orderbook_scalper import OrderbookSpreadScalper, ObScalperConfig
+from orderbook import OrderbookEngine, ObEngineConfig
+from orderbook.spread_scanner import ScanConfig
+from orderbook.liquidity_filter import LiquidityConfig
+from orderbook.risk_guard import RiskConfig
+from orderbook.pair_selector import PairSelectorConfig
+from orderbook.order_executor import ExecutorConfig
 
 # ============================================================
 # Загрузка конфига
@@ -195,6 +201,11 @@ class BotState:
         # OB_SCALPER — Orderbook Spread Scalper (независимый WS-поток)
         self.ob_scalper: Optional[OrderbookSpreadScalper] = None
         self.ob_scalper_task: Optional[asyncio.Task] = None
+
+        # ORDERBOOK_ONLY — полный стаканный движок (отдельный режим)
+        self.orderbook_engine: Optional[OrderbookEngine] = None
+        self.orderbook_engine_task: Optional[asyncio.Task] = None
+        self.orderbook_only_mode: bool = os.getenv("ORDERBOOK_ONLY", "false").lower() == "true"
 
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
@@ -2483,7 +2494,9 @@ async def lifespan(app: FastAPI):
     logger.info("📊 Авто-выбор символов по объёму запущен (обновление каждые 4ч)")
 
     # ── Автостарт бота ────────────────────────────────────────────────────────
-    if os.getenv("AUTO_START", "false").lower() == "true":
+    if state.orderbook_only_mode:
+        logger.info("🚫 ORDERBOOK_ONLY=true — стандартные стратегии S1–S15 отключены")
+    elif os.getenv("AUTO_START", "false").lower() == "true":
         if state.bybit or state.paper_mode:
             state.bot_running = True
             state.trading_loop_task = asyncio.create_task(trading_loop())
@@ -2580,6 +2593,65 @@ async def lifespan(app: FastAPI):
             f"📈 OB_SCALPER [{_ob_mode}] запущен: {_ob_syms}"
         )
 
+    # ── ORDERBOOK_ONLY — стаканный движок ────────────────────────────────────
+    if state.orderbook_only_mode:
+        _ob_syms_e = [
+            s.strip() for s in
+            os.getenv("OB_SYMBOLS",
+                      "DOGEUSDT,XRPUSDT,TRXUSDT,ADAUSDT,SOLUSDT,BTCUSDT,ETHUSDT").split(",")
+            if s.strip()
+        ]
+        _ob_dry_run = os.getenv("ORDERBOOK_DRY_RUN", "false").lower() == "true"
+        _ob_paper   = os.getenv("ORDERBOOK_PAPER",   "true").lower()  == "true"
+        _ob_ecfg = ObEngineConfig(
+            dry_run         = _ob_dry_run,
+            paper           = _ob_paper,
+            ws_symbols      = _ob_syms_e,
+            scan_interval_sec = float(os.getenv("OB_SCAN_INTERVAL", "1.0")),
+            notify_every_n_dry = int(os.getenv("OB_NOTIFY_DRY_N", "100")),
+            csv_path        = os.getenv("OB_CSV_PATH", "logs/orderbook_engine_trades.csv"),
+            pair_cfg        = PairSelectorConfig(
+                whitelist        = _ob_syms_e,
+                max_pairs_active = int(os.getenv("OB_MAX_PAIRS", "7")),
+                min_book_depth_usdt = float(os.getenv("OB_MIN_DEPTH", "3000")),
+                max_spread_pct   = float(os.getenv("OB_MAX_SPREAD_PCT", "0.5")),
+                max_pump_pct     = float(os.getenv("OB_MAX_PUMP_PCT", "1.0")),
+            ),
+            scan_cfg        = ScanConfig(
+                min_spread_pct       = float(os.getenv("OB_MIN_SPREAD_PCT", "0.08")),
+                spread_to_fee_ratio_min = float(os.getenv("OB_FEE_RATIO", "3.0")),
+                min_net_profit_usdt  = float(os.getenv("OB_MIN_NET", "0.015")),
+                max_position_usdt    = float(os.getenv("OB_MAX_POS", "25")),
+                enable_short         = os.getenv("OB_SHORT", "false").lower() == "true",
+            ),
+            liquidity_cfg   = LiquidityConfig(
+                min_book_depth_usdt  = float(os.getenv("OB_LIQ_DEPTH", "5000")),
+                max_wall_ratio       = float(os.getenv("OB_MAX_WALL", "0.6")),
+            ),
+            risk_cfg        = RiskConfig(
+                max_open_positions   = int(os.getenv("OB_MAX_OPEN", "3")),
+                max_total_exposure_usdt = float(os.getenv("OB_MAX_EXPOSURE", "100")),
+                max_position_usdt    = float(os.getenv("OB_MAX_POS", "25")),
+                daily_loss_limit_usdt= float(os.getenv("OB_DAILY_LOSS", "25")),
+                max_consecutive_losses = int(os.getenv("OB_MAX_CONS_LOSS", "3")),
+                cooldown_after_loss_sec = float(os.getenv("OB_COOLDOWN_SEC", "120")),
+            ),
+            exec_cfg        = ExecutorConfig(
+                max_order_lifetime_sec = float(os.getenv("OB_ORDER_TTL", "2")),
+                max_exit_wait_sec      = float(os.getenv("OB_EXIT_WAIT", "8")),
+                emergency_exit_sec     = float(os.getenv("OB_EMERGENCY_SEC", "20")),
+                max_adverse_move_pct   = float(os.getenv("OB_ADVERSE_PCT", "0.15")),
+            ),
+        )
+        state.orderbook_engine = OrderbookEngine(
+            cfg          = _ob_ecfg,
+            bybit_client = state.bybit,
+            notify_fn    = lambda msg: asyncio.create_task(state.telegram.send(msg)),
+        )
+        state.orderbook_engine_task = asyncio.create_task(state.orderbook_engine.start())
+        _ob_e_mode = "DRY-RUN" if _ob_dry_run else ("PAPER" if _ob_paper else "LIVE")
+        logger.info(f"📊 OrderbookEngine [{_ob_e_mode}] запущен: {_ob_syms_e}")
+
     logger.info("✅ Бэкенд готов")
     yield
     state.bot_running = False
@@ -2599,6 +2671,10 @@ async def lifespan(app: FastAPI):
         state.ob_scalper_task.cancel()
     if state.ob_scalper:
         await state.ob_scalper.stop()
+    if state.orderbook_engine_task:
+        state.orderbook_engine_task.cancel()
+    if state.orderbook_engine:
+        await state.orderbook_engine.stop()
     await state.news_manager.close()
     logger.info("🛑 Завершение работы")
 
