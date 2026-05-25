@@ -199,6 +199,7 @@ class TelegramCommander:
             "/advisor":    self._cmd_advisor,
             "/exportdb":   self._cmd_exportdb,
             "/scalp":      self._cmd_scalp,
+            "/obs":        self._cmd_obs,
         }
 
         handler = handlers.get(cmd)
@@ -551,7 +552,8 @@ class TelegramCommander:
             "/news — новостной сентимент\n"
             "/advisor — AI-анализ всех стратегий + рекомендации\n"
             "/advisor S1 — детальный анализ стратегии\n"
-            "/exportdb — скачать базу данных сделок"
+            "/exportdb — скачать базу данных сделок\n"
+            "/obs — статус OB_SCALPER (Orderbook Spread Scalper)"
         )
 
     async def _cmd_status(self, upd, arg):
@@ -1389,6 +1391,16 @@ class TelegramCommander:
                     raise RuntimeError("Ошибка отправки файла")
         except Exception as e:
             await self.reply(upd, f"❌ Ошибка экспорта: {e}")
+
+    async def _cmd_obs(self, upd, arg):
+        """Статус OB_SCALPER (Orderbook Spread Scalper)."""
+        s = self._get_state()
+        if not getattr(s, "ob_scalper", None):
+            await self.reply(upd,
+                "⚠️ OB_SCALPER не запущен.\n"
+                "Задайте ENABLE_OB_SCALPER=true и перезапустите бот.")
+            return
+        await self.reply(upd, s.ob_scalper.status_text())
 
     async def close(self):
         if self._session and not self._session.closed:

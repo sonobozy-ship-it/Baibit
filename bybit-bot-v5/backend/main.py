@@ -59,6 +59,7 @@ from strategies.entry_filter import validate_entry_confirmation
 from strategies.time_rate import TimeRateManager
 from strategies.market_filters import calc_quality_score
 from strategies.candle_patterns import CandlestickPatternFilter, THRESHOLD_STRICT
+from strategies.orderbook_scalper import OrderbookSpreadScalper, ObScalperConfig
 
 # ============================================================
 # Загрузка конфига
@@ -190,6 +191,10 @@ class BotState:
         # Claude AI Orchestrator — анализирует состояние и выдаёт команды
         self.orchestrator: Optional[ClaudeOrchestrator] = None
         self.orchestrator_task: Optional[asyncio.Task] = None
+
+        # OB_SCALPER — Orderbook Spread Scalper (независимый WS-поток)
+        self.ob_scalper: Optional[OrderbookSpreadScalper] = None
+        self.ob_scalper_task: Optional[asyncio.Task] = None
 
         # Активные стратегии (создаются при старте)
         self.strategies: Dict[str, object] = {}
@@ -2543,6 +2548,38 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_daily_summary_loop())
         logger.info("📊 Часовой и ежедневный Telegram-отчёт запущен")
 
+    # ── OB_SCALPER — Orderbook Spread Scalper ────────────────────────────────
+    if os.getenv("ENABLE_OB_SCALPER", "false").lower() == "true":
+        _ob_syms = [
+            s.strip() for s in
+            os.getenv("OB_SCALPER_SYMBOLS",
+                      "DOGEUSDT,XRPUSDT,TRXUSDT,ADAUSDT,SOLUSDT,BTCUSDT,ETHUSDT").split(",")
+            if s.strip()
+        ]
+        _ob_cfg = ObScalperConfig(
+            symbols                 = _ob_syms,
+            paper_mode              = os.getenv("OB_SCALPER_PAPER",      "true").lower()  == "true",
+            enable_short            = os.getenv("OB_SCALPER_SHORT",      "false").lower() == "true",
+            max_active_symbols      = int(os.getenv("OB_SCALPER_MAX_ACTIVE", "3")),
+            max_position_usdt       = float(os.getenv("OB_SCALPER_MAX_POS",    "25")),
+            min_net_profit_usdt     = float(os.getenv("OB_SCALPER_MIN_NET",    "0.02")),
+            daily_loss_limit_usdt   = float(os.getenv("OB_SCALPER_DAILY_LOSS", "10")),
+            max_consecutive_losses  = int(os.getenv("OB_SCALPER_MAX_CONS_LOSS", "3")),
+            cancel_entry_sec        = float(os.getenv("OB_SCALPER_CANCEL_SEC", "1.5")),
+            max_exit_wait_sec       = float(os.getenv("OB_SCALPER_EXIT_WAIT",  "8")),
+            emergency_exit_sec      = float(os.getenv("OB_SCALPER_EMERGENCY",  "20")),
+        )
+        state.ob_scalper = OrderbookSpreadScalper(
+            cfg          = _ob_cfg,
+            bybit_client = state.bybit,
+            notify_fn    = lambda msg: asyncio.create_task(state.telegram.send(msg)),
+        )
+        state.ob_scalper_task = asyncio.create_task(state.ob_scalper.start())
+        _ob_mode = "PAPER" if _ob_cfg.paper_mode else "LIVE"
+        logger.info(
+            f"📈 OB_SCALPER [{_ob_mode}] запущен: {_ob_syms}"
+        )
+
     logger.info("✅ Бэкенд готов")
     yield
     state.bot_running = False
@@ -2558,6 +2595,10 @@ async def lifespan(app: FastAPI):
         state.commander_task.cancel()
     if state.commander:
         await state.commander.close()
+    if state.ob_scalper_task:
+        state.ob_scalper_task.cancel()
+    if state.ob_scalper:
+        await state.ob_scalper.stop()
     await state.news_manager.close()
     logger.info("🛑 Завершение работы")
 
