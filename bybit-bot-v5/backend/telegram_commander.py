@@ -107,6 +107,8 @@ class TelegramCommander:
         train_btn = _btn("🎓 Обучение: ВКЛ", "training_off") if getattr(s, "training_mode", False) \
                     else _btn("🎓 Обучение: ВЫКЛ", "training_on")
         min_trade = s.risk_manager.min_trade_usdt
+        ob_active = getattr(s, "orderbook_only_mode", False)
+        ob_btn    = _btn("📊 Стакан: ВКЛ", "ob_menu") if ob_active else _btn("📊 Стакан: ВЫКЛ", "ob_menu")
         return _keyboard([
             [go_btn, pause_btn],
             [_btn("💰 Баланс", "balance"), _btn("📌 Позиции", "positions")],
@@ -116,6 +118,7 @@ class TelegramCommander:
             [_btn(f"💵 Баланс: {bal_str} USDT", "set_balance"),
              _btn(f"📦 Макс сделок: {max_pos}", "set_max_pos")],
             [_btn(f"💲 Мин. сделка: {min_trade:.0f} USDT", "set_min_trade"), scalp_btn],
+            [ob_btn, _btn("💾 Скачать базу", "exportdb")],
             [train_btn, _btn("🔄 Обновить меню", "menu")],
         ])
 
@@ -253,6 +256,14 @@ class TelegramCommander:
             "scalp_off":     self._cb_scalp_off,
             "training_on":   self._cb_training_on,
             "training_off":  self._cb_training_off,
+            "ob_menu":       self._show_ob_menu,
+            "ob_on":         self._cb_ob_on,
+            "ob_off":        self._cb_ob_off,
+            "ob_stat":       self._cb_ob_stat,
+            "ob_pairs":      self._cb_ob_pairs,
+            "ob_pause":      self._cb_ob_pause,
+            "ob_resume":     self._cb_ob_resume,
+            "exportdb":      self._cmd_exportdb,
         }
 
         # Закрытие отдельной позиции
@@ -300,7 +311,7 @@ class TelegramCommander:
 
         fn = action_map.get(data)
         if fn:
-            if data in ("menu",):
+            if data in ("menu", "ob_menu"):
                 await fn(chat_id, msg_id)
             else:
                 await fn(fake_upd, "")
@@ -1521,6 +1532,64 @@ class TelegramCommander:
             return
         s.orderbook_engine.resume()
         await self.reply(upd, "▶ OrderbookEngine возобновлён.")
+
+    # ── Orderbook inline-кнопки ───────────────────────────────────────────────
+
+    def _ob_submenu(self) -> Dict:
+        s         = self._get_state()
+        ob_active = getattr(s, "orderbook_only_mode", False)
+        engine    = getattr(s, "orderbook_engine", None)
+        paused    = getattr(engine, "_paused", False) if engine else False
+
+        toggle_btn = _btn("🛑 Выключить стакан", "ob_off") if ob_active \
+                     else _btn("▶️ Включить стакан", "ob_on")
+        pp_btn = _btn("▶️ Возобновить", "ob_resume") if paused \
+                 else _btn("⏸ Пауза", "ob_pause")
+
+        rows: List[List[Dict]] = [[toggle_btn]]
+        if ob_active:
+            rows.append([_btn("📊 Статистика", "ob_stat"), _btn("📋 Пары", "ob_pairs")])
+            rows.append([pp_btn])
+        rows.append([_btn("◀️ Назад", "menu")])
+        return _keyboard(rows)
+
+    async def _show_ob_menu(self, chat_id: str, msg_id: int):
+        s         = self._get_state()
+        ob_active = getattr(s, "orderbook_only_mode", False)
+        engine    = getattr(s, "orderbook_engine", None)
+        paused    = getattr(engine, "_paused", False) if engine else False
+
+        if ob_active and engine:
+            status = "⏸ Пауза" if paused else "🟢 Работает"
+            body   = engine.status_text()
+        else:
+            status = "🔴 Остановлен"
+            body   = "Нажмите <b>Включить стакан</b> для запуска движка."
+
+        text = (
+            f"📊 <b>Orderbook Spread Engine</b>\n\n"
+            f"Статус: {status}\n\n"
+            f"{body}"
+        )
+        await self.edit(chat_id, msg_id, text[:4000], reply_markup=self._ob_submenu())
+
+    async def _cb_ob_on(self, upd, arg):
+        await self._cmd_ob_mode_on(upd, arg)
+
+    async def _cb_ob_off(self, upd, arg):
+        await self._cmd_ob_mode_off(upd, arg)
+
+    async def _cb_ob_stat(self, upd, arg):
+        await self._cmd_ob_status(upd, arg)
+
+    async def _cb_ob_pairs(self, upd, arg):
+        await self._cmd_ob_pairs(upd, arg)
+
+    async def _cb_ob_pause(self, upd, arg):
+        await self._cmd_ob_pause(upd, arg)
+
+    async def _cb_ob_resume(self, upd, arg):
+        await self._cmd_ob_resume(upd, arg)
 
     async def close(self):
         if self._session and not self._session.closed:
