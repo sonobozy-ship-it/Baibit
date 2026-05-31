@@ -1,0 +1,5 @@
+{
+  "_comment": "ISO-8601 timestamps (UTC) of major macro events. Bot won't trade ±15 min around them.",
+  "events": [
+  ]
+}
