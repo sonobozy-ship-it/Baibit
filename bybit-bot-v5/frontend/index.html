@@ -1,0 +1,1513 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BYBIT AUTOTRADER PRO v3</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;600;700&display=swap');
+
+:root {
+  --bg: #050a0f; --panel: #080f17; --border: #0d2233;
+  --accent: #00d4ff; --green: #00ff88; --red: #ff3366; --warn: #ffaa00;
+  --text: #c8e0f0; --dim: #3a5a70;
+  --mono: 'Share Tech Mono', monospace; --ui: 'Rajdhani', sans-serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: var(--ui); min-height: 100vh; }
+body::after {
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background-image: linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+.wrapper { position: relative; z-index: 1; padding: 0 20px 40px; max-width: 1700px; margin: 0 auto; }
+
+/* HEADER */
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 0 14px; border-bottom: 1px solid var(--border); margin-bottom: 24px;
+}
+.logo { display: flex; align-items: center; gap: 14px; }
+.logo-icon {
+  width: 44px; height: 44px; border: 2px solid var(--accent); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; font-size: 20px;
+  box-shadow: 0 0 20px rgba(0,212,255,0.4);
+}
+.logo h1 { font-size: 24px; font-weight: 700; letter-spacing: 3px; color: var(--accent); }
+.logo p { font-size: 11px; letter-spacing: 3px; color: var(--dim); font-family: var(--mono); }
+
+.header-status { display: flex; align-items: center; gap: 16px; }
+.status-pill {
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.3);
+  border-radius: 20px; padding: 6px 16px;
+  font-size: 13px; font-weight: 600; letter-spacing: 2px;
+}
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+.status-dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); animation: blink 1.5s infinite; }
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.btn {
+  padding: 10px 20px; border: 1px solid; border-radius: 6px; cursor: pointer;
+  font-family: var(--ui); font-size: 13px; font-weight: 600; letter-spacing: 1px;
+  transition: all 0.2s; white-space: nowrap; background: transparent;
+}
+.btn-primary { border-color: var(--accent); color: var(--accent); background: rgba(0,212,255,0.1); }
+.btn-primary:hover { background: rgba(0,212,255,0.2); }
+.btn-success { border-color: var(--green); color: var(--green); background: rgba(0,255,136,0.1); }
+.btn-danger { border-color: var(--red); color: var(--red); background: rgba(255,51,102,0.1); }
+.btn-sm { padding: 5px 12px; font-size: 11px; }
+
+/* TABS */
+.tabs {
+  display: flex; gap: 4px; margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  padding: 12px 22px; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; letter-spacing: 2px;
+  color: var(--dim); border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* API PANEL */
+.api-panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px 24px; margin-bottom: 20px;
+  display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 16px; align-items: end;
+}
+.field label {
+  display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim);
+  font-family: var(--mono); margin-bottom: 6px;
+}
+.field input, .field select {
+  width: 100%; background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px 14px; color: var(--text);
+  font-family: var(--mono); font-size: 13px;
+}
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+
+/* STATS */
+.stats-row {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 20px;
+}
+.stat-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 18px; position: relative; overflow: hidden;
+}
+.stat-card::before {
+  content:''; position: absolute; top:0; left:0; right:0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+.stat-label { font-size: 10px; letter-spacing: 2px; color: var(--dim); font-family: var(--mono); margin-bottom: 8px; }
+.stat-value { font-size: 22px; font-weight: 700; font-family: var(--mono); color: var(--accent); }
+.stat-value.pos { color: var(--green); } .stat-value.neg { color: var(--red); }
+.stat-sub { font-size: 10px; color: var(--dim); margin-top: 4px; font-family: var(--mono); }
+
+/* MAIN GRID */
+.main-grid { display: grid; grid-template-columns: 1fr 380px; gap: 20px; }
+.section-title {
+  font-size: 11px; letter-spacing: 3px; color: var(--dim);
+  font-family: var(--mono); margin-bottom: 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+.section-title::after { content:''; flex:1; height: 1px; background: linear-gradient(90deg, var(--border), transparent); }
+
+.strategies-list { display: flex; flex-direction: column; gap: 12px; }
+.strategy-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 20px; transition: all 0.3s;
+}
+.strategy-card.disabled { opacity: 0.5; border-color: rgba(255,51,102,0.2); }
+.strategy-card.auto-disabled { border-color: rgba(255,170,0,0.3); }
+
+.strat-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.strat-id { font-family: var(--mono); font-size: 11px; color: var(--dim); background: rgba(255,255,255,0.04); padding: 2px 8px; border-radius: 4px; }
+.strat-name { font-size: 16px; font-weight: 700; letter-spacing: 1px; flex: 1; }
+.strat-badge {
+  font-size: 10px; letter-spacing: 1px; font-family: var(--mono);
+  padding: 3px 10px; border-radius: 20px; border: 1px solid;
+}
+.badge-active { color: var(--green); border-color: rgba(0,255,136,0.4); background: rgba(0,255,136,0.08); }
+.badge-disabled { color: var(--red); border-color: rgba(255,51,102,0.4); background: rgba(255,51,102,0.08); }
+.badge-auto { color: var(--warn); border-color: rgba(255,170,0,0.4); background: rgba(255,170,0,0.08); }
+
+.strat-body { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+.strat-metric label { font-size: 10px; color: var(--dim); letter-spacing: 1px; display: block; margin-bottom: 2px; }
+.strat-metric .val { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+
+.filter-pills { display:flex; flex-wrap:wrap; gap:5px; margin-bottom: 8px; }
+.filter-pill {
+  font-size: 10px; font-family: var(--mono); padding: 2px 6px;
+  border-radius: 3px; border: 1px solid; white-space: nowrap;
+}
+.filter-pill.ok { color: var(--green); border-color: rgba(0,255,136,0.3); background: rgba(0,255,136,0.06); }
+.filter-pill.no { color: var(--red); border-color: rgba(255,51,102,0.2); background: rgba(255,51,102,0.04); }
+
+.ev-row {
+  display: flex; gap: 14px; align-items: center; padding: 6px 10px;
+  background: rgba(0,0,0,0.2); border-radius: 6px;
+  font-family: var(--mono); font-size: 11px; margin-bottom: 8px;
+}
+
+.strat-footer { display: flex; justify-content: space-between; align-items: center; }
+.mini-chart { display: flex; align-items: flex-end; gap: 2px; height: 26px; }
+.mini-bar { width: 5px; border-radius: 2px; }
+.mini-bar.pos { background: var(--green); } .mini-bar.neg { background: var(--red); }
+
+/* RIGHT PANEL */
+.right-panel { display: flex; flex-direction: column; gap: 16px; }
+.panel-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 18px;
+}
+
+/* RISK BAR */
+.risk-bar { margin-bottom: 12px; }
+.risk-bar-label { display: flex; justify-content: space-between; font-size: 10px; font-family: var(--mono); color: var(--dim); margin-bottom: 4px; }
+.risk-bar-track { height: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; position: relative; }
+.risk-bar-fill { height: 100%; transition: width 0.5s; }
+.risk-bar-fill.green { background: linear-gradient(90deg, var(--green), #00c870); }
+.risk-bar-fill.warn { background: linear-gradient(90deg, var(--warn), #ff8800); }
+.risk-bar-fill.red { background: linear-gradient(90deg, var(--red), #cc0033); }
+
+/* LOG */
+.log-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+.log-list::-webkit-scrollbar { width: 4px; }
+.log-list::-webkit-scrollbar-thumb { background: var(--border); }
+.log-item {
+  display: flex; gap: 8px; font-family: var(--mono); font-size: 11px;
+  padding: 4px 8px; border-radius: 4px; background: rgba(255,255,255,0.02);
+}
+.log-time { color: var(--dim); min-width: 52px; }
+.log-msg.info { color: var(--accent); }
+.log-msg.ok { color: var(--green); }
+.log-msg.warn { color: var(--warn); }
+.log-msg.err { color: var(--red); }
+
+/* BACKTEST */
+.backtest-form {
+  display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr auto;
+  gap: 12px; margin-bottom: 20px;
+  background: var(--panel); padding: 20px; border-radius: 10px; border: 1px solid var(--border);
+}
+.backtest-results { display: none; }
+.backtest-results.show { display: block; }
+.bt-metrics {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 20px;
+}
+.bt-metric {
+  background: var(--panel); padding: 14px; border-radius: 8px; border: 1px solid var(--border);
+}
+.bt-metric .l { font-size: 10px; color: var(--dim); font-family: var(--mono); letter-spacing: 1px; margin-bottom: 4px; }
+.bt-metric .v { font-size: 18px; font-family: var(--mono); font-weight: 700; }
+.equity-curve { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+#equityCanvas { width: 100%; height: 300px; }
+
+/* JOURNAL */
+.journal-table {
+  width: 100%; background: var(--panel); border-radius: 10px; border: 1px solid var(--border);
+  overflow: hidden; font-family: var(--mono); font-size: 12px;
+}
+.journal-table th, .journal-table td {
+  padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border);
+}
+.journal-table th { background: rgba(0,212,255,0.05); color: var(--accent); font-size: 10px; letter-spacing: 1px; }
+.journal-table tr:hover { background: rgba(255,255,255,0.02); }
+
+/* HEATMAP */
+.heatmap {
+  display: grid; grid-template-columns: 80px repeat(24, 1fr); gap: 2px;
+  background: var(--panel); padding: 20px; border-radius: 10px; border: 1px solid var(--border);
+}
+.heatmap-cell {
+  aspect-ratio: 1; border-radius: 3px; font-size: 9px; display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono);
+}
+
+/* AI PANEL */
+.ai-panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 24px;
+}
+.ai-response {
+  background: rgba(0,212,255,0.04); border-left: 3px solid var(--accent);
+  padding: 16px 20px; border-radius: 6px; margin-top: 16px;
+  white-space: pre-wrap; line-height: 1.6; font-size: 13px;
+}
+
+/* TOGGLE SWITCH */
+.toggle {
+  width: 40px; height: 20px; background: rgba(255,255,255,0.1);
+  border-radius: 10px; cursor: pointer; position: relative;
+  border: 1px solid var(--border);
+}
+.toggle.on { background: rgba(0,255,136,0.3); border-color: rgba(0,255,136,0.5); }
+.toggle::after {
+  content:''; position: absolute; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--dim); top: 2px; left: 2px; transition: all 0.2s;
+}
+.toggle.on::after { left: 22px; background: var(--green); }
+
+.notification {
+  position: fixed; bottom: 30px; right: 30px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 20px;
+  font-family: var(--mono); font-size: 13px; z-index: 2000;
+  transform: translateX(120%); transition: transform 0.3s;
+}
+.notification.show { transform: translateX(0); }
+.notification.success { border-color: var(--green); color: var(--green); }
+.notification.error { border-color: var(--red); color: var(--red); }
+</style>
+</head>
+<body>
+
+<div class="wrapper">
+
+<!-- HEADER -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <div>
+      <h1>BYBIT AUTOTRADER PRO</h1>
+      <p>v3.0 · MULTI-STRATEGY · BACKTEST · AI</p>
+    </div>
+  </div>
+  <div class="header-status">
+    <div class="status-pill" id="wsStatus">
+      <div class="status-dot" id="wsDot"></div>
+      <span id="wsText">ОФФЛАЙН</span>
+    </div>
+    <div class="status-pill" id="paperPill" style="display:none">📋 PAPER MODE</div>
+    <button class="btn btn-success" id="masterBtn" onclick="toggleBot()">▶ ЗАПУСТИТЬ</button>
+  </div>
+</header>
+
+<!-- TABS -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('dashboard')">📊 ДЭШБОРД</div>
+  <div class="tab" onclick="switchTab('backtest')">🔬 БЭКТЕСТ</div>
+  <div class="tab" onclick="switchTab('journal')">📒 ЖУРНАЛ</div>
+  <div class="tab" onclick="switchTab('heatmap')">🗺 HEATMAP</div>
+  <div class="tab" onclick="switchTab('ai')">🤖 AI АНАЛИЗ</div>
+  <div class="tab" onclick="switchTab('ml')">🧠 ML ОБУЧЕНИЕ</div>
+  <div class="tab" onclick="switchTab('news')">📡 НОВОСТИ</div>
+  <div class="tab" onclick="switchTab('settings')">⚙ НАСТРОЙКИ</div>
+</div>
+
+<!-- TAB: DASHBOARD -->
+<div class="tab-content active" id="tab-dashboard">
+
+  <!-- API PANEL -->
+  <div class="api-panel">
+    <div class="field">
+      <label>BYBIT API KEY</label>
+      <input type="text" id="apiKey" placeholder="API ключ..." />
+    </div>
+    <div class="field">
+      <label>SECRET</label>
+      <input type="password" id="secretKey" placeholder="Secret..." />
+    </div>
+    <div class="field" style="width:130px;">
+      <label>РЕЖИМ</label>
+      <select id="tradeMode"><option value="testnet">TESTNET</option><option value="mainnet">MAINNET</option></select>
+    </div>
+    <button class="btn btn-primary" onclick="connectAPI()">ПОДКЛЮЧИТЬ</button>
+  </div>
+
+  <!-- STATS -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">БАЛАНС</div>
+      <div class="stat-value" id="balance">—</div>
+      <div class="stat-sub">USDT</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">PNL СЕССИИ</div>
+      <div class="stat-value pos" id="sessionPnl">+0.00</div>
+      <div class="stat-sub" id="sessionPnlPct">+0.00%</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">ДНЕВНОЙ ЛИМИТ</div>
+      <div class="stat-value" id="dailyLimit">5.0%</div>
+      <div class="stat-sub" id="dailyLimitStatus">в норме</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">ПОЗИЦИЙ</div>
+      <div class="stat-value" id="openPositions">0/4</div>
+      <div class="stat-sub">открыто</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">WIN RATE</div>
+      <div class="stat-value pos" id="winRate">0%</div>
+      <div class="stat-sub" id="totalTrades">0 сделок</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">АКТИВНЫХ</div>
+      <div class="stat-value" id="activeStrats">7/7</div>
+      <div class="stat-sub">стратегий</div>
+    </div>
+  </div>
+
+  <!-- MAIN GRID -->
+  <div class="main-grid">
+    <div>
+      <div class="section-title">// СТРАТЕГИИ С МАТ. ПРЕИМУЩЕСТВОМ</div>
+      <div class="strategies-list" id="strategiesList"></div>
+    </div>
+
+    <div class="right-panel">
+      <!-- RISK MANAGER -->
+      <div class="panel-card">
+        <div class="section-title">// РИСК-МЕНЕДЖЕР</div>
+        <div class="risk-bar">
+          <div class="risk-bar-label"><span>Дневной убыток</span><span id="dailyLossPct">0%</span></div>
+          <div class="risk-bar-track"><div class="risk-bar-fill green" id="dailyLossBar" style="width:0%"></div></div>
+        </div>
+        <div class="risk-bar">
+          <div class="risk-bar-label"><span>Позиций открыто</span><span id="positionsCount">0/4</span></div>
+          <div class="risk-bar-track"><div class="risk-bar-fill green" id="positionsBar" style="width:0%"></div></div>
+        </div>
+        <div id="killSwitchAlert" style="display:none;padding:10px;background:rgba(255,51,102,0.1);border:1px solid var(--red);border-radius:6px;margin-top:10px;font-size:12px;color:var(--red);"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="btn btn-sm btn-primary" onclick="togglePaper()" id="paperBtn">📋 Paper Mode</button>
+          <button class="btn btn-sm btn-danger" onclick="resetKillSwitch()">🔓 Сброс блок.</button>
+        </div>
+      </div>
+
+      <!-- POSITIONS -->
+      <div class="panel-card">
+        <div class="section-title">// ОТКРЫТЫЕ ПОЗИЦИИ</div>
+        <div id="positionsList"><div style="font-family:var(--mono);font-size:12px;color:var(--dim);text-align:center;padding:14px;">НЕТ ПОЗИЦИЙ</div></div>
+      </div>
+
+      <!-- LOG -->
+      <div class="panel-card">
+        <div class="section-title">// ЛОГА СОБЫТИЙ</div>
+        <div class="log-list" id="logList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: BACKTEST -->
+<div class="tab-content" id="tab-backtest">
+  <div class="backtest-form">
+    <div class="field">
+      <label>СТРАТЕГИЯ</label>
+      <select id="btStrategy"></select>
+    </div>
+    <div class="field">
+      <label>СИМВОЛ</label>
+      <select id="btSymbol">
+        <option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option>
+        <option>BNBUSDT</option><option>XRPUSDT</option><option>DOGEUSDT</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>ИНТЕРВАЛ</label>
+      <select id="btInterval">
+        <option value="5">5m</option><option value="15" selected>15m</option>
+        <option value="60">1h</option><option value="240">4h</option><option value="D">1D</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>ДНЕЙ ИСТОРИИ</label>
+      <input type="number" id="btDays" value="30" min="7" max="365"/>
+    </div>
+    <div class="field">
+      <label>СТАРТ БАЛАНС</label>
+      <input type="number" id="btBalance" value="1000"/>
+    </div>
+    <button class="btn btn-primary" onclick="runBacktest()" style="align-self:end">🔬 ЗАПУСТИТЬ</button>
+  </div>
+
+  <div id="btLoading" style="display:none;text-align:center;padding:40px;font-family:var(--mono);color:var(--accent);">
+    Прогон бэктеста... это может занять до минуты
+  </div>
+
+  <div class="backtest-results" id="btResults">
+    <div class="bt-metrics" id="btMetrics"></div>
+    <div class="equity-curve">
+      <div class="section-title">// КРИВАЯ ДЕПОЗИТА</div>
+      <canvas id="equityCanvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: JOURNAL -->
+<div class="tab-content" id="tab-journal">
+  <div style="display:flex;gap:10px;margin-bottom:16px;">
+    <button class="btn btn-primary" onclick="loadJournal()">🔄 Обновить</button>
+    <button class="btn btn-success" onclick="downloadCSV()">📥 CSV</button>
+    <button class="btn btn-success" onclick="downloadExcel()">📊 Excel</button>
+  </div>
+  <div id="journalContent"></div>
+</div>
+
+<!-- TAB: HEATMAP -->
+<div class="tab-content" id="tab-heatmap">
+  <div class="section-title">// ТЕПЛОВАЯ КАРТА: PnL ПО ЧАСАМ × ДНЯМ НЕДЕЛИ</div>
+  <p style="color:var(--dim);font-family:var(--mono);font-size:12px;margin-bottom:16px;">Показывает когда какая стратегия работает лучше</p>
+  <div id="heatmapContent" style="background:var(--panel);padding:24px;border-radius:10px;border:1px solid var(--border);font-family:var(--mono);color:var(--dim);text-align:center;">
+    Загрузка данных... (требуется ≥10 закрытых сделок)
+  </div>
+</div>
+
+<!-- TAB: AI -->
+<div class="tab-content" id="tab-ai">
+  <div class="ai-panel">
+    <div class="section-title">// AI АНАЛИЗ СТРАТЕГИЙ (Claude)</div>
+    <p style="color:var(--dim);font-family:var(--mono);font-size:12px;margin-bottom:16px;">
+      AI проанализирует ваши сделки и даст рекомендации по улучшению стратегии.
+    </p>
+    <div style="display:flex;gap:10px;align-items:end;">
+      <div class="field" style="flex:1;max-width:300px;">
+        <label>СТРАТЕГИЯ ДЛЯ АНАЛИЗА</label>
+        <select id="aiStrategy"></select>
+      </div>
+      <button class="btn btn-primary" onclick="runAIAnalysis()">🤖 АНАЛИЗИРОВАТЬ</button>
+    </div>
+    <div id="aiResult"></div>
+  </div>
+</div>
+
+<!-- TAB: ML -->
+<div class="tab-content" id="tab-ml">
+
+  <!-- Стат-карты ML -->
+  <div class="stats-row" style="grid-template-columns:repeat(5,1fr);margin-bottom:20px;">
+    <div class="stat-card">
+      <div class="stat-label">СОБРАНО СИГНАЛОВ</div>
+      <div class="stat-value" id="mlSignals">—</div>
+      <div class="stat-sub" id="mlLabeled">размечено: —</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">СДЕЛОК ВЗЯТО</div>
+      <div class="stat-value" id="mlTaken">—</div>
+      <div class="stat-sub">для обучения</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">OVERALL WR</div>
+      <div class="stat-value" id="mlWR">—</div>
+      <div class="stat-sub">по всем сигналам</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">МОДЕЛИ</div>
+      <div class="stat-value" id="mlModels">—</div>
+      <div class="stat-sub" id="mlActive">активных: —</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">РЕЖИМ ФИЛЬТРА</div>
+      <div class="stat-value" id="mlMode" style="font-size:16px;">—</div>
+      <div class="stat-sub">advisory/strict</div>
+    </div>
+  </div>
+
+  <!-- Управление ML -->
+  <div class="panel-card" style="margin-bottom:20px;">
+    <div class="section-title">// УПРАВЛЕНИЕ ML</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px;">
+      <div class="field">
+        <label>РЕЖИМ ФИЛЬТРА</label>
+        <select id="mlFilterMode">
+          <option value="advisory">ADVISORY (только советы)</option>
+          <option value="strict">STRICT (блокирует слабые сигналы)</option>
+          <option value="off">OFF (только сбор данных)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>THRESHOLD (мин P(win))</label>
+        <input type="number" id="mlThreshold" value="0.55" min="0" max="1" step="0.05"/>
+      </div>
+      <div style="align-self:end;">
+        <button class="btn btn-primary" onclick="applyMLConfig()">ПРИМЕНИТЬ</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Обучение моделей -->
+  <div class="panel-card" style="margin-bottom:20px;">
+    <div class="section-title">// ОБУЧЕНИЕ МОДЕЛЕЙ XGBOOST</div>
+    <p style="font-size:12px;color:var(--dim);font-family:var(--mono);margin-bottom:12px;">
+      Модель учится предсказывать P(win) каждой сделки на основе 50+ признаков рынка.<br>
+      Минимум для обучения: <b>100 размеченных сигналов</b> на стратегию.<br>
+      Walk-forward валидация защищает от overfitting.
+    </p>
+    <div style="display:flex;gap:10px;align-items:end;">
+      <div class="field" style="flex:1;max-width:280px;">
+        <label>СТРАТЕГИЯ</label>
+        <select id="mlTrainStrategy">
+          <option value="">ВСЕ СТРАТЕГИИ</option>
+        </select>
+      </div>
+      <div class="field" style="width:160px;">
+        <label>МИН САМПЛОВ</label>
+        <input type="number" id="mlMinSamples" value="100" min="30"/>
+      </div>
+      <button class="btn btn-success" onclick="trainModel()">🚀 ОБУЧИТЬ</button>
+      <button class="btn btn-primary" onclick="loadMLModels()">📋 СПИСОК МОДЕЛЕЙ</button>
+    </div>
+    <div id="mlTrainResult" style="margin-top:16px;"></div>
+  </div>
+
+  <!-- Список моделей -->
+  <div class="panel-card" style="margin-bottom:20px;">
+    <div class="section-title">// ИСТОРИЯ МОДЕЛЕЙ</div>
+    <div id="mlModelsList" style="font-family:var(--mono);font-size:12px;color:var(--dim);">
+      Нажмите "Список моделей" для загрузки
+    </div>
+  </div>
+
+  <!-- Feature Importance -->
+  <div class="panel-card" style="margin-bottom:20px;">
+    <div class="section-title">// FEATURE IMPORTANCE</div>
+    <div style="display:flex;gap:10px;align-items:end;margin-bottom:16px;">
+      <div class="field" style="flex:1;max-width:280px;">
+        <label>СТРАТЕГИЯ</label>
+        <select id="mlImportanceStrategy"></select>
+      </div>
+      <button class="btn btn-primary" onclick="loadFeatureImportance()">📊 ПОКАЗАТЬ</button>
+    </div>
+    <div id="mlImportanceContent"></div>
+  </div>
+
+  <!-- Оптимизация параметров -->
+  <div class="panel-card" style="margin-bottom:20px;">
+    <div class="section-title">// АВТО-ОПТИМИЗАЦИЯ ПАРАМЕТРОВ (BAYESIAN)</div>
+    <p style="font-size:12px;color:var(--dim);font-family:var(--mono);margin-bottom:12px;">
+      Optuna найдёт оптимальные SL/TP/breakeven/trailing для стратегии на исторических данных.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr) auto;gap:12px;align-items:end;">
+      <div class="field">
+        <label>СТРАТЕГИЯ</label>
+        <select id="mlOptStrategy"></select>
+      </div>
+      <div class="field">
+        <label>СИМВОЛ</label>
+        <select id="mlOptSymbol">
+          <option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option>
+          <option>BNBUSDT</option><option>XRPUSDT</option><option>DOGEUSDT</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>ДНЕЙ</label>
+        <input type="number" id="mlOptDays" value="60"/>
+      </div>
+      <div class="field">
+        <label>TRIALS</label>
+        <input type="number" id="mlOptTrials" value="50" min="10" max="500"/>
+      </div>
+      <div class="field">
+        <label>МЕТРИКА</label>
+        <select id="mlOptObjective">
+          <option value="sharpe">Sharpe Ratio</option>
+          <option value="profit_factor">Profit Factor</option>
+          <option value="roi">ROI</option>
+          <option value="total_pnl">Total PnL</option>
+        </select>
+      </div>
+      <button class="btn btn-success" onclick="optimizeStrategy()">⚡ OPTIMIZE</button>
+    </div>
+    <div id="mlOptResult" style="margin-top:16px;"></div>
+  </div>
+
+  <!-- Recent ML signals -->
+  <div class="panel-card">
+    <div class="section-title">// ПОСЛЕДНИЕ ML-СНИМКИ СИГНАЛОВ</div>
+    <button class="btn btn-sm btn-primary" onclick="loadRecentSignals()">🔄 Обновить</button>
+    <div id="mlSignalsTable" style="margin-top:14px;"></div>
+  </div>
+</div>
+
+<!-- TAB: NEWS & SENTIMENT -->
+<div class="tab-content" id="tab-news">
+
+  <!-- Sentiment стат-карты -->
+  <div class="stats-row" style="grid-template-columns:repeat(5,1fr);margin-bottom:20px;">
+    <div class="stat-card">
+      <div class="stat-label">OVERALL SENTIMENT</div>
+      <div class="stat-value" id="sentScore">—</div>
+      <div class="stat-sub" id="sentMagnitude">magnitude: —</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">NEWS SENTIMENT</div>
+      <div class="stat-value" id="newsScore">—</div>
+      <div class="stat-sub" id="newsCount">— новостей</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">TWITTER SENTIMENT</div>
+      <div class="stat-value" id="twitterScore">—</div>
+      <div class="stat-sub" id="tweetCount">— твитов</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">DEEP AI ANALYSIS</div>
+      <div class="stat-value" id="deepScore">—</div>
+      <div class="stat-sub">Claude AI</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">FRESHNESS</div>
+      <div class="stat-value" id="dataFresh" style="font-size:18px;">—</div>
+      <div class="stat-sub">мин назад</div>
+    </div>
+  </div>
+
+  <!-- Контролы -->
+  <div class="panel-card" style="margin-bottom:20px;">
+    <div class="section-title">// УПРАВЛЕНИЕ</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-primary" onclick="refreshNews()">🔄 ОБНОВИТЬ СЕЙЧАС</button>
+      <button class="btn btn-success" onclick="runDeepAnalysis()">🤖 DEEP AI ANALYSIS</button>
+      <button class="btn btn-sm btn-primary" onclick="loadNewsItems('')">📰 Все источники</button>
+      <button class="btn btn-sm btn-primary" onclick="loadNewsItems('coindesk')">CoinDesk</button>
+      <button class="btn btn-sm btn-primary" onclick="loadNewsItems('cointelegraph')">CoinTelegraph</button>
+      <button class="btn btn-sm btn-primary" onclick="loadNewsItems('cryptopanic')">CryptoPanic</button>
+      <button class="btn btn-sm btn-primary" onclick="loadNewsItems('twitter')">🐦 Twitter</button>
+      <button class="btn btn-sm btn-primary" onclick="loadNewsItems('reddit/CryptoCurrency')">📱 Reddit</button>
+    </div>
+  </div>
+
+  <!-- Deep AI Analysis -->
+  <div class="panel-card" id="deepAnalysisPanel" style="margin-bottom:20px;display:none;">
+    <div class="section-title">// AI ВЕРДИКТ ПО РЫНКУ</div>
+    <div id="deepAnalysisContent"></div>
+  </div>
+
+  <!-- Sentiment history график -->
+  <div class="panel-card" style="margin-bottom:20px;">
+    <div class="section-title">// SENTIMENT ЗА 24 ЧАСА</div>
+    <canvas id="sentimentCanvas" style="width:100%;height:200px;"></canvas>
+  </div>
+
+  <!-- News list -->
+  <div class="panel-card">
+    <div class="section-title">// ПОСЛЕДНИЕ НОВОСТИ / ТВИТЫ</div>
+    <div id="newsList" style="max-height:600px;overflow-y:auto;"></div>
+  </div>
+</div>
+
+<!-- TAB: SETTINGS -->
+<div class="tab-content" id="tab-settings">
+  <div class="panel-card" style="max-width:600px;">
+    <div class="section-title">// НАСТРОЙКИ РИСКА</div>
+    <div style="display:flex;flex-direction:column;gap:14px;">
+      <div class="field">
+        <label>Дневной max убыток (% от депо)</label>
+        <input type="number" id="setDailyLoss" value="5" min="1" max="30"/>
+      </div>
+      <div class="field">
+        <label>Max открытых позиций</label>
+        <input type="number" id="setMaxPos" value="4" min="1" max="20"/>
+      </div>
+      <div class="field">
+        <label>Риск на сделку (% от депо)</label>
+        <input type="number" id="setRisk" value="1.0" min="0.1" max="10" step="0.1"/>
+      </div>
+      <div class="field">
+        <label>Cooldown после убытка (мин)</label>
+        <input type="number" id="setCooldown" value="15" min="1"/>
+      </div>
+    </div>
+    <button class="btn btn-success" style="margin-top:16px;" onclick="notify('Применить в .env и перезапустить бэкенд','warning')">СОХРАНИТЬ</button>
+  </div>
+
+  <div class="panel-card" style="max-width:600px;margin-top:16px;">
+    <div class="section-title">// TELEGRAM</div>
+    <p style="font-size:12px;color:var(--dim);font-family:var(--mono);margin-bottom:12px;">
+      Настройка в файле <code>.env</code>:<br>
+      <code>TELEGRAM_BOT_TOKEN=...</code><br>
+      <code>TELEGRAM_CHAT_ID=...</code><br>
+      Создать бота: <a href="https://t.me/BotFather" style="color:var(--accent);">@BotFather</a>
+    </p>
+  </div>
+</div>
+
+</div>
+
+<div class="notification" id="notification"></div>
+
+<script>
+const API_URL = 'http://localhost:8000';
+const WS_URL = 'ws://localhost:8000/ws';
+let ws = null;
+let botRunning = false;
+let paperMode = false;
+let strategies = [];
+
+// ========== TABS ==========
+function switchTab(tabName) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-' + tabName).classList.add('active');
+
+  if (tabName === 'journal') loadJournal();
+  if (tabName === 'heatmap') loadHeatmap();
+  if (tabName === 'ai') populateAISelect();
+  if (tabName === 'ml') { loadMLStatus(); loadRecentSignals(); }
+  if (tabName === 'news') { loadSentimentStatus(); loadNewsItems(''); loadSentimentHistory(); }
+}
+
+// ========== WS ==========
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    document.getElementById('wsDot').classList.add('live');
+    document.getElementById('wsText').textContent = 'ONLINE';
+    addLog('WebSocket подключён', 'ok');
+  };
+  ws.onclose = () => {
+    document.getElementById('wsDot').classList.remove('live');
+    document.getElementById('wsText').textContent = 'ОФФЛАЙН';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'state_update') {
+      strategies = msg.strategies;
+      botRunning = msg.bot_running;
+      paperMode = msg.paper_mode;
+      renderStrategies();
+      updateRiskUI(msg.risk_status);
+      updateStats(msg);
+    } else if (msg.type === 'log') {
+      addLog(msg.message, msg.level);
+    }
+  };
+}
+
+// ========== API CALLS ==========
+async function api(path, options = {}) {
+  try {
+    const res = await fetch(API_URL + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+    return await res.json();
+  } catch (e) {
+    notify('Ошибка API: ' + e.message, 'error');
+    return null;
+  }
+}
+
+async function connectAPI() {
+  const key = document.getElementById('apiKey').value.trim();
+  const secret = document.getElementById('secretKey').value.trim();
+  const testnet = document.getElementById('tradeMode').value === 'testnet';
+  if (!key || !secret) return notify('Введите ключи', 'error');
+
+  const res = await api('/api/connect', {
+    method: 'POST',
+    body: JSON.stringify({ api_key: key, api_secret: secret, testnet }),
+  });
+  if (res?.success) {
+    document.getElementById('balance').textContent = res.balance.toFixed(2);
+    notify(`Подключено к Bybit ${testnet ? 'TESTNET' : 'MAINNET'}`, 'success');
+  } else {
+    notify('Ошибка подключения', 'error');
+  }
+}
+
+async function toggleBot() {
+  const action = botRunning ? 'stop' : 'start';
+  const res = await api('/api/bot/control', {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  });
+  if (res?.success) {
+    botRunning = res.running;
+    const btn = document.getElementById('masterBtn');
+    btn.textContent = botRunning ? '■ ОСТАНОВИТЬ' : '▶ ЗАПУСТИТЬ';
+    btn.className = 'btn ' + (botRunning ? 'btn-danger' : 'btn-success');
+    notify(botRunning ? 'Бот запущен' : 'Бот остановлен', botRunning ? 'success' : 'warning');
+  }
+}
+
+async function togglePaper() {
+  const res = await api('/api/bot/control', {
+    method: 'POST',
+    body: JSON.stringify({ action: paperMode ? 'paper_off' : 'paper_on' }),
+  });
+  paperMode = res.paper_mode;
+  document.getElementById('paperPill').style.display = paperMode ? 'block' : 'none';
+  notify('Paper Mode ' + (paperMode ? 'ВКЛ' : 'ВЫКЛ'), 'success');
+}
+
+async function resetKillSwitch() {
+  await api('/api/bot/control', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'kill_switch_reset' }),
+  });
+  notify('Kill Switch сброшен', 'success');
+}
+
+async function toggleStrategy(id) {
+  const s = strategies.find(x => x.id === id);
+  if (!s) return;
+  await api('/api/strategies/toggle', {
+    method: 'POST',
+    body: JSON.stringify({ strategy_id: id, enabled: !s.enabled }),
+  });
+}
+
+// ========== RENDER ==========
+function renderStrategies() {
+  const container = document.getElementById('strategiesList');
+  if (!container || !strategies.length) return;
+
+  let activeCount = 0;
+  container.innerHTML = strategies.map(s => {
+    const isOn = s.enabled && !s.auto_disabled;
+    if (isOn) activeCount++;
+
+    const wrColor = s.win_rate >= 60 ? 'var(--green)' : s.win_rate >= 50 ? 'var(--warn)' : 'var(--red)';
+    const pnlColor = s.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const evColor = s.expected_value > 0 ? 'var(--green)' : 'var(--red)';
+    const cardClass = s.auto_disabled ? 'auto-disabled' : (s.enabled ? '' : 'disabled');
+    const badgeClass = s.auto_disabled ? 'badge-auto' : (s.enabled ? 'badge-active' : 'badge-disabled');
+    const badgeText = s.auto_disabled ? '⚠ AUTO-OFF' : (s.enabled ? '● АКТИВНА' : '○ ВЫКЛ');
+
+    const bars = (s.history || []).slice(-12);
+    while (bars.length < 12) bars.unshift(null);
+    const chart = bars.map(b => b===null ? `<div class="mini-bar" style="height:4px;background:rgba(255,255,255,0.08)"></div>`
+      : `<div class="mini-bar ${b>=0?'pos':'neg'}" style="height:${Math.min(26,Math.max(4,Math.abs(b)*4))}px"></div>`).join('');
+
+    return `
+    <div class="strategy-card ${cardClass}">
+      <div class="strat-header">
+        <span class="strat-id">${s.id}</span>
+        <span class="strat-name">${s.name}</span>
+        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;border:1px solid ${s.expected_value>0?'rgba(0,255,136,0.4)':'rgba(255,51,102,0.4)'};color:${evColor};background:${s.expected_value>0?'rgba(0,255,136,0.07)':'rgba(255,51,102,0.07)'};">EV ${s.expected_value>0?'+':''}${s.expected_value}</span>
+        <span class="strat-badge ${badgeClass}">${badgeText}</span>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:8px;font-family:var(--mono);">${s.description} · <span style="color:var(--accent)">${s.symbol}</span> · TF ${s.timeframe}m</div>
+      <div class="strat-body">
+        <div class="strat-metric"><label>PNL</label><div class="val" style="color:${pnlColor}">${s.pnl>=0?'+':''}${s.pnl.toFixed(2)}</div></div>
+        <div class="strat-metric"><label>WR (цель ${s.edge_wr_target}%)</label><div class="val" style="color:${wrColor}">${s.win_rate}%</div></div>
+        <div class="strat-metric"><label>RR</label><div class="val" style="color:var(--accent)">1:${s.rr_ratio}</div></div>
+        <div class="strat-metric"><label>СДЕЛОК</label><div class="val">${s.trades}</div></div>
+      </div>
+      <div class="ev-row">
+        <span style="color:var(--dim);">МАТОЖИДАНИЕ:</span>
+        <span style="color:${evColor};font-weight:700;">${s.expected_value>0?'+':''}${s.expected_value} USDT/сделку</span>
+        <span style="color:var(--dim);margin-left:auto;">SL ${s.stop_loss_pct}% · TP ${s.take_profit_pct}% · ${s.leverage}x</span>
+      </div>
+      <div class="strat-footer">
+        <div class="mini-chart">${chart}</div>
+        <button class="btn btn-sm ${isOn?'btn-danger':'btn-success'}" onclick="toggleStrategy('${s.id}')">${isOn?'ВЫКЛ':'ВКЛ'}</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('activeStrats').textContent = `${activeCount}/${strategies.length}`;
+}
+
+function updateRiskUI(risk) {
+  if (!risk) return;
+  const pct = Math.abs(risk.daily_pnl_pct || 0);
+  document.getElementById('dailyLossPct').textContent = (risk.daily_pnl_pct || 0).toFixed(2) + '%';
+  const ratio = Math.min(100, (pct / risk.daily_max_loss_pct) * 100);
+  const bar = document.getElementById('dailyLossBar');
+  bar.style.width = ratio + '%';
+  bar.className = 'risk-bar-fill ' + (ratio > 80 ? 'red' : ratio > 50 ? 'warn' : 'green');
+
+  document.getElementById('positionsCount').textContent = `${risk.open_positions}/${risk.max_positions}`;
+  const posBar = document.getElementById('positionsBar');
+  posBar.style.width = (risk.open_positions / risk.max_positions * 100) + '%';
+
+  document.getElementById('openPositions').textContent = `${risk.open_positions}/${risk.max_positions}`;
+  document.getElementById('dailyLimit').textContent = risk.daily_max_loss_pct + '%';
+
+  const alertEl = document.getElementById('killSwitchAlert');
+  if (risk.kill_switch) {
+    alertEl.style.display = 'block';
+    alertEl.textContent = '🛑 KILL SWITCH: ' + risk.kill_switch_reason;
+  } else {
+    alertEl.style.display = 'none';
+  }
+}
+
+function updateStats(msg) {
+  if (!msg.strategies) return;
+  const totalPnl = msg.strategies.reduce((a, s) => a + s.pnl, 0);
+  const totalTrades = msg.strategies.reduce((a, s) => a + s.trades, 0);
+  const totalWins = msg.strategies.reduce((a, s) => a + s.wins, 0);
+  document.getElementById('sessionPnl').textContent = (totalPnl>=0?'+':'') + totalPnl.toFixed(2);
+  document.getElementById('sessionPnl').className = 'stat-value ' + (totalPnl>=0?'pos':'neg');
+  document.getElementById('totalTrades').textContent = totalTrades + ' сделок';
+  document.getElementById('winRate').textContent = totalTrades > 0 ? Math.round(totalWins / totalTrades * 100) + '%' : '0%';
+}
+
+// ========== BACKTEST ==========
+function populateBacktestSelect() {
+  const sel = document.getElementById('btStrategy');
+  sel.innerHTML = ['S1','S2','S3','S4','S5','S6','S7'].map(id =>
+    `<option value="${id}">${id}</option>`).join('');
+}
+
+async function runBacktest() {
+  document.getElementById('btLoading').style.display = 'block';
+  document.getElementById('btResults').classList.remove('show');
+
+  const req = {
+    strategy_id: document.getElementById('btStrategy').value,
+    symbol: document.getElementById('btSymbol').value,
+    interval: document.getElementById('btInterval').value,
+    days: parseInt(document.getElementById('btDays').value),
+    initial_balance: parseFloat(document.getElementById('btBalance').value),
+  };
+
+  const res = await api('/api/backtest', { method: 'POST', body: JSON.stringify(req) });
+  document.getElementById('btLoading').style.display = 'none';
+  if (!res?.metrics) return notify('Ошибка бэктеста', 'error');
+
+  const m = res.metrics;
+  document.getElementById('btMetrics').innerHTML = `
+    <div class="bt-metric"><div class="l">СДЕЛОК</div><div class="v">${m.trades}</div></div>
+    <div class="bt-metric"><div class="l">WIN RATE</div><div class="v" style="color:${m.win_rate>=50?'var(--green)':'var(--red)'}">${m.win_rate}%</div></div>
+    <div class="bt-metric"><div class="l">ИТОГО PnL</div><div class="v" style="color:${m.total_pnl>=0?'var(--green)':'var(--red)'}">${m.total_pnl>=0?'+':''}${m.total_pnl}</div></div>
+    <div class="bt-metric"><div class="l">ROI</div><div class="v" style="color:${m.roi_pct>=0?'var(--green)':'var(--red)'}">${m.roi_pct}%</div></div>
+    <div class="bt-metric"><div class="l">PROFIT FACTOR</div><div class="v">${m.profit_factor}</div></div>
+    <div class="bt-metric"><div class="l">MAX DRAWDOWN</div><div class="v" style="color:var(--red)">-${m.max_drawdown_pct}%</div></div>
+    <div class="bt-metric"><div class="l">SHARPE</div><div class="v">${m.sharpe}</div></div>
+    <div class="bt-metric"><div class="l">ЛУЧШАЯ</div><div class="v" style="color:var(--green)">+${m.best_trade}</div></div>
+    <div class="bt-metric"><div class="l">ХУДШАЯ</div><div class="v" style="color:var(--red)">${m.worst_trade}</div></div>
+    <div class="bt-metric"><div class="l">СЕРИЯ ПРИБЫЛЕЙ</div><div class="v">${m.longest_win_streak}</div></div>
+  `;
+  drawEquityCurve(res.equity_curve);
+  document.getElementById('btResults').classList.add('show');
+}
+
+function drawEquityCurve(curve) {
+  const canvas = document.getElementById('equityCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.offsetWidth;
+  const h = canvas.height = 300;
+  ctx.clearRect(0, 0, w, h);
+  if (!curve.length) return;
+  const min = Math.min(...curve), max = Math.max(...curve);
+  const padX = 40, padY = 30;
+  ctx.strokeStyle = '#0d2233';
+  for (let i = 0; i <= 4; i++) {
+    const y = padY + (h - padY*2) * i / 4;
+    ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(w-10, y); ctx.stroke();
+  }
+  // Линия
+  ctx.strokeStyle = '#00d4ff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  curve.forEach((v, i) => {
+    const x = padX + (w - padX - 10) * i / (curve.length - 1);
+    const y = h - padY - (h - padY*2) * (v - min) / (max - min || 1);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  // Заливка
+  ctx.lineTo(w-10, h-padY);
+  ctx.lineTo(padX, h-padY);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,212,255,0.1)';
+  ctx.fill();
+}
+
+// ========== JOURNAL ==========
+async function loadJournal() {
+  const trades = await api('/api/journal/trades?limit=200');
+  if (!trades?.length) {
+    document.getElementById('journalContent').innerHTML = `<div style="text-align:center;padding:40px;color:var(--dim);font-family:var(--mono);">НЕТ СДЕЛОК В ЖУРНАЛЕ</div>`;
+    return;
+  }
+  let html = `<table class="journal-table">
+    <thead><tr><th>ВРЕМЯ</th><th>СТРАТ</th><th>СИМВ</th><th>СТОР</th><th>ENTRY</th><th>EXIT</th><th>PNL USDT</th><th>%</th><th>EXIT</th></tr></thead><tbody>`;
+  trades.forEach(t => {
+    const color = t.pnl_usd >= 0 ? 'var(--green)' : 'var(--red)';
+    html += `<tr>
+      <td style="color:var(--dim);">${(t.timestamp||'').slice(0,16)}</td>
+      <td style="color:var(--accent);">${t.strategy_id}</td>
+      <td>${t.symbol}</td>
+      <td style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${t.side}</td>
+      <td>${t.entry_price?.toFixed(4)}</td>
+      <td>${t.exit_price?.toFixed(4) || '—'}</td>
+      <td style="color:${color};font-weight:700;">${t.pnl_usd>=0?'+':''}${t.pnl_usd?.toFixed(2) || 0}</td>
+      <td style="color:${color}">${t.pnl_pct?.toFixed(2) || 0}%</td>
+      <td>${t.exit_reason || '—'}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('journalContent').innerHTML = html;
+}
+
+function downloadCSV() {
+  window.location = API_URL + '/api/journal/export/csv';
+}
+function downloadExcel() {
+  window.location = API_URL + '/api/journal/export/excel';
+}
+
+// ========== HEATMAP ==========
+async function loadHeatmap() {
+  const data = await api('/api/journal/heatmap');
+  if (!data || !Object.keys(data).length) {
+    document.getElementById('heatmapContent').innerHTML = 'Недостаточно данных. Нужно ≥10 закрытых сделок.';
+    return;
+  }
+  let html = '';
+  const hours = Array.from({length:24}, (_,i) => i);
+  const days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+  for (const [sid, hourMap] of Object.entries(data)) {
+    html += `<h3 style="font-family:var(--mono);color:var(--accent);margin:20px 0 10px;">${sid}</h3>`;
+    html += `<div class="heatmap"><div></div>${hours.map(h=>`<div style="font-size:9px;color:var(--dim);text-align:center;">${h}</div>`).join('')}`;
+    days.forEach(day => {
+      html += `<div style="font-size:10px;color:var(--dim);font-family:var(--mono);">${day.slice(0,3)}</div>`;
+      hours.forEach(h => {
+        const val = hourMap[h]?.[day] || 0;
+        const intensity = Math.min(1, Math.abs(val) / 20);
+        const color = val > 0 ? `rgba(0,255,136,${intensity})` : val < 0 ? `rgba(255,51,102,${intensity})` : 'rgba(255,255,255,0.03)';
+        html += `<div class="heatmap-cell" style="background:${color};color:${intensity > 0.4 ? '#000' : 'var(--text)'}">${val ? val.toFixed(0) : ''}</div>`;
+      });
+    });
+    html += `</div>`;
+  }
+  document.getElementById('heatmapContent').innerHTML = html;
+}
+
+// ========== AI ==========
+function populateAISelect() {
+  const sel = document.getElementById('aiStrategy');
+  if (sel.options.length) return;
+  sel.innerHTML = strategies.map(s => `<option value="${s.id}">${s.id} - ${s.name}</option>`).join('');
+}
+
+async function runAIAnalysis() {
+  const id = document.getElementById('aiStrategy').value;
+  document.getElementById('aiResult').innerHTML = '<div class="ai-response">⏳ AI анализирует...</div>';
+  const res = await api(`/api/ai/analyze/${id}`);
+  if (!res?.available) {
+    document.getElementById('aiResult').innerHTML = `<div class="ai-response">${res?.message || 'AI недоступен. Проверьте ANTHROPIC_API_KEY в .env'}</div>`;
+    return;
+  }
+  document.getElementById('aiResult').innerHTML = `<div class="ai-response">${res.analysis}</div>`;
+}
+
+// ========== UTILS ==========
+function addLog(msg, type='info') {
+  const list = document.getElementById('logList');
+  const time = new Date().toTimeString().slice(0,8);
+  const item = document.createElement('div');
+  item.className = 'log-item';
+  item.innerHTML = `<span class="log-time">${time}</span><span class="log-msg ${type}">${msg}</span>`;
+  list.prepend(item);
+  if (list.children.length > 50) list.removeChild(list.lastChild);
+}
+
+function notify(msg, type='success') {
+  const el = document.getElementById('notification');
+  el.textContent = msg;
+  el.className = `notification ${type} show`;
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ========== INIT ==========
+populateBacktestSelect();
+connectWS();
+api('/api/strategies').then(r => { if (r) { strategies = r; renderStrategies(); }});
+
+// ============== ML FUNCTIONS ==============
+async function loadMLStatus() {
+  const res = await api('/api/ml/status');
+  if (!res) return;
+  const ds = res.data_stats || {};
+  document.getElementById('mlSignals').textContent = ds.total_signals ?? '0';
+  document.getElementById('mlLabeled').textContent = `размечено: ${ds.labeled_signals || 0}`;
+  document.getElementById('mlTaken').textContent = ds.trades_taken || '0';
+  document.getElementById('mlWR').textContent = (ds.overall_wr || 0) + '%';
+  document.getElementById('mlModels').textContent = ds.models_total || '0';
+  document.getElementById('mlActive').textContent = `активных: ${ds.active_models || 0}`;
+  document.getElementById('mlMode').textContent = (res.filter_mode || 'off').toUpperCase();
+  document.getElementById('mlFilterMode').value = res.filter_mode || 'advisory';
+  document.getElementById('mlThreshold').value = res.predictor_status?.default_threshold || 0.55;
+
+  // Селекторы стратегий
+  ['mlTrainStrategy','mlImportanceStrategy','mlOptStrategy'].forEach(id => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    const opts = strategies.map(s => `<option value="${s.id}">${s.id} - ${s.name}</option>`).join('');
+    sel.innerHTML = (id === 'mlTrainStrategy' ? '<option value="">ВСЕ СТРАТЕГИИ</option>' : '') + opts;
+    if (cur) sel.value = cur;
+  });
+
+  // Per-strategy таблица
+  if (ds.per_strategy?.length) {
+    let html = `<table class="journal-table" style="margin-top:14px;">
+      <thead><tr><th>СТРАТ</th><th>ВСЕГО</th><th>РАЗМЕЧ.</th><th>ПОБЕД</th><th>WR</th><th>AVG R</th></tr></thead><tbody>`;
+    ds.per_strategy.forEach(s => {
+      html += `<tr>
+        <td style="color:var(--accent)">${s.strategy_id}</td>
+        <td>${s.total}</td>
+        <td>${s.labeled}</td>
+        <td>${s.wins}</td>
+        <td style="color:${s.wr>=55?'var(--green)':s.wr>=45?'var(--warn)':'var(--red)'}">${s.wr}%</td>
+        <td style="color:${s.avg_r>=0?'var(--green)':'var(--red)'}">${s.avg_r>=0?'+':''}${s.avg_r}R</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    document.getElementById('mlModelsList').innerHTML = html + document.getElementById('mlModelsList').innerHTML;
+  }
+}
+
+async function applyMLConfig() {
+  const res = await api('/api/ml/config', {
+    method: 'POST',
+    body: JSON.stringify({
+      filter_mode: document.getElementById('mlFilterMode').value,
+      default_threshold: parseFloat(document.getElementById('mlThreshold').value),
+    }),
+  });
+  if (res?.success) {
+    notify('Настройки ML применены', 'success');
+    loadMLStatus();
+  }
+}
+
+async function trainModel() {
+  const sid = document.getElementById('mlTrainStrategy').value;
+  const minSamples = parseInt(document.getElementById('mlMinSamples').value);
+  const resultEl = document.getElementById('mlTrainResult');
+  resultEl.innerHTML = `<div style="padding:14px;background:rgba(0,212,255,0.05);border-radius:6px;font-family:var(--mono);color:var(--accent);">⏳ Обучение запущено... может занять до минуты для всех стратегий</div>`;
+
+  const res = await api('/api/ml/train', {
+    method: 'POST',
+    body: JSON.stringify({ strategy_id: sid || null, min_samples: minSamples }),
+  });
+
+  if (!res) { resultEl.innerHTML = '<div style="color:var(--red)">Ошибка</div>'; return; }
+
+  // Если одна стратегия — простой результат
+  if (sid) {
+    if (res.success) {
+      const m = res.metrics;
+      resultEl.innerHTML = `
+        <div style="padding:16px;background:rgba(0,255,136,0.07);border-left:3px solid var(--green);border-radius:6px;font-family:var(--mono);">
+          <div style="color:var(--green);font-weight:700;margin-bottom:8px;">✅ Модель ${res.version} обучена</div>
+          <div>Сэмплов: ${res.samples}</div>
+          <div>Accuracy: ${m.accuracy} | Precision: ${m.precision} | Recall: ${m.recall}</div>
+          <div>F1: ${m.f1} | ROC-AUC: ${m.roc_auc}</div>
+        </div>`;
+    } else {
+      resultEl.innerHTML = `<div style="padding:14px;color:var(--red);">${res.error}</div>`;
+    }
+  } else {
+    // Несколько стратегий
+    let html = '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">';
+    Object.entries(res).forEach(([sid, r]) => {
+      if (r.success) {
+        html += `<div style="padding:10px;border:1px solid rgba(0,255,136,0.3);border-radius:6px;font-family:var(--mono);font-size:12px;">
+          <span style="color:var(--green)">✅ ${sid}</span>: F1=${r.metrics.f1}, AUC=${r.metrics.roc_auc} (${r.samples} сэмплов)
+        </div>`;
+      } else {
+        html += `<div style="padding:10px;border:1px solid rgba(255,51,102,0.3);border-radius:6px;font-family:var(--mono);font-size:12px;color:var(--red);">
+          ❌ ${sid}: ${r.error}
+        </div>`;
+      }
+    });
+    html += '</div>';
+    resultEl.innerHTML = html;
+  }
+  loadMLStatus();
+}
+
+async function loadMLModels() {
+  const res = await api('/api/ml/models');
+  if (!res?.length) {
+    document.getElementById('mlModelsList').innerHTML = '<div style="color:var(--dim);font-family:var(--mono);">Моделей ещё не обучено</div>';
+    return;
+  }
+  let html = `<table class="journal-table">
+    <thead><tr><th>ВЕРСИЯ</th><th>СТРАТ</th><th>ОБУЧЕНА</th><th>СЭМПЛОВ</th><th>F1</th><th>AUC</th><th>СТАТУС</th></tr></thead><tbody>`;
+  res.forEach(m => {
+    html += `<tr>
+      <td style="color:var(--accent);font-size:10px;">${m.version}</td>
+      <td>${m.strategy_id}</td>
+      <td style="color:var(--dim);">${m.trained_at?.slice(0,16)}</td>
+      <td>${m.samples_count}</td>
+      <td style="color:${m.f1_score>0.55?'var(--green)':'var(--warn)'}">${m.f1_score?.toFixed(3)}</td>
+      <td>${m.roc_auc?.toFixed(3)}</td>
+      <td>${m.active ? '<span style="color:var(--green)">● ACTIVE</span>' : '<span style="color:var(--dim)">ARCHIVED</span>'}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('mlModelsList').innerHTML = html;
+}
+
+async function loadFeatureImportance() {
+  const sid = document.getElementById('mlImportanceStrategy').value;
+  if (!sid) return;
+  const res = await api(`/api/ml/feature-importance/${sid}`);
+  const el = document.getElementById('mlImportanceContent');
+  if (!res?.available) {
+    el.innerHTML = '<div style="color:var(--dim);font-family:var(--mono);">Модель не обучена</div>';
+    return;
+  }
+  const m = res.metrics;
+  let html = `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px;">
+    <div class="bt-metric"><div class="l">ACCURACY</div><div class="v">${(m.accuracy*100).toFixed(1)}%</div></div>
+    <div class="bt-metric"><div class="l">PRECISION</div><div class="v">${(m.precision*100).toFixed(1)}%</div></div>
+    <div class="bt-metric"><div class="l">RECALL</div><div class="v">${(m.recall*100).toFixed(1)}%</div></div>
+    <div class="bt-metric"><div class="l">F1</div><div class="v">${m.f1?.toFixed(3)}</div></div>
+    <div class="bt-metric"><div class="l">ROC-AUC</div><div class="v" style="color:${m.roc_auc>0.6?'var(--green)':'var(--warn)'}">${m.roc_auc?.toFixed(3)}</div></div>
+  </div>`;
+  html += `<div style="font-family:var(--mono);font-size:11px;color:var(--dim);margin-bottom:10px;">Топ-15 признаков по важности:</div>`;
+  const maxImp = Math.max(...res.top_features.map(f => f[1]));
+  res.top_features.forEach(([name, imp]) => {
+    const pct = (imp / maxImp * 100).toFixed(0);
+    html += `<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;font-family:var(--mono);font-size:11px;">
+      <span style="width:200px;color:var(--text);">${name}</span>
+      <div style="flex:1;background:rgba(255,255,255,0.05);height:14px;border-radius:3px;overflow:hidden;">
+        <div style="width:${pct}%;height:100%;background:linear-gradient(90deg,var(--accent),var(--green));"></div>
+      </div>
+      <span style="color:var(--accent);width:60px;text-align:right;">${imp.toFixed(3)}</span>
+    </div>`;
+  });
+  el.innerHTML = html;
+}
+
+async function optimizeStrategy() {
+  const req = {
+    strategy_id: document.getElementById('mlOptStrategy').value,
+    symbol: document.getElementById('mlOptSymbol').value,
+    days: parseInt(document.getElementById('mlOptDays').value),
+    n_trials: parseInt(document.getElementById('mlOptTrials').value),
+    objective: document.getElementById('mlOptObjective').value,
+  };
+  const el = document.getElementById('mlOptResult');
+  el.innerHTML = `<div style="padding:14px;color:var(--accent);font-family:var(--mono);">⏳ Оптимизация (${req.n_trials} trials)... может занять 1-5 минут</div>`;
+
+  const res = await api('/api/ml/optimize', { method: 'POST', body: JSON.stringify(req) });
+  if (!res?.success) {
+    el.innerHTML = `<div style="color:var(--red);padding:14px;">${res?.error || 'Ошибка'}</div>`;
+    return;
+  }
+  const def = res.default_metrics, opt = res.optimized_metrics;
+  el.innerHTML = `
+    <div style="padding:16px;background:rgba(0,255,136,0.05);border-left:3px solid var(--green);border-radius:6px;">
+      <div style="color:var(--green);font-weight:700;font-family:var(--mono);margin-bottom:10px;">
+        ✅ Оптимизация завершена. Best ${res.objective}: ${res.best_score}
+      </div>
+      <div style="font-family:var(--mono);font-size:12px;margin-bottom:14px;">
+        ${Object.entries(res.best_params).map(([k,v]) => `<span style="color:var(--accent)">${k}</span>: ${v.toFixed(2)}`).join(' · ')}
+      </div>
+      <table class="journal-table">
+        <thead><tr><th></th><th>ДО</th><th>ПОСЛЕ</th><th>ΔPnL</th></tr></thead>
+        <tbody>
+          <tr><td>Trades</td><td>${def.trades}</td><td>${opt.trades}</td><td>—</td></tr>
+          <tr><td>Win Rate</td><td>${def.win_rate}%</td><td>${opt.win_rate}%</td><td style="color:${opt.win_rate>=def.win_rate?'var(--green)':'var(--red)'}">${(opt.win_rate-def.win_rate).toFixed(1)}%</td></tr>
+          <tr><td>Total PnL</td><td>${def.total_pnl}</td><td>${opt.total_pnl}</td><td style="color:${opt.total_pnl>=def.total_pnl?'var(--green)':'var(--red)'}">${(opt.total_pnl-def.total_pnl).toFixed(2)}</td></tr>
+          <tr><td>Profit Factor</td><td>${def.profit_factor}</td><td>${opt.profit_factor}</td><td>—</td></tr>
+          <tr><td>Max DD</td><td>${def.max_drawdown_pct}%</td><td>${opt.max_drawdown_pct}%</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>`;
+}
+
+async function loadRecentSignals() {
+  const res = await api('/api/ml/signals/recent?limit=30');
+  if (!res?.length) {
+    document.getElementById('mlSignalsTable').innerHTML = '<div style="color:var(--dim);font-family:var(--mono);">Сигналов ещё нет</div>';
+    return;
+  }
+  let html = `<table class="journal-table">
+    <thead><tr><th>ВРЕМЯ</th><th>СТРАТ</th><th>СИМВ</th><th>СТОР</th><th>ENTRY</th><th>ML P(win)</th><th>ВЗЯТА</th><th>OUTCOME</th><th>R</th></tr></thead><tbody>`;
+  res.forEach(s => {
+    const p = s.ml_prediction;
+    const pColor = p === null ? 'var(--dim)' : p >= 0.55 ? 'var(--green)' : p >= 0.45 ? 'var(--warn)' : 'var(--red)';
+    const outColor = s.outcome === 'win' ? 'var(--green)' : s.outcome === 'loss' ? 'var(--red)' : 'var(--dim)';
+    html += `<tr>
+      <td style="color:var(--dim);">${(s.timestamp||'').slice(11,19)}</td>
+      <td style="color:var(--accent)">${s.strategy_id}</td>
+      <td>${s.symbol}</td>
+      <td style="color:${s.action==='BUY'?'var(--green)':'var(--red)'}">${s.action}</td>
+      <td>${s.entry_price?.toFixed(4)}</td>
+      <td style="color:${pColor};font-weight:700;">${p !== null ? p.toFixed(3) : '—'}</td>
+      <td>${s.trade_taken ? '✅' : '⏭'}</td>
+      <td style="color:${outColor}">${s.outcome || '—'}</td>
+      <td style="color:${s.pnl_r>0?'var(--green)':s.pnl_r<0?'var(--red)':'var(--dim)'}">${s.pnl_r !== null ? (s.pnl_r>0?'+':'')+s.pnl_r.toFixed(2)+'R' : '—'}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('mlSignalsTable').innerHTML = html;
+}
+
+// ============== /ML FUNCTIONS ==============
+
+// ============== NEWS & SENTIMENT ==============
+async function loadSentimentStatus() {
+  const res = await api('/api/news/sentiment');
+  if (!res) return;
+  const cur = res.current || {};
+  const news = cur.news_sentiment || {};
+  const tw = cur.twitter_sentiment || {};
+  const deep = res.deep_analysis || {};
+
+  const scoreColor = s => s > 0.2 ? 'var(--green)' : s < -0.2 ? 'var(--red)' : 'var(--warn)';
+  const scoreEmoji = s => s > 0.3 ? '🟢' : s > 0.1 ? '🟡' : s < -0.3 ? '🔴' : s < -0.1 ? '🟠' : '⚪';
+
+  const overall = cur.overall_score || 0;
+  document.getElementById('sentScore').textContent = `${scoreEmoji(overall)} ${overall>=0?'+':''}${overall.toFixed(2)}`;
+  document.getElementById('sentScore').style.color = scoreColor(overall);
+  document.getElementById('sentMagnitude').textContent = `magnitude: ${(cur.overall_magnitude || 0).toFixed(2)}`;
+
+  document.getElementById('newsScore').textContent = `${(news.score || 0).toFixed(2)}`;
+  document.getElementById('newsScore').style.color = scoreColor(news.score || 0);
+  document.getElementById('newsCount').textContent = `${cur.news_count || 0} новостей`;
+
+  document.getElementById('twitterScore').textContent = `${(tw.score || 0).toFixed(2)}`;
+  document.getElementById('twitterScore').style.color = scoreColor(tw.score || 0);
+  document.getElementById('tweetCount').textContent = `${cur.tweet_count || 0} твитов`;
+
+  if (deep.available) {
+    document.getElementById('deepScore').textContent = (deep.overall_score >= 0 ? '+' : '') + (deep.overall_score || 0).toFixed(2);
+    document.getElementById('deepScore').style.color = scoreColor(deep.overall_score || 0);
+    showDeepAnalysis(deep);
+  } else {
+    document.getElementById('deepScore').textContent = '—';
+  }
+
+  const fresh = res.features?.sentiment_freshness_min || 0;
+  document.getElementById('dataFresh').textContent = fresh > 60 ? Math.round(fresh/60) + 'h' : Math.round(fresh) + 'm';
+}
+
+function showDeepAnalysis(deep) {
+  if (!deep.available) return;
+  const panel = document.getElementById('deepAnalysisPanel');
+  panel.style.display = 'block';
+  const themes = (deep.key_themes || []).map(t => `<span style="background:rgba(0,212,255,0.1);border:1px solid var(--accent);padding:3px 10px;border-radius:12px;font-size:11px;margin:3px;display:inline-block;">${t}</span>`).join('');
+  const risks = (deep.risk_factors || []).map(t => `<span style="background:rgba(255,51,102,0.1);border:1px solid var(--red);padding:3px 10px;border-radius:12px;font-size:11px;margin:3px;display:inline-block;">⚠ ${t}</span>`).join('');
+  const bulls = (deep.bullish_catalysts || []).map(t => `<span style="background:rgba(0,255,136,0.1);border:1px solid var(--green);padding:3px 10px;border-radius:12px;font-size:11px;margin:3px;display:inline-block;">🚀 ${t}</span>`).join('');
+
+  document.getElementById('deepAnalysisContent').innerHTML = `
+    <div style="font-size:14px;line-height:1.6;padding:14px;background:rgba(0,212,255,0.05);border-left:3px solid var(--accent);border-radius:6px;margin-bottom:14px;">
+      ${deep.summary || ''}
+    </div>
+    <div style="margin-bottom:10px;"><b style="color:var(--dim);font-size:11px;font-family:var(--mono);">КЛЮЧЕВЫЕ ТЕМЫ:</b><br>${themes}</div>
+    ${risks ? `<div style="margin-bottom:10px;"><b style="color:var(--dim);font-size:11px;font-family:var(--mono);">РИСК-ФАКТОРЫ:</b><br>${risks}</div>` : ''}
+    ${bulls ? `<div><b style="color:var(--dim);font-size:11px;font-family:var(--mono);">БЫЧЬИ КАТАЛИЗАТОРЫ:</b><br>${bulls}</div>` : ''}`;
+}
+
+async function refreshNews() {
+  notify('Обновление новостей... 10-30 сек', 'success');
+  const res = await api('/api/news/refresh', { method: 'POST' });
+  if (res?.overall_score !== undefined) {
+    notify(`Sentiment ${res.overall_score >= 0 ? '+' : ''}${res.overall_score} (${res.news_count} новостей, ${res.tweet_count} твитов)`, 'success');
+    loadSentimentStatus();
+    loadNewsItems('');
+  }
+}
+
+async function runDeepAnalysis() {
+  notify('AI анализирует... ~10 сек', 'success');
+  const res = await api('/api/news/deep-analysis', { method: 'POST' });
+  if (res?.available) {
+    showDeepAnalysis(res);
+    notify('AI-анализ завершён', 'success');
+  } else {
+    notify(res?.reason || res?.error || 'AI недоступен', 'error');
+  }
+}
+
+async function loadNewsItems(sourceFilter) {
+  let url = '/api/news/items?limit=80';
+  if (sourceFilter) {
+    if (sourceFilter === 'twitter') {
+      url += '&source=twitter';
+    } else {
+      url += '&source=' + encodeURIComponent(sourceFilter);
+    }
+  }
+  const res = await api(url);
+  if (!res?.length) {
+    document.getElementById('newsList').innerHTML = '<div style="text-align:center;padding:30px;color:var(--dim);font-family:var(--mono);">НЕТ ДАННЫХ. Нажмите ОБНОВИТЬ.</div>';
+    return;
+  }
+  let html = '';
+  res.forEach(item => {
+    const score = item.sentiment_score || 0;
+    const color = score > 0.2 ? 'var(--green)' : score < -0.2 ? 'var(--red)' : score === 0 ? 'var(--dim)' : 'var(--warn)';
+    const emoji = score > 0.3 ? '🟢' : score > 0.1 ? '🟡' : score < -0.3 ? '🔴' : score < -0.1 ? '🟠' : '⚪';
+    const sourceIcon = item.source === 'twitter' ? '🐦' : item.source?.startsWith('reddit') ? '📱' : '📰';
+    const time = (item.published_at || item.fetched_at || '').slice(0, 16);
+
+    html += `
+      <div style="padding:12px 14px;margin-bottom:8px;background:rgba(255,255,255,0.02);border-radius:8px;border-left:3px solid ${color};">
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px;font-family:var(--mono);font-size:10px;color:var(--dim);">
+          <span>${sourceIcon} ${item.source}</span>
+          <span>${time}</span>
+          <span style="color:${color};font-weight:700;margin-left:auto;">${emoji} ${score >= 0 ? '+' : ''}${score.toFixed(2)}</span>
+          ${item.bull_hits ? `<span style="color:var(--green);">🟢 ${item.bull_hits}</span>` : ''}
+          ${item.bear_hits ? `<span style="color:var(--red);">🔴 ${item.bear_hits}</span>` : ''}
+        </div>
+        <div style="font-size:14px;line-height:1.4;margin-bottom:4px;">
+          ${item.url ? `<a href="${item.url}" target="_blank" style="color:var(--text);text-decoration:none;">${item.title || '(no title)'}</a>` : (item.title || '')}
+        </div>
+        ${item.text && item.text !== item.title ? `<div style="font-size:12px;color:var(--dim);font-family:var(--mono);">${item.text.slice(0,200)}${item.text.length > 200 ? '...' : ''}</div>` : ''}
+      </div>`;
+  });
+  document.getElementById('newsList').innerHTML = html;
+}
+
+async function loadSentimentHistory() {
+  const res = await api('/api/news/history?hours=24');
+  if (!res?.length) return;
+  const canvas = document.getElementById('sentimentCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.offsetWidth;
+  const h = canvas.height = 200;
+  ctx.clearRect(0, 0, w, h);
+
+  const padX = 50, padY = 30;
+  // Сетка
+  ctx.strokeStyle = '#0d2233';
+  ctx.fillStyle = '#3a5a70';
+  ctx.font = '10px monospace';
+  // Горизонтальные линии и метки
+  [-1, -0.5, 0, 0.5, 1].forEach(v => {
+    const y = padY + (h - padY*2) * (1 - (v + 1) / 2);
+    ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(w-10, y); ctx.stroke();
+    ctx.fillText(v.toFixed(1), 5, y + 3);
+  });
+  // Zero line
+  const zeroY = padY + (h - padY*2) / 2;
+  ctx.strokeStyle = '#3a5a70';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(padX, zeroY); ctx.lineTo(w-10, zeroY); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Линия sentiment
+  ctx.strokeStyle = '#00d4ff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  res.forEach((item, i) => {
+    const x = padX + (w - padX - 10) * i / (res.length - 1 || 1);
+    const y = padY + (h - padY*2) * (1 - (item.score + 1) / 2);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Точки
+  res.forEach((item, i) => {
+    const x = padX + (w - padX - 10) * i / (res.length - 1 || 1);
+    const y = padY + (h - padY*2) * (1 - (item.score + 1) / 2);
+    ctx.fillStyle = item.score > 0.1 ? '#00ff88' : item.score < -0.1 ? '#ff3366' : '#ffaa00';
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
+  });
+}
+// ============== /NEWS & SENTIMENT ==============
+
+addLog('Frontend готов. Запустите backend: python backend/main.py', 'info');
+</script>
+</body>
+</html>
