@@ -1083,25 +1083,24 @@ class TelegramCommander:
     async def send_document(self, chat_id: str, file_path: str,
                              filename: str, caption: str = "") -> bool:
         """Отправить файл через Telegram (multipart/form-data)."""
-        import aiofiles
         from pathlib import Path
         try:
             session = await self._get_session()
             url = f"{self._base_url}/sendDocument"
-            async with aiofiles.open(file_path, "rb") as fh:
-                data = aiohttp.FormData()
-                data.add_field("chat_id", str(chat_id))
-                data.add_field("caption", caption, content_type="text/plain")
-                data.add_field("parse_mode", "HTML")
-                data.add_field(
-                    "document",
-                    await fh.read(),
-                    filename=filename,
-                    content_type="application/octet-stream",
-                )
-                async with session.post(url, data=data) as resp:
-                    result = await resp.json()
-                    return result.get("ok", False)
+            file_bytes = Path(file_path).read_bytes()
+            data = aiohttp.FormData()
+            data.add_field("chat_id", str(chat_id))
+            data.add_field("caption", caption, content_type="text/plain")
+            data.add_field("parse_mode", "HTML")
+            data.add_field(
+                "document",
+                file_bytes,
+                filename=filename,
+                content_type="application/octet-stream",
+            )
+            async with session.post(url, data=data) as resp:
+                result = await resp.json()
+                return result.get("ok", False)
         except Exception as e:
             logger.error(f"send_document: {e}")
             return False

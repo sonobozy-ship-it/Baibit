@@ -89,12 +89,53 @@ class AIAnalyzer:
 
     # ── Внутренний вызов LLM ─────────────────────────────────────────────────
 
+    _FALLBACK_PROMPT = "Analyze current market state and return WAIT if signal is unclear."
+
+    @staticmethod
+    def _clean_messages(messages: list) -> list:
+        """Удаляет пустые text-блоки, которые вызывают API Error 400."""
+        cleaned = []
+        removed = 0
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                if content.strip():
+                    cleaned.append(msg)
+                else:
+                    removed += 1
+            elif isinstance(content, list):
+                blocks = []
+                for block in content:
+                    if block.get("type") == "text":
+                        if (block.get("text") or "").strip():
+                            blocks.append(block)
+                        else:
+                            removed += 1
+                    else:
+                        blocks.append(block)
+                if blocks:
+                    cleaned.append({**msg, "content": blocks})
+                else:
+                    removed += 1
+            else:
+                cleaned.append(msg)
+        if removed:
+            logger.debug(f"[AIAnalyzer] Удалено {removed} пустых text-блоков перед API-вызовом")
+        return cleaned
+
     async def _ask(self, prompt: str, model_hint: str = "analysis") -> Optional[str]:
         """Асинхронный вызов провайдера."""
         if not self.enabled:
             return None
+        if not (prompt or "").strip():
+            logger.warning("[AIAnalyzer] Пустой prompt — подставляю fallback")
+            prompt = self._FALLBACK_PROMPT
         try:
             # Для Anthropic меняем модель по задаче; для остальных — берём что есть
+            msgs = self._clean_messages([{"role": "user", "content": prompt}])
+            if not msgs:
+                logger.warning("[AIAnalyzer] После очистки messages пусты — пропуск")
+                return None
             if ORCHESTRATOR_AVAILABLE and ANTHROPIC_AVAILABLE and isinstance(self._provider, AnthropicProvider):
                 model = {
                     "analysis": self._MODEL_ANALYSIS,
@@ -105,13 +146,13 @@ class AIAnalyzer:
                 tmp = AP(api_key=self._provider._client.api_key, model=model)
                 return await tmp.complete(
                     system=_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=msgs,
                     max_tokens=1500 if model_hint == "analysis" else 600,
                 )
             else:
                 return await self._provider.complete(
                     system=_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=msgs,
                     max_tokens=1500 if model_hint == "analysis" else 600,
                 )
         except Exception as e:
