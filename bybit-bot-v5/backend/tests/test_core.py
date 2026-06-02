@@ -286,16 +286,19 @@ def test_kill_switch_fires_on_drawdown():
 
 
 def test_kill_switch_disabled_when_zero():
-    """Глобальный лимит убытков = 0 не срабатывает."""
+    """Глобальный дневной и недельный лимит убытков отключён (100%) — kill switch не срабатывает."""
     from risk_manager import RiskManager
-    rm = RiskManager(daily_max_loss_pct=100.0, max_daily_losses=0)
+    rm = RiskManager(
+        daily_max_loss_pct=100.0,
+        weekly_max_loss_pct=100.0,
+        max_daily_losses=0,
+    )
     rm.check_daily_reset(1000.0)
     for _ in range(20):
         rm.register_trade_result("S1", -10.0)
     result = rm.can_open_trade("S1", 800.0)
-    # При drawdown=20% и daily_max_loss_pct=100% должно быть разрешено
-    assert not rm.kill_switch or rm.kill_switch_reason == "", \
-        f"Kill switch не должен срабатывать при max_daily_losses=0 и drawdown 20%"
+    assert not rm.kill_switch, \
+        f"Kill switch не должен срабатывать при daily=100% weekly=100%: {rm.kill_switch_reason}"
 
 
 def test_strategy_daily_loss_limit():
